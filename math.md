@@ -17,7 +17,7 @@
 | $\mu$ | EMA 衰减系数 | `EMA_DECAY=0.99`，[L27](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L27) |
 | $L$ | 序列长度 / token 数 | `SEQ_LEN=24`，[L23](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L23) |
 | $d$ | 潜空间维度 | `DIM=32`，[L25](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L25) |
-| $\mathcal{V}$ | 词表（含 `[MASK]`） | `vocab_size=len(chars)+1`，[L548](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L548)；本语料 $|\mathcal{V}|=78$ |
+| $\mathcal{V}$ | 输出词表（不含 `[MASK]`） | 输出有效词表 $|\mathcal{V}|=77$；`vocab_size=len(chars)+1=78` 含输入专用 `[MASK]`（[L548](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L548)） |
 | $z_0, z_1, z_t$ | 噪声、干净潜变量、时刻 $t$ 插值 | `noise`, `target`, `z_t`，[L404-L409](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L404-L409) |
 | $u_t$ | 真实速度场 | `velocity_target`，[L410](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L410) |
 | $W$ | 世界状态 | 概念量，本脚本不实现 |
@@ -234,16 +234,16 @@ $T$ 取值于有限集 $\mathcal{V}^L$，故
 
 $$H(T) \le L \log_2 |\mathcal{V}|. \tag{1}$$
 
-本模型语料有 77 个不同字符，加 `[MASK]` 得 $|\mathcal{V}| = 78$（[L541-L548](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L541-L548)），于是
+本模型语料有 77 个不同字符（[L541-L548](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L541-L548)）；`[MASK]` 只出现在输入上下文、从不进入输出文本，故输出词表 $|\mathcal{V}|=77$，于是
 
-$$H(T) \le 24 \log_2 78 \approx 150.85\ \text{bit}. \tag{2}$$
+$$H(T) \le 24 \log_2 77 \approx 150.40\ \text{bit}. \tag{2}$$
 
 这是一个**与 $Z$ 无关的有限常数**。
 
 **(b) $T$ 是 $Z$ 的确定函数。**
 因 $T = g(Z)$，给定 $Z$ 时 $T$ 完全确定，$H(T\mid Z)=0$，故
 
-$$I(Z;T) = H(T) - H(T\mid Z) = H(T) \le 150.85\ \text{bit}. \tag{3}$$
+$$I(Z;T) = H(T) - H(T\mid Z) = H(T) \le 150.40\ \text{bit}. \tag{3}$$
 
 **(c) 连续潜变量的量化熵无界。**
 设 $Z$ 有密度。将 $Z$ 量化到分辨率为 $\delta$ 的网格，得离散变量 $Z_\delta$。$Z$ 有 $Ld = 24 \times 32 = 768$ 个实数维度，高分辨率极限下（单位统一为 bit）
@@ -390,19 +390,19 @@ $$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1 - \sigma_j)\bigr]
 
 **(b) 前向：三种可并行的量化。**
 
-**FSQ**（无码本，最省显存）逐维取整并用直通估计梯度：
+**FSQ**（无码本，最省显存）逐维取整并用直通估计梯度；$L_i$ 需为奇数，码字关于 0 对称：
 
-$$\hat z_i=\mathrm{round}\big((L_i-1)\,\mathrm{sigmoid}(z_i)\big),\qquad
+$$\hat z_i=\frac{\mathrm{round}\!\big(\tfrac{L_i-1}{2}\tanh(z_i)\big)}{(L_i-1)/2},\qquad
 \hat z_i\leftarrow z_i+\mathrm{sg}\big(\hat z_i-z_i\big). \tag{18}$$
 
 码本大小为 $\prod_i L_i$，计算是纯逐元素，没有 $K$ 维距离矩阵。
 
-**VQ / RVQ**（固定码本，码率可控）：
+**VQ / RVQ**（固定码本，码率可控；码本经 EMA 更新，而非梯度）：
 
 $$k^{\star}=\arg\min_k\|z-e_k\|_2^2,\qquad
-\mathcal L_{\mathrm{VQ}}=\|z-\mathrm{sg}[e_{k^{\star}}]\|^2+\gamma\,\|\mathrm{sg}[z]-e_{k^{\star}}\|^2, \tag{19}$$
+\mathcal L_{\mathrm{VQ}}=\gamma\,\big\|z-\mathrm{sg}[e_{k^{\star}}]\big\|^2, \tag{19}$$
 
-其中距离矩阵可用 $d_{bk}=\|z_b\|^2+\|e_k\|^2-2z_be_k^\top$ 一次矩阵乘得到。RVQ 再把残差逐级量化：
+其中距离矩阵可用 $d_{bk}=\|z_b\|^2+\|e_k\|^2-2z_be_k^\top$ 一次矩阵乘得到，码本向量用 EMA 追踪分配到该码字的编码器输出（[L200-L209](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L200-L209)）。RVQ 再把残差逐级量化：
 
 $$\hat z=\sum_{m=1}^{M}e^{(m)}_{k_m},\qquad
 r^{(m+1)}=r^{(m)}-e^{(m)}_{k_m},\qquad
@@ -458,7 +458,7 @@ $M$ 个样本落在同一 batch，GPU 并行；$\widehat{\mathrm{Var}}$ 越大�
 
 | 推论 | 实验 | 预期 |
 |---|---|---|
-| $H(T) \le L\log_2\|\mathcal{V}\|$（式 2） | 采样生成文本，用 held-out n-gram 或独立 LM 估计 $\hat H(T)$ | $\hat H(T) < 24\log_2 78 \approx 150.85$ 比特；生成样本近确定性，经验熵会偏低，需交叉估计 |
+| $H(T) \le L\log_2\|\mathcal{V}\|$（式 2） | 采样生成文本，用 held-out n-gram 或独立 LM 估计 $\hat H(T)$ | $\hat H(T) < 24\log_2 77 \approx 150.40$ 比特；生成样本近确定性，经验熵会偏低，需交叉估计 |
 | 失真地板 $D_T \ge D^{\star}$（式 10） | 把生成文本 $T$ 重新编码 $\hat Z = E_\theta(T)$，与真实 $Z$ 比较 | $\mathbb{E}\|Z-\hat Z\|^2$ 显著大于 0；须与随机 token 基线对比，不能只看余弦相似度 |
 | 率失真曲线（式 11–12） | 改变词表粒度（字符 → 子词 → 词）重训，画 $(\hat H(T),\, \hat D_T)$ | 文本工作点落在"低码率、高失真"区域，$D$ 随 $|\mathcal{V}|$ 减小而上升 |
 | 语义选择性（式 15） | 用跨模态 / 下游探针定义 $Y$，比较 $I(T;Y)$ 与 $H(Z\mid T)$ | 语义码率占比高；细节损失集中在低语义方向，需用探针方向而非裸 $d=32$ 维度 |
