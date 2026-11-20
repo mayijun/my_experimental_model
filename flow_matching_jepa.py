@@ -1,7 +1,13 @@
-"""两阶段 Flow Matching + JEPA 字符模型：先学习潜空间，再学习从噪声生成潜空间。"""
+"""两阶段 Flow Matching + JEPA 字符模型：连续潜空间生成 + 离散瓶颈。
 
-import argparse  # 解析训练步数等命令行参数。
-import math  # 构造时间 Embedding 时计算对数。
+对应 math.md §3.6 的完整实现：
+- 前向压缩 p(T|Z)：FSQ / VQ / RVQ 离散量化器（也可关闭）；
+- 反向模糊回溯 p(Z|T)：条件 Flow 的摊销采样与多轨迹后验方差；
+- 并行解码：Flow 一次解码，或 MaskGIT 式迭代并行填充。
+"""
+
+import argparse  # 解析训练步数与量化器配置。
+import math  # 构造时间 Embedding、MaskGIT 提交步数。
 import torch  # 张量、随机数与设备管理。
 import torch.nn as nn  # 神经网络模块。
 import torch.nn.functional as F  # 损失函数与相似度函数。
@@ -111,10 +117,156 @@ class FlowPredictor(nn.Module):
         return self.output(self.norm(h))  # 返回预测速度 [B,L,D]。
 
 
-class FlowJEPA(nn.Module):
-    """JEPA 双编码器、第一阶段预测器、Flow 预测器与文本解码器。"""
+# ---------------------------------------------------------------------------
+# 前向压缩 p(T|Z)：三种 GPU 友好的离散量化器
+# ---------------------------------------------------------------------------
 
-    def __init__(self, vocab_size):
+
+class IdentityQuantizer(nn.Module):
+    """不量化：保留原始连续潜变量，作为对照组。"""
+
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.kind = "none"
+        self.codebook_size = None
+
+    def forward(self, z):
+        return z, z.new_zeros(()), None
+
+    def dequantize(self, codes):
+        return codes
+
+
+class FSQ(nn.Module):
+    """Finite Scalar Quantization：逐维取整，无码本，STE 回传。"""
+
+    def __init__(self, dim, levels=5):
+        super().__init__()
+        # 奇数 levels 才能让码字关于 0 对称。
+        assert levels >= 3 and levels % 2 == 1, "FSQ 的 levels 需为 >=3 的奇数"
+        self.dim = dim
+        self.levels = levels
+        self.half = (levels - 1) // 2
+        self.codebook_size = levels**dim
+        self.kind = f"fsq(L={levels})"
+
+    def forward(self, z):
+        # 每个维度映射到 {-half, ..., half}，再除以 half 得到 [-1,1] 的量化值。
+        scaled = torch.round(self.half * torch.tanh(z))
+        z_q = scaled / self.half
+        z_q = z + (z_q - z).detach()  # 直通估计：前向取整，反向视为恒等。
+        codes = (scaled + self.half).long()  # 每维 0..levels-1。
+        return z_q, z.new_zeros(()), codes
+
+    def dequantize(self, codes):
+        return (codes.float() - self.half) / self.half
+
+
+class VectorQuantizer(nn.Module):
+    """VQ：最近邻查表 + EMA 码本更新 + commitment 损失。"""
+
+    def __init__(self, dim, codebook_size=256, commitment=0.25, decay=0.99, eps=1e-5):
+        super().__init__()
+        self.dim = dim
+        self.codebook_size = codebook_size
+        self.commitment = commitment
+        self.decay = decay
+        self.eps = eps
+        self.embedding = nn.Embedding(codebook_size, dim)
+        self.embedding.weight.data.uniform_(-1.0 / codebook_size, 1.0 / codebook_size)
+        self.embedding.weight.requires_grad_(False)  # 码本只通过 EMA 更新。
+        self.register_buffer("cluster_size", torch.zeros(codebook_size))
+        self.register_buffer("ema_w", self.embedding.weight.data.clone())
+        self.kind = f"vq(K={codebook_size})"
+
+    def forward(self, z):
+        shape = z.shape
+        flat = z.reshape(-1, self.dim)
+        # 一次矩阵乘得到 [N,K] 距离矩阵，避免 Python 循环。
+        distance = (
+            flat.pow(2).sum(dim=1, keepdim=True)
+            + self.embedding.weight.pow(2).sum(dim=1)
+            - 2.0 * flat @ self.embedding.weight.t()
+        )
+        indices = distance.argmin(dim=1)
+        z_q = self.embedding(indices).view(shape)
+        loss = self.commitment * F.mse_loss(z_q.detach(), z)  # 只对编码器施加 commitment。
+        if self.training:
+            self._ema_update(flat, indices)
+        z_q = z + (z_q - z).detach()  # 直通估计。
+        return z_q, loss, indices.view(shape[:-1])
+
+    @torch.no_grad()
+    def _ema_update(self, flat, indices):
+        onehot = F.one_hot(indices, self.codebook_size).float()
+        count = onehot.sum(dim=0)
+        self.cluster_size.mul_(self.decay).add_(count, alpha=1.0 - self.decay)
+        sum_w = onehot.t() @ flat
+        self.ema_w.mul_(self.decay).add_(sum_w, alpha=1.0 - self.decay)
+        total = self.cluster_size.sum().clamp_min(self.eps)
+        cluster = (self.cluster_size + self.eps) / (total + self.codebook_size * self.eps) * total
+        self.embedding.weight.data.copy_(self.ema_w / cluster.unsqueeze(1))
+
+    def dequantize(self, codes):
+        return self.embedding(codes)
+
+
+class ResidualVQ(nn.Module):
+    """RVQ：逐级量化残差，级间少量串行、级内并行。"""
+
+    def __init__(self, dim, codebook_size=256, num_quantizers=2, commitment=0.25):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [VectorQuantizer(dim, codebook_size, commitment) for _ in range(num_quantizers)]
+        )
+        self.codebook_size = codebook_size**num_quantizers
+        self.kind = f"rvq(M={num_quantizers},K={codebook_size})"
+
+    def forward(self, z):
+        residual = z
+        z_q = torch.zeros_like(z)
+        loss = z.new_zeros(())
+        codes = []
+        for layer in self.layers:
+            quantized, layer_loss, layer_codes = layer(residual)
+            residual = residual - quantized
+            z_q = z_q + quantized
+            loss = loss + layer_loss
+            codes.append(layer_codes)
+        return z_q, loss, torch.stack(codes, dim=0)
+
+
+def build_quantizer(kind, dim, levels=5, codebook_size=256, num_quantizers=2, commitment=0.25):
+    """按命令行参数构造前向量化器。"""
+    if kind == "none":
+        return IdentityQuantizer(dim)
+    if kind == "fsq":
+        return FSQ(dim, levels=levels)
+    if kind == "vq":
+        return VectorQuantizer(dim, codebook_size=codebook_size, commitment=commitment)
+    if kind == "rvq":
+        return ResidualVQ(
+            dim,
+            codebook_size=codebook_size,
+            num_quantizers=num_quantizers,
+            commitment=commitment,
+        )
+    raise ValueError(f"未知量化器: {kind}")
+
+
+class FlowJEPA(nn.Module):
+    """JEPA 双编码器、第一阶段预测器、量化瓶颈、Flow 预测器与文本解码器。"""
+
+    def __init__(
+        self,
+        vocab_size,
+        quantizer="fsq",
+        levels=5,
+        codebook_size=256,
+        num_quantizers=2,
+        commitment=0.25,
+    ):
         super().__init__()
         self.online = ContextEncoder(vocab_size)  # 在线编码器，第一阶段接收梯度。
         self.target = ContextEncoder(vocab_size)  # 目标编码器，仅通过 EMA 更新。
@@ -126,8 +278,20 @@ class FlowJEPA(nn.Module):
             nn.GELU(),
             nn.Linear(DIM * 2, DIM),
         )
+        self.quantizer = build_quantizer(  # p(T|Z) 的离散化前端。
+            quantizer,
+            DIM,
+            levels=levels,
+            codebook_size=codebook_size,
+            num_quantizers=num_quantizers,
+            commitment=commitment,
+        )
         self.flow = FlowPredictor()  # 第二阶段的 Flow Matching 预测器。
-        self.decoder = nn.Linear(DIM, vocab_size)  # 从每个潜变量位置还原文本 Token。
+        self.decoder = nn.Linear(DIM, vocab_size)  # 从量化后的潜变量还原文本 Token。
+
+    def quantize(self, z):
+        """返回 (量化潜变量, 辅助损失, 离散码)。"""
+        return self.quantizer(z)
 
 
 @torch.no_grad()  # EMA 更新不需要计算图。
@@ -139,10 +303,16 @@ def update_target(model, decay=EMA_DECAY):
         target_parameter.mul_(decay).add_(online_parameter, alpha=1.0 - decay)
 
 
-def make_corrupted_context(clean, mask_id):
-    """随机遮住 20%～95% 的 Token，构造 JEPA 的上下文输入。"""
+def make_corrupted_context(clean, mask_id, min_ratio=0.2, max_ratio=0.95):
+    """随机遮住一部分 Token，构造 JEPA 的上下文输入。
+
+    阶段一用默认 [0.2, 0.95]；阶段二允许 min_ratio=0，使 Flow 也见过完整文本，
+    从而支持 p(Z|T) 的后验采样接口。
+    """
     batch_size = clean.size(0)
-    ratio = 0.2 + 0.75 * torch.rand(batch_size, 1, device=clean.device)  # 每样本一个比例。
+    ratio = min_ratio + (max_ratio - min_ratio) * torch.rand(
+        batch_size, 1, device=clean.device
+    )
     mask = torch.rand(clean.shape, device=clean.device) < ratio  # 决定哪些位置被遮住。
     context = clean.clone()
     context[mask] = mask_id  # 只替换上下文，干净目标 clean 保持不变。
@@ -157,7 +327,7 @@ def variance_loss(z):
 
 
 def reconstruction_loss(decoder, z, clean):
-    """让潜变量保留还原文本所需的信息，直接抑制常数潜变量塌缩。"""
+    """让量化潜变量保留还原文本所需的信息，直接抑制常数潜变量塌缩。"""
     logits = decoder(z)  # [B,L,D] → [B,L,V]。
     return F.cross_entropy(logits.reshape(-1, logits.size(-1)), clean.reshape(-1))
 
@@ -173,57 +343,66 @@ def sample_batch(data, batch_size, device):
     return torch.stack([data[start : start + SEQ_LEN] for start in starts]).to(device)
 
 
-def train(model, data, mask_id, device, stage1_steps, stage2_steps):
-    """先训练 JEPA 表征与解码器，再冻结编码器训练 Flow。"""
+def train(model, data, mask_id, device, args):
+    """先训练 JEPA 表征与量化解码器，再冻结编码器训练 Flow。"""
     model.train()
     stage1_parameters = (
         list(model.online.parameters())
         + list(model.jepa_predictor.parameters())
         + list(model.decoder.parameters())
+        + [p for p in model.quantizer.parameters() if p.requires_grad]
     )
     optimizer = torch.optim.AdamW(stage1_parameters, lr=2e-3)
 
     print("阶段一：学习可重建、可预测的 JEPA 潜空间")
-    for step in range(1, stage1_steps + 1):
+    for step in range(1, args.stage1_steps + 1):
         clean = sample_batch(data, BATCH_SIZE, device)  # 干净目标 x_y。
         context_ids = make_corrupted_context(clean, mask_id)  # 掩码上下文 x_c。
         context = model.online(context_ids)  # 在线上下文表示 c。
-        online_clean = model.online(clean)  # 在线干净表示，用于把梯度送入编码器。
+        online_clean = model.online(clean)  # 在线干净表示。
         with torch.no_grad():
             target = model.target(clean)  # 目标 z_1 停止梯度。
 
         prediction = model.jepa_predictor(context)  # 从掩码上下文预测目标潜变量。
         jepa_loss = (1 - F.cosine_similarity(prediction, target, dim=-1)).mean()
-        recon_loss = reconstruction_loss(model.decoder, online_clean, clean)
+        z_q, quant_loss, _ = model.quantize(online_clean)  # 前向压缩 p(T|Z)。
+        recon_loss = reconstruction_loss(model.decoder, z_q, clean)
+        # 解码器也要能读“掩码上下文 → JEPA 预测”的潜变量，否则 MaskGIT 会遇到分布偏移。
+        z_pred_q, _, _ = model.quantize(prediction)
+        masked_recon = reconstruction_loss(model.decoder, z_pred_q, clean)
         var_loss = variance_loss(online_clean)  # 抑制特征维度塌缩。
-        loss = jepa_loss + recon_loss + 0.1 * var_loss
+        loss = jepa_loss + recon_loss + 0.5 * masked_recon + 0.1 * var_loss + quant_loss
 
         optimizer.zero_grad()  # 清空上一批梯度。
-        loss.backward()  # 更新在线编码器、JEPA 预测器和解码器。
+        loss.backward()  # 更新在线编码器、预测器、量化器与解码器。
         optimizer.step()
         update_target(model)  # 优化后再同步目标编码器。
 
-        if step == 1 or step % 50 == 0 or step == stage1_steps:
+        if step == 1 or step % 50 == 0 or step == args.stage1_steps:
             print(
                 f"step {step:4d} | JEPA {jepa_loss.item():.4f} | "
-                f"重建 {recon_loss.item():.4f} | 方差 {var_loss.item():.4f} | "
+                f"重建 {recon_loss.item():.4f} | 掩码重建 {masked_recon.item():.4f} | "
+                f"方差 {var_loss.item():.4f} | 量化 {quant_loss.item():.4f} | "
                 f"潜变量 std {latent_std(target):.4f}"
             )
 
     # 固定潜空间后，Flow 不必追逐不断移动的目标，这是第二阶段的重要稳定措施。
     for parameter in model.online.parameters():
         parameter.requires_grad_(False)
+    model.quantizer.eval()  # 阶段二冻结码本，避免 EMA 让目标分布漂移。
     optimizer = torch.optim.AdamW(
         list(model.flow.parameters()) + list(model.decoder.parameters()), lr=1e-3
     )
 
     print("\n阶段二：冻结编码器，训练条件 Flow Matching")
-    for step in range(1, stage2_steps + 1):
+    for step in range(1, args.stage2_steps + 1):
         clean = sample_batch(data, BATCH_SIZE, device)
-        context_ids = make_corrupted_context(clean, mask_id)
+        # 阶段二允许 0 掩码，让 Flow 同时见到完整文本，支持 T→Z 后验。
+        context_ids = make_corrupted_context(clean, mask_id, min_ratio=0.0)
         with torch.no_grad():
             context = model.online(context_ids)  # 条件 c。
             target = model.target(clean)  # 干净潜变量 z_1。
+            target_q, _, _ = model.quantize(target)  # 解码器的训练目标。
 
         noise = torch.randn_like(target)  # z_0 ~ N(0,I)。
         t = torch.rand(clean.size(0), device=device)  # 每个样本独立采样时间 t。
@@ -231,38 +410,113 @@ def train(model, data, mask_id, device, stage1_steps, stage2_steps):
         velocity_target = target - noise  # 线性概率路径对应的真实速度。
         velocity = model.flow(z_t, t, context)  # 条件速度场预测。
         flow_loss = (velocity - velocity_target).pow(2).mean()  # Flow Matching 的 MSE。
-        recon_loss = reconstruction_loss(model.decoder, target, clean)  # 继续适配目标潜空间。
+        recon_loss = reconstruction_loss(model.decoder, target_q, clean)
         loss = flow_loss + recon_loss
 
         optimizer.zero_grad()
         loss.backward()  # 只更新 Flow 预测器与解码器，编码器保持冻结。
         optimizer.step()
 
-        if step == 1 or step % 100 == 0 or step == stage2_steps:
+        if step == 1 or step % 100 == 0 or step == args.stage2_steps:
             print(f"step {step:4d} | Flow {flow_loss.item():.4f} | 重建 {recon_loss.item():.4f}")
 
 
 @torch.no_grad()
-def generate(model, prompt, stoi, itos, mask_id, device, inference_steps):
-    """用 Euler 方法从 t=0 的噪声积分到 t=1 的目标潜变量。"""
-    model.eval()
-    prompt = prompt[:SEQ_LEN]  # 固定长度版本只保留模型能容纳的前缀。
-    context_ids = torch.full((1, SEQ_LEN), mask_id, dtype=torch.long, device=device)
-    for index, character in enumerate(prompt[:SEQ_LEN]):
-        context_ids[0, index] = stoi[character]  # 可见前缀，其余位置保持 [MASK]。
-    context = model.online(context_ids)
-
-    z = torch.randn(1, SEQ_LEN, DIM, device=device)  # 从高斯噪声开始。
-    dt = 1.0 / inference_steps
-    for step in range(inference_steps):
-        t = torch.full((1,), step * dt, device=device)  # 当前轨迹时间。
+def flow_sample(model, context, steps, device):
+    """用 Euler 法从噪声积分到目标潜变量，batch 维可并行。"""
+    batch = context.size(0)
+    z = torch.randn(batch, context.size(1), DIM, device=device)  # z_0 ~ N(0,I)。
+    dt = 1.0 / steps
+    for step in range(steps):
+        t = torch.full((batch,), step * dt, device=device)  # 当前轨迹时间。
         z = z + dt * model.flow(z, t, context)  # Euler：z ← z + Δt·v(z,t,c)。
+    return z
 
-    logits = model.decoder(z)  # 并行解码所有位置。
+
+@torch.no_grad()
+def decode_latents(model, z, mask_id, readout, temperature):
+    """把潜变量解码成 Token：argmax 或按温度采样。"""
+    z_q, _, _ = model.quantize(z)  # 推理时同样经过离散瓶颈。
+    logits = model.decoder(z_q)  # [B,L,V]。
     logits[..., mask_id] = -torch.inf  # [MASK] 只属于输入，不允许作为输出文本。
-    generated = logits.argmax(dim=-1)[0].tolist()
-    generated[: len(prompt)] = context_ids[0, : len(prompt)].tolist()  # 保留给定前缀。
-    return "".join(itos[index] for index in generated)
+    if readout == "sample":
+        probs = F.softmax(logits / max(temperature, 1e-6), dim=-1)  # p(T|Z)。
+        return torch.distributions.Categorical(probs=probs).sample()
+    return logits.argmax(dim=-1)
+
+
+def prompt_ids(prompt, stoi, mask_id, device):
+    """把前缀写成 [1,L] 的 Token 序列，其余位置填 [MASK]。"""
+    ids = torch.full((1, SEQ_LEN), mask_id, dtype=torch.long, device=device)
+    for index, character in enumerate(prompt[:SEQ_LEN]):
+        ids[0, index] = stoi[character]  # 可见前缀，其余位置保持 [MASK]。
+    return ids
+
+
+@torch.no_grad()
+def generate(model, prompt, stoi, itos, mask_id, device, steps, readout, temperature):
+    """Flow 一次并行解码：编码前缀 → Flow 采样 → 量化 → 解码。"""
+    model.eval()
+    ids = prompt_ids(prompt, stoi, mask_id, device)
+    context = model.online(ids)
+    z = flow_sample(model, context, steps, device)
+    tokens = decode_latents(model, z, mask_id, readout, temperature)[0].tolist()
+    prefix_len = min(len(prompt), SEQ_LEN)
+    tokens[:prefix_len] = ids[0, :prefix_len].tolist()  # 保留给定前缀。
+    text = "".join(itos[index] for index in tokens)
+    token_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+    return text, token_ids
+
+
+@torch.no_grad()
+def maskgit_decode(model, prompt, stoi, itos, mask_id, device, steps):
+    """MaskGIT 式并行解码：每步并行预测所有位置，再提交置信度最高的一批。"""
+    model.eval()
+    ids = prompt_ids(prompt, stoi, mask_id, device)
+    for step in range(steps):
+        unknown = ids[0] == mask_id
+        if not unknown.any():
+            break
+        h = model.online(ids)
+        h = model.jepa_predictor(h)  # 先走阶段一的掩码预测路径，避免解码器分布偏移。
+        z_q, _, _ = model.quantize(h)
+        logits = model.decoder(z_q)
+        logits[..., mask_id] = -torch.inf
+        probs = logits.softmax(dim=-1)
+        confidence, prediction = probs.max(dim=-1)
+
+        remaining = int(unknown.sum().item())
+        commit = max(1, math.ceil(remaining / (steps - step)))  # 均匀提交，近似并行细化。
+        scores = confidence[0].masked_fill(~unknown, -torch.inf)
+        chosen = scores.topk(commit).indices
+        ids[0, chosen] = prediction[0, chosen]
+
+    # 若仍有未填位置，用最后一次前向补齐。
+    unknown = ids[0] == mask_id
+    if unknown.any():
+        h = model.online(ids)
+        h = model.jepa_predictor(h)
+        z_q, _, _ = model.quantize(h)
+        logits = model.decoder(z_q)
+        logits[..., mask_id] = -torch.inf
+        ids[0, unknown] = logits.argmax(dim=-1)[0, unknown]
+    return "".join(itos[index] for index in ids[0].tolist())
+
+
+@torch.no_grad()
+def posterior_demo(model, token_ids, itos, mask_id, device, samples, steps, readout, temperature):
+    """T→Z 后验采样：同一文本采多条潜变量轨迹，度量并展示模糊性。"""
+    if samples <= 1:
+        return
+    model.eval()
+    context = model.online(token_ids).repeat(samples, 1, 1)  # 同一条件复制 M 份。
+    z = flow_sample(model, context, steps, device)  # [M,L,D]，batch 维并行。
+    variance = z.var(dim=0, unbiased=False).mean().item()  # 后验离散度。
+    tokens = decode_latents(model, z, mask_id, readout, temperature)
+    variants = ["".join(itos[index] for index in row.tolist()) for row in tokens]
+    print(f"\n后验采样（T→Z，{samples} 条轨迹）：潜变量平均方差 {variance:.4f}")
+    for index, variant in enumerate(variants, 1):
+        print(f"  样本 {index}: {variant}")
 
 
 def main():
@@ -270,6 +524,16 @@ def main():
     parser.add_argument("--stage1-steps", type=int, default=200)  # 表征预训练步数。
     parser.add_argument("--stage2-steps", type=int, default=500)  # Flow 训练步数。
     parser.add_argument("--inference-steps", type=int, default=30)  # Euler 积分数。
+    parser.add_argument("--quantizer", choices=["none", "fsq", "vq", "rvq"], default="fsq")
+    parser.add_argument("--levels", type=int, default=5)  # FSQ 每维级数（奇数）。
+    parser.add_argument("--codebook-size", type=int, default=256)  # VQ/RVQ 码本大小。
+    parser.add_argument("--num-quantizers", type=int, default=2)  # RVQ 级数。
+    parser.add_argument("--commitment", type=float, default=0.25)  # VQ commitment 权重。
+    parser.add_argument("--readout", choices=["argmax", "sample"], default="argmax")
+    parser.add_argument("--temperature", type=float, default=0.8)  # 采样 readout 的温度。
+    parser.add_argument("--decode", choices=["flow", "maskgit"], default="flow")
+    parser.add_argument("--maskgit-steps", type=int, default=8)  # 并行细化的步数。
+    parser.add_argument("--posterior-samples", type=int, default=4)  # T→Z 后验轨迹数。
     args = parser.parse_args()
 
     torch.manual_seed(42)  # 固定随机种子，便于复现实验。
@@ -280,13 +544,52 @@ def main():
     mask_id = len(chars)  # 额外分配一个输入专用 [MASK] Token。
     data = torch.tensor([stoi[character] for character in CORPUS], dtype=torch.long)
 
-    model = FlowJEPA(vocab_size=len(chars) + 1).to(device)
+    model = FlowJEPA(
+        vocab_size=len(chars) + 1,
+        quantizer=args.quantizer,
+        levels=args.levels,
+        codebook_size=args.codebook_size,
+        num_quantizers=args.num_quantizers,
+        commitment=args.commitment,
+    ).to(device)
     print(f"device: {device} | vocab: {len(chars)} + [MASK] | sequence: {SEQ_LEN}")
-    train(model, data, mask_id, device, args.stage1_steps, args.stage2_steps)
+    print(f"量化器: {model.quantizer.kind} | readout: {args.readout} | decode: {args.decode}")
+
+    train(model, data, mask_id, device, args)
 
     for prompt in ["人工智能", "机器学习"]:
-        text = generate(model, prompt, stoi, itos, mask_id, device, args.inference_steps)
+        if args.decode == "maskgit":
+            text = maskgit_decode(
+                model, prompt, stoi, itos, mask_id, device, args.maskgit_steps
+            )
+            token_ids = torch.tensor(
+                [[stoi[character] for character in text]], dtype=torch.long, device=device
+            )
+        else:
+            text, token_ids = generate(
+                model,
+                prompt,
+                stoi,
+                itos,
+                mask_id,
+                device,
+                args.inference_steps,
+                args.readout,
+                args.temperature,
+            )
         print(f"\n提示：{prompt}\n生成：{text}")
+        if args.posterior_samples > 1:
+            posterior_demo(
+                model,
+                token_ids,
+                itos,
+                mask_id,
+                device,
+                args.posterior_samples,
+                args.inference_steps,
+                args.readout,
+                args.temperature,
+            )
 
 
 if __name__ == "__main__":  # 只有直接执行脚本时才训练，导入模块不会自动训练。

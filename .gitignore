@@ -1,0 +1,98 @@
+# ===== Python 字节码 / 缓存 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+.Python
+
+# ===== 环境变量 / 密钥 =====
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ===== 构建 / 打包产物 =====
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===== PyTorch / 机器学习产物（体积大，默认不入库） =====
+# 模型权重；如需提交特定小权重，可用 ! 例外，例如 !checkpoints/best.pt
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+saved_models/
+
+# 训练日志 / 可视化输出
+runs/
+logs/
+*.log
+wandb/
+lightning_logs/
+tensorboard/
+
+# 常见输出目录
+outputs/
+results/
+samples/
+
+# 大型数据缓存（如需入库请手动例外）
+*.npy
+*.npz
+*.bin
+data/
+dataset/
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ===== 测试 / 覆盖率 =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+pytype/
+
+# ===== IDE / 编辑器 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+
+# ===== 本项目特定 =====
+# IDE 自动生成的截图缓存目录
+.screenshots/
