@@ -328,6 +328,11 @@ def main():
         run_loop(2, args.stage2_steps, optimizer2, stage2_step, start_step=0)
 
     if accelerator.is_main_process:
+        # 另存一份普通 state_dict，供 eval_generate.py 等离线评测脚本直接加载。
+        torch.save(
+            accelerator.unwrap_model(model).state_dict(),
+            os.path.join(args.checkpoint_dir, "model.pt"),
+        )
         print("预训练完成。")
 
 
