@@ -309,6 +309,7 @@ class FlowJEPA(nn.Module):
         n_heads=HEADS,
         encoder_layers=1,
         flow_layers=2,
+        max_len=SEQ_LEN,
         quantizer="fsq",
         levels=5,
         codebook_size=256,
@@ -317,8 +318,8 @@ class FlowJEPA(nn.Module):
     ):
         super().__init__()
         self.dim = dim
-        self.online = ContextEncoder(vocab_size, dim=dim, n_heads=n_heads, num_layers=encoder_layers)  # 在线编码器。
-        self.target = ContextEncoder(vocab_size, dim=dim, n_heads=n_heads, num_layers=encoder_layers)  # 目标编码器。
+        self.online = ContextEncoder(vocab_size, max_len=max_len, dim=dim, n_heads=n_heads, num_layers=encoder_layers)  # 在线编码器。
+        self.target = ContextEncoder(vocab_size, max_len=max_len, dim=dim, n_heads=n_heads, num_layers=encoder_layers)  # 目标编码器。
         self.target.load_state_dict(self.online.state_dict())  # 初始权重完全一致。
         for parameter in self.target.parameters():
             parameter.requires_grad_(False)  # 阻止优化器直接更新目标编码器。
@@ -335,7 +336,7 @@ class FlowJEPA(nn.Module):
             num_quantizers=num_quantizers,
             commitment=commitment,
         )
-        self.flow = FlowPredictor(dim=dim, n_heads=n_heads, num_layers=flow_layers)  # 第二阶段的 Flow Matching 预测器。
+        self.flow = FlowPredictor(max_len=max_len, dim=dim, n_heads=n_heads, num_layers=flow_layers)  # 第二阶段的 Flow Matching 预测器。
         self.decoder = nn.Linear(dim, vocab_size)  # 从量化后的潜变量还原文本 Token。
 
     def quantize(self, z):
