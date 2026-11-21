@@ -96,3 +96,6 @@ Thumbs.db
 # ===== 本项目特定 =====
 # IDE 自动生成的截图缓存目录
 .screenshots/
+
+# 未提交到 git 的 plan 记录（约束：禁止入库）
+.trae/

@@ -26,6 +26,13 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from torch.utils.data import DataLoader, IterableDataset
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+
+    _TB_AVAILABLE = True
+except Exception:  # noqa: BLE001  # tensorboard 未安装时静默降级
+    _TB_AVAILABLE = False
+
 from flow_matching_jepa import (
     FlowJEPA,
     make_corrupted_context,
@@ -181,8 +188,10 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--stage1-steps", type=int, default=2000)
     parser.add_argument("--stage2-steps", type=int, default=5000)
+    parser.add_argument("--epochs", type=float, default=0)  # >0 时忽略 stage*-steps，按「每个阶段扫 N 遍全量」换算步数
     # checkpoint / 日志
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
+    parser.add_argument("--tb-logdir", type=str, default="/root/tf-logs/jepa")  # AutoDL 内置 TensorBoard 默认读取 /root/tf-logs
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--resume", action="store_true")
@@ -249,6 +258,13 @@ def main():
         print(f"参数: {total / 1e6:.1f}M 总 | {trainable / 1e6:.1f}M 可训练 | "
               f"vocab={vocab_size} seq={args.seq_len} dim={args.dim} enc={args.encoder_layers} flow={args.flow_layers}")
 
+    # —— TensorBoard（AutoDL 内置 TensorBoard 读取 /root/tf-logs，AutoPanel 直接可视化）——
+    writer = None
+    if accelerator.is_main_process and _TB_AVAILABLE:
+        os.makedirs(args.tb_logdir, exist_ok=True)
+        writer = SummaryWriter(log_dir=args.tb_logdir)
+        print(f"TensorBoard: 事件写入 {args.tb_logdir}")
+
     resume_stage, resume_step = 1, 0
     if args.resume:
         accelerator.load_state(args.checkpoint_dir)
@@ -265,9 +281,28 @@ def main():
     dataloader = accelerator.prepare(dataloader)
     data_iter = iter(dataloader)
 
+    # —— epoch 换算：--epochs>0 时统计全量字符数，把「每个阶段扫 N 遍全量」折算成步数 ——
+    if args.epochs > 0:
+        if accelerator.is_main_process:
+            print("统计全量数据规模以换算 epoch 步数 ...")
+        total_chars = 0
+        for example in load_examples(args):
+            total_chars += len(example[args.text_field])
+        total_windows = total_chars // args.seq_len
+        steps_per_stage = max(1, int(total_windows * args.epochs / (args.batch_size * args.grad_accum)))
+        args.stage1_steps = steps_per_stage
+        args.stage2_steps = steps_per_stage
+        if accelerator.is_main_process:
+            print(f"全量 {total_chars} 字符 ≈ {total_windows} 个窗口 | 每阶段 {steps_per_stage} 步 "
+                  f"(batch={args.batch_size} grad_accum={args.grad_accum}, epochs={args.epochs})")
+
     tokens_per_step = args.batch_size * args.seq_len
+    stage1_loss_names = ("jepa", "recon", "masked_recon", "variance", "quant")
+    stage2_loss_names = ("flow", "recon")
+    tb_step = 0
 
     def run_loop(stage, num_steps, optimizer, step_fn, start_step=0):
+        nonlocal tb_step
         model.train()
         if stage == 2:
             model.quantizer.eval()  # 阶段二冻结码本，避免 EMA 让目标分布漂移。
@@ -290,6 +325,15 @@ def main():
                 tps = sps * tokens_per_step
                 print(f"[stage {stage}] step {step:5d}/{num_steps} | loss {loss.item():.4f} | "
                       f"{sps:.1f} step/s | {tps/1e3:.1f}k token/s")
+                if writer is not None:
+                    writer.add_scalar(f"loss/stage{stage}/total", loss.item(), tb_step)
+                    names = stage1_loss_names if stage == 1 else stage2_loss_names
+                    for name, val in zip(names, parts):
+                        writer.add_scalar(f"loss/stage{stage}/{name}", val.item(), tb_step)
+                    writer.add_scalar("throughput/step_per_sec", sps, tb_step)
+                    writer.add_scalar("throughput/token_per_sec", tps, tb_step)
+                    writer.add_scalar("lr", optimizer.param_groups[0]["lr"], tb_step)
+                tb_step += 1
                 t0 = time.time()
             if step % args.save_every == 0 and accelerator.is_main_process:
                 accelerator.save_state(args.checkpoint_dir)
@@ -333,6 +377,8 @@ def main():
             accelerator.unwrap_model(model).state_dict(),
             os.path.join(args.checkpoint_dir, "model.pt"),
         )
+        if writer is not None:
+            writer.close()
         print("预训练完成。")
 
 

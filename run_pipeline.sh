@@ -28,6 +28,7 @@ ZH_EVAL="${ZH_EVAL:-20000}"
 
 # ---------- 模型 / 训练 ----------
 MODE="${MODE:-smoke}"
+EPOCHS="${EPOCHS:-0}"   # >0 时按 epoch 训练（忽略 STAGE1/STAGE2 步数）
 if [ "$MODE" = "full" ]; then
     DIM=1024; N_HEADS=16; ENC=4; FLOW=12; SEQ=256; BATCH=16
     STAGE1=2000; STAGE2=5000; QUANT=fsq
@@ -56,13 +57,19 @@ python "$ROOT/data_prepare.py" \
 
 # ---------- 2) 预训练 ----------
 echo "[2/3] 预训练 ..."
-python "$ROOT/pretrain.py" \
-    --dataset-files "$DATA_DIR/train.jsonl" \
-    --seq-len "$SEQ" --dim "$DIM" --n-heads "$N_HEADS" \
-    --encoder-layers "$ENC" --flow-layers "$FLOW" --quantizer "$QUANT" \
-    --batch-size "$BATCH" \
-    --stage1-steps "$STAGE1" --stage2-steps "$STAGE2" \
+TRAIN_ARGS=(
+    --dataset-files "$DATA_DIR/train.jsonl"
+    --seq-len "$SEQ" --dim "$DIM" --n-heads "$N_HEADS"
+    --encoder-layers "$ENC" --flow-layers "$FLOW" --quantizer "$QUANT"
+    --batch-size "$BATCH"
     --checkpoint-dir "$CKPT_DIR" --save-every 1000000 --log-every 5
+)
+if [ "$(echo "$EPOCHS > 0" | bc 2>/dev/null || echo 0)" = "1" ]; then
+    TRAIN_ARGS+=( --epochs "$EPOCHS" )
+else
+    TRAIN_ARGS+=( --stage1-steps "$STAGE1" --stage2-steps "$STAGE2" )
+fi
+python "$ROOT/pretrain.py" "${TRAIN_ARGS[@]}"
 
 # ---------- 3) 生成评测 ----------
 echo "[3/3] 生成评测 ..."
