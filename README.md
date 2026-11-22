@@ -20,7 +20,7 @@
 
 ## 扩展方向（规划中）
 
-`math.md` §3.7–3.12 把「统一潜空间」从单一文本通道推广到多模态与闭环，对应 [plan](.trae/plan_mosaic_text_unified_lossy_channel.md) 的 P1–P8（尚未实现）：
+`math.md` §3.7–3.15 把「统一潜空间」从单一文本通道推广到多模态、闭环、训练策略、文字时间性与统一预测框架，对应 [plan](.trae/plan_mosaic_text_unified_lossy_channel.md) 的 P1–P8（尚未实现）：
 
 - **马赛克同构（P2）**：视觉通道 $R_I$ 的最小实例，与文本通道同为多对一映射，但损失机制不同——连续降采样（分辨率）vs 离散码本（基数）。
 - **一致性约束（P1）**：后验采样 $\hat Z$ 重新量化必须回到 $T$，不漂出纤维 $\mathcal F_T$。
@@ -28,6 +28,9 @@
 - **跨模态对齐（P6）**：编译器/解释器框架 + 穿过 $Z$ 的双向重建硬对齐 + 跨模态交叉掩码防模态坍缩。
 - **互补压缩（P7）**：视频/语音通道，$I(V;I,T)>\max(I(V;I),I(V;T))$，图片与文字互补编码视频。
 - **闭环观测器（P8）**：预测-校正的卡尔曼滤波视角，创新序列白噪声作为模型充分性判据。
+- **训练策略（§3.13）**：硬对齐的落地方法——增量通道冻结（防遗忘 vs stop-gradient 防塌缩）、软对齐对照（五投影机制）、渐进锚定课程（PAC）投喂、锚预训练的蒸馏预热。
+- **文字时间性与表征空间（§3.14）**：CoT 是算子轨迹而非状态快照；图像/视频只能锚定已观测状态，未来/变化/规律/反事实靠 JEPA 的表征空间（预测而非重构）容纳。
+- **统一预测框架（§3.15）**：重建是预测的退化特例——同一预测目标 $P_\phi(c,\omega)$ 采样不同「上下文-指令-目标」三元组即可覆盖重建/补全/未来/指令/反事实。
 
 ---
 
@@ -54,7 +57,7 @@
 | [`data_prepare.py`](data_prepare.py) | 下载并准备中英混合字符级语料（wikitext + 中文维基），输出 JSONL |
 | [`eval_generate.py`](eval_generate.py) | 加载 checkpoint 评测：重建困惑度、条件生成、多样性、重编码失真 |
 | [`analyze.py`](analyze.py) | 验证 math.md §4 的两条推论（熵率上界、重编码失真 > 0） |
-| [`math.md`](math.md) | 数学基础：JEPA / Flow Matching / 统一潜空间命题（§3.1–3.6）+ 多模态与闭环扩展（§3.7–3.12），公式与代码逐式对齐 |
+| [`math.md`](math.md) | 数学基础：JEPA / Flow Matching / 统一潜空间命题（§3.1–3.6）+ 多模态、闭环、训练策略、文字时间性与统一预测框架扩展（§3.7–3.15），公式与代码逐式对齐 |
 | [`.trae/plan_mosaic_text_unified_lossy_channel.md`](.trae/plan_mosaic_text_unified_lossy_channel.md) | 扩展路线 P1–P8：一致性、马赛克、CFG、算子空间、跨模态对齐、互补压缩、闭环观测器 |
 | [`run_pipeline.sh`](run_pipeline.sh) | 数据 → 训练 → 评测一条龙（`MODE=smoke` 冒烟 / `MODE=full` 完整） |
 | [`run_pretrain_a100.sh`](run_pretrain_a100.sh) | A100 上跑 0.3B 规模预训练的现成配置 |

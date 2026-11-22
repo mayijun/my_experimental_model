@@ -88,31 +88,27 @@ def load_wikitext(config, split, char_budget):
 
 
 def load_wikipedia_split(cfg, train_chars, eval_chars):
-    """中文维基百科：逐分片下载（命中缓存）后本地逐行组读取，累计到预算即停。"""
+    """中文维基百科：整片下载（优先命中并行缓存）后本地逐行组读取。"""
     urls = _parquet_urls("wikimedia", "wikipedia", cfg, "train")
-    print(f"    wikipedia {cfg}/train: {len(urls)} 个 parquet 分片")
     tmp = tempfile.mkdtemp(prefix="jepa_zh_")
     dest = os.path.join(tmp, "zh.parquet")
+    _download(urls[0], dest)
+    pf = pq.ParquetFile(dest)
     train, eval_ = [], []
     t_total = e_total = 0
-    for u in urls:
-        print(f"      下载分片 {u.split('/')[-1]} ...", flush=True)
-        _download(u, dest)
-        pf = pq.ParquetFile(dest)
-        for i in range(pf.num_row_groups):
-            col = pf.read_row_group(i, columns=["text"])["text"].to_pylist()
-            for x in col:
-                if not (isinstance(x, str) and x.strip()):
-                    continue
-                if t_total < train_chars:
-                    train.append(x)
-                    t_total += len(x)
-                elif e_total < eval_chars:
-                    eval_.append(x)
-                    e_total += len(x)
-                else:
-                    return train, eval_
-        os.remove(dest)
+    for i in range(pf.num_row_groups):
+        col = pf.read_row_group(i, columns=["text"])["text"].to_pylist()
+        for x in col:
+            if not (isinstance(x, str) and x.strip()):
+                continue
+            if t_total < train_chars:
+                train.append(x)
+                t_total += len(x)
+            elif e_total < eval_chars:
+                eval_.append(x)
+                e_total += len(x)
+            else:
+                return train, eval_
     return train, eval_
 
 
