@@ -25,8 +25,8 @@ import requests
 
 HF = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
 CACHE = os.environ.get("JEPA_CACHE", "/root/autodl-tmp/cache")
-CHUNKS = 8   # 每个分片分 8 段并行下载
-RETRIES = 5  # 每段最多重试次数
+CHUNKS = 16  # 每个分片分 16 段并行下载（每段约 ~16MB，规避镜像单连接 ~15MB 断流）
+RETRIES = 10  # 每段最多重试次数（断点续传，失败后从已下载字节处继续）
 
 DATASETS = [
     ("Salesforce", "wikitext", "wikitext-103-raw-v1", "train"),
@@ -57,21 +57,25 @@ def _download_range(u, start, end, part):
     expected = end - start + 1
     last_err = None
     for attempt in range(RETRIES):
+        written = os.path.getsize(part) if os.path.exists(part) else 0
+        cur = start + written
+        if cur > end:
+            return
         try:
             r = requests.get(
                 u,
-                headers={"Range": f"bytes={start}-{end}"},
+                headers={"Range": f"bytes={cur}-{end}"},
                 stream=True,
                 timeout=(60, 600),
             )
-            if r.status_code == 206:
-                with open(part, "wb") as f:
-                    for chunk in r.iter_content(1 << 20):
-                        f.write(chunk)
-                if os.path.getsize(part) == expected:
-                    return
-            else:
-                r.raise_for_status()
+            if r.status_code != 206:
+                raise RuntimeError(f"非 206 响应: {r.status_code}")
+            with open(part, "ab") as f:  # 追加写，断点续传
+                for chunk in r.iter_content(1 << 20):
+                    f.write(chunk)
+                    written += len(chunk)
+            if written >= expected:
+                return
         except Exception as e:  # noqa: BLE001
             last_err = e
         time.sleep(2 * (attempt + 1))
