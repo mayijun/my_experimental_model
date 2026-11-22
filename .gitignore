@@ -99,3 +99,7 @@ Thumbs.db
 
 # 未提交到 git 的 plan 记录（约束：禁止入库）
 .trae/
+
+# ===== Lean 4 / mathlib4 项目（体积大，独立于 ML 代码） =====
+lean-math/
+.lake/
