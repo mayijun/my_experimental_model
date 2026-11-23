@@ -166,11 +166,11 @@ def main():
     parser.add_argument("--tokenizer-name", type=str, default="inclusionAI/LLaDA2.1-mini")
     # 模型
     parser.add_argument("--seq-len", type=int, default=1024)
-    parser.add_argument("--dim", type=int, default=1024)
+    parser.add_argument("--dim", type=int, default=2048)  # 3B 配置：宽度 2048，head_dim 128。
     parser.add_argument("--n-heads", type=int, default=16)
-    parser.add_argument("--encoder-layers", type=int, default=4)
-    parser.add_argument("--flow-layers", type=int, default=12)
-    parser.add_argument("--decoder-layers", type=int, default=2)
+    parser.add_argument("--encoder-layers", type=int, default=12)
+    parser.add_argument("--flow-layers", type=int, default=6)
+    parser.add_argument("--decoder-layers", type=int, default=6)
     parser.add_argument("--jepa-layers", type=int, default=4)
     parser.add_argument("--quantizer", type=str, default="fsq")
     # 训练

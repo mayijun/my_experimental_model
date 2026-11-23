@@ -23,8 +23,8 @@ CORPUS = (
 
 SEQ_LEN = 1024  # 每个训练样本固定为 1024 个 token（BPE 词表，后续可升 4096）。
 BATCH_SIZE = 16  # 每批样本数量。
-DIM = 32  # Token Embedding 与潜空间的维度。
-HEADS = 4  # 注意力头数，必须能整除 DIM。
+DIM = 2048  # Token Embedding 与潜空间的维度（3B 配置：宽度 2048）。
+HEADS = 16  # 注意力头数，必须能整除 DIM（head_dim = 128）。
 EMA_DECAY = 0.99  # 目标编码器的 EMA 更新系数。
 TOKENIZER_NAME = "inclusionAI/LLaDA2.1-mini"  # 借用的 BPE 词表，vocab=157184。
 
@@ -648,10 +648,11 @@ def posterior_demo(model, token_ids, tokenizer, mask_id, device, samples, steps,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dim", type=int, default=1024)  # 潜空间/模型宽度。
-    parser.add_argument("--n-heads", type=int, default=16)  # 注意力头数，需整除 dim。
-    parser.add_argument("--encoder-layers", type=int, default=4)  # 编码器层数。
-    parser.add_argument("--flow-layers", type=int, default=12)  # Flow 主干层数。
+    parser.add_argument("--dim", type=int, default=DIM)  # 潜空间/模型宽度。
+    parser.add_argument("--n-heads", type=int, default=HEADS)  # 注意力头数，需整除 dim。
+    parser.add_argument("--encoder-layers", type=int, default=12)  # 编码器层数。
+    parser.add_argument("--flow-layers", type=int, default=6)  # Flow 主干层数。
+    parser.add_argument("--decoder-layers", type=int, default=6)  # 解码器层数。
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)  # 每批样本数。
     parser.add_argument("--stage1-steps", type=int, default=200)  # 表征预训练步数。
     parser.add_argument("--stage2-steps", type=int, default=500)  # Flow 训练步数。
@@ -688,6 +689,7 @@ def main():
         n_heads=args.n_heads,
         encoder_layers=args.encoder_layers,
         flow_layers=args.flow_layers,
+        decoder_layers=args.decoder_layers,
         quantizer=args.quantizer,
         levels=args.levels,
         codebook_size=args.codebook_size,
