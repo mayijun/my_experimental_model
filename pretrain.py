@@ -135,7 +135,7 @@ def stage1_step(model, clean, mask_id):
 
 
 def stage2_step(model, clean, mask_id):
-    """返回 (总损失, (flow_loss, recon_loss))。"""
+    """返回 (总损失, (flow_loss, recon_loss, sampled_recon))。"""
     context_ids = make_corrupted_context(clean, mask_id, min_ratio=0.0)
     with torch.no_grad():
         context = model.online(context_ids)
@@ -148,8 +148,13 @@ def stage2_step(model, clean, mask_id):
     velocity_target = target - noise
     velocity = model.flow(z_t, t, context)
     flow_loss = (velocity - velocity_target).pow(2).mean()
+    # 解码器也要读「采样出来的」潜变量：用单步 Euler 估计采样终点再量化，
+    # 让解码器对 Flow 采样误差鲁棒（否则它只见过教师强制的精确潜变量）。
+    z_hat = z_t + (1 - t[:, None, None]) * velocity.detach()  # t=1 端点估计，detach 使该损失只训解码器。
+    z_hat_q, _, _ = model.quantize(z_hat)
     recon_loss = reconstruction_loss(model.decoder, target_q, clean)
-    return flow_loss + recon_loss, (flow_loss, recon_loss)
+    sampled_recon = reconstruction_loss(model.decoder, z_hat_q, clean)
+    return flow_loss + recon_loss + sampled_recon, (flow_loss, recon_loss, sampled_recon)
 
 
 # ------------------------- 主流程 -------------------------
@@ -181,6 +186,7 @@ def main():
     parser.add_argument("--n-heads", type=int, default=16)
     parser.add_argument("--encoder-layers", type=int, default=4)
     parser.add_argument("--flow-layers", type=int, default=12)
+    parser.add_argument("--decoder-layers", type=int, default=2)
     parser.add_argument("--quantizer", type=str, default="fsq")
     # 训练
     parser.add_argument("--batch-size", type=int, default=16)
@@ -242,6 +248,7 @@ def main():
         n_heads=args.n_heads,
         encoder_layers=args.encoder_layers,
         flow_layers=args.flow_layers,
+        decoder_layers=args.decoder_layers,
         quantizer=args.quantizer,
     )
     optimizer1 = torch.optim.AdamW(stage1_parameters(model), lr=args.lr)
@@ -256,7 +263,8 @@ def main():
         total = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"参数: {total / 1e6:.1f}M 总 | {trainable / 1e6:.1f}M 可训练 | "
-              f"vocab={vocab_size} seq={args.seq_len} dim={args.dim} enc={args.encoder_layers} flow={args.flow_layers}")
+              f"vocab={vocab_size} seq={args.seq_len} dim={args.dim} enc={args.encoder_layers} "
+              f"flow={args.flow_layers} dec={args.decoder_layers}")
 
     # —— TensorBoard（AutoDL 内置 TensorBoard 读取 /root/tf-logs，AutoPanel 直接可视化）——
     writer = None
@@ -298,7 +306,7 @@ def main():
 
     tokens_per_step = args.batch_size * args.seq_len
     stage1_loss_names = ("jepa", "recon", "masked_recon", "variance", "quant")
-    stage2_loss_names = ("flow", "recon")
+    stage2_loss_names = ("flow", "recon", "sampled_recon")
     tb_step = 0
 
     def run_loop(stage, num_steps, optimizer, step_fn, start_step=0):

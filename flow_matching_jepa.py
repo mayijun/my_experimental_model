@@ -299,6 +299,36 @@ def build_quantizer(kind, dim, levels=5, codebook_size=256, num_quantizers=2, co
     raise ValueError(f"未知量化器: {kind}")
 
 
+class Decoder(nn.Module):
+    """带位置混合的文本解码器：在量化潜变量上做自注意力，再逐位置还原 Token。
+
+    取代原来的逐位置 nn.Linear，使解码器能利用不同位置间的上下文信息，
+    从而对 Flow 采样产生的潜变量误差更鲁棒（不会因为某个位置的噪声就输出乱码）。
+    """
+
+    def __init__(self, dim, vocab_size, n_heads=HEADS, num_layers=2, max_len=SEQ_LEN):
+        super().__init__()
+        self.position = nn.Parameter(torch.randn(1, max_len, dim) * 0.02)  # 学习位置信息。
+        layer = nn.TransformerEncoderLayer(  # 自注意力 + 前馈，逐位置混合后再独立输出。
+            d_model=dim,
+            nhead=n_heads,
+            dim_feedforward=dim * 4,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(  # 堆叠解码层。
+            layer, num_layers=num_layers, enable_nested_tensor=False
+        )
+        self.norm = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, vocab_size)  # 逐位置输出词表 logits。
+
+    def forward(self, z):
+        h = z + self.position[:, : z.size(1)]  # 显式加入位置，避免量化后位置信息丢失。
+        return self.head(self.norm(self.transformer(h)))  # [B,L,d] -> [B,L,V]。
+
+
 class FlowJEPA(nn.Module):
     """JEPA 双编码器、第一阶段预测器、量化瓶颈、Flow 预测器与文本解码器。"""
 
@@ -309,6 +339,7 @@ class FlowJEPA(nn.Module):
         n_heads=HEADS,
         encoder_layers=1,
         flow_layers=2,
+        decoder_layers=2,
         max_len=SEQ_LEN,
         quantizer="fsq",
         levels=5,
@@ -337,7 +368,7 @@ class FlowJEPA(nn.Module):
             commitment=commitment,
         )
         self.flow = FlowPredictor(max_len=max_len, dim=dim, n_heads=n_heads, num_layers=flow_layers)  # 第二阶段的 Flow Matching 预测器。
-        self.decoder = nn.Linear(dim, vocab_size)  # 从量化后的潜变量还原文本 Token。
+        self.decoder = Decoder(dim, vocab_size, n_heads=n_heads, num_layers=decoder_layers, max_len=max_len)  # 带位置混合的文本解码器。
 
     def quantize(self, z):
         """返回 (量化潜变量, 辅助损失, 离散码)。"""
