@@ -23,6 +23,7 @@ torchvision / transformers / PIL。
 """
 
 import argparse
+import os
 import random
 from dataclasses import dataclass
 
@@ -514,18 +515,113 @@ def build_dataset(n, image_size, text_len, seed=0):
 
 
 # ---------------------------------------------------------------------------
+# 真实图文数据（HuggingFace datasets + transformers tokenizer + PIL）
+# ---------------------------------------------------------------------------
+
+
+def load_hf_tokenizer(name):
+    """惰性加载 HF tokenizer（复用 transformers，与 flow_matching_jepa.load_tokenizer 同源）。"""
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(name, trust_remote_code=True)
+
+
+def ensure_special_tokens(tokenizer):
+    """确保存在 pad / mask token，返回 (pad_id, mask_id, vocab_size)。
+
+    不同 tokenizer 对特殊 token 的支持不同（如 gpt2 无 pad/mask），这里统一补齐，
+    使 JEPA 掩码与文本 padding 对任意 HF tokenizer 都可用。
+    """
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+    if tokenizer.mask_token is None:
+        tokenizer.add_special_tokens({"mask_token": "[MASK]"})
+    return tokenizer.pad_token_id, tokenizer.mask_token_id, len(tokenizer)
+
+
+def encode_text(tokenizer, text, length, pad_id):
+    """把一段文本 tokenize 成固定 length 的 id 序列（截断 + pad）。"""
+    ids = tokenizer.encode(text, add_special_tokens=False)[:length]
+    return ids + [pad_id] * (length - len(ids))
+
+
+def image_transform(pil_img, size, train=True):
+    """PIL 图像 → [C,H,W] float32 ∈ [0,1]，统一 resize 到 size（不依赖 torchvision）。"""
+    img = pil_img.convert("RGB") if hasattr(pil_img, "convert") else pil_img
+    img = img.resize((size, size))
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    arr = arr.transpose(2, 0, 1)
+    if train and random.random() < 0.5:  # 训练时随机水平翻转做增强。
+        arr = arr[:, :, ::-1].copy()
+    return torch.from_numpy(arr)
+
+
+def real_batch_iterator(args, tokenizer, pad_id, text_len, image_size):
+    """返回无限重复的 (image_tensor, text_ids) 生成器，来源是 HF datasets 流式。
+
+    支持两类来源：
+    - 远程 HF 数据集：--dataset-name / --dataset-config / --split；
+    - 本地 imagefolder：--data-dir（含 metadata.jsonl 的图片目录），供离线快速验证。
+    """
+    from datasets import load_dataset
+
+    if args.data_dir:
+        ds = load_dataset("imagefolder", data_dir=args.data_dir, split="train", streaming=True)
+    else:
+        ds = load_dataset(
+            args.dataset_name, args.dataset_config or None, split=args.split, streaming=True
+        )
+
+    def gen():
+        while True:
+            for ex in ds:
+                img = ex.get(args.image_key)
+                text = ex.get(args.text_key)
+                if img is None or not text:
+                    continue
+                yield image_transform(img, image_size), encode_text(tokenizer, text, text_len, pad_id)
+
+    return gen()
+
+
+# ---------------------------------------------------------------------------
 # 训练
 # ---------------------------------------------------------------------------
 
 
-def train(model, images, caption_ids, pad_id, mask_id, device, steps, batch_size, lr):
+def synthetic_batch_fn(images, caption_ids, batch_size, device):
+    """合成数据：从预生成张量里随机采样一批 (img, txt)。"""
+    n = images.size(0)
+
+    def fn():
+        idx = torch.randint(0, n, (batch_size,))
+        return images[idx].to(device), caption_ids[idx].to(device)
+
+    return fn
+
+
+def real_batch_fn(gen, batch_size, device):
+    """真实数据：从流式生成器里取一批，拼成 (img, txt) 张量。"""
+    def fn():
+        imgs, ids = [], []
+        for _ in range(batch_size):
+            try:
+                im, tids = next(gen)
+            except StopIteration:
+                break
+            imgs.append(im)
+            ids.append(tids)
+        return torch.stack(imgs).to(device), torch.tensor(ids, dtype=torch.long).to(device)
+
+    return fn
+
+
+def train(model, batch_fn, pad_id, mask_id, device, steps, lr):
+    """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。"""
     model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    n = images.size(0)
     for step in range(1, steps + 1):
-        idx = torch.randint(0, n, (batch_size,))
-        img = images[idx].to(device)
-        txt = caption_ids[idx].to(device)
+        img, txt = batch_fn()
         with maybe_autocast(device):
             loss, parts = forward_losses(model, img, txt, pad_id, mask_id)
         optimizer.zero_grad()
@@ -582,6 +678,43 @@ def evaluate(model, images, caption_ids, captions, tokenizer, device, num=16):
     return i2t, t2i
 
 
+@torch.no_grad()
+def evaluate_real(model, gen, tokenizer, pad_id, device, num=16):
+    """真实数据的跨模态检索 + 图像→文本解码样例。"""
+    model.eval()
+    imgs, ids = [], []
+    for _ in range(num):
+        try:
+            im, tids = next(gen)
+        except StopIteration:
+            break
+        imgs.append(im)
+        ids.append(tids)
+    if not imgs:
+        return 0.0, 0.0
+    img = torch.stack(imgs).to(device)
+    txt = torch.tensor(ids, dtype=torch.long).to(device)
+
+    img_cls, img_tokens = model.image_online(img)
+    txt_cls, _ = model.text_online(txt)
+    zi = F.normalize(model.proj(img_cls), dim=-1)
+    zt = F.normalize(model.proj(txt_cls), dim=-1)
+    sim = zi @ zt.t()
+    labels = torch.arange(len(imgs), device=device)
+    i2t = (sim.argmax(dim=1) == labels).float().mean().item()
+    t2i = (sim.argmax(dim=0) == labels).float().mean().item()
+
+    txt_cross = model.text_decoder(img_tokens).argmax(-1)
+    print(f"\n=== 真实数据跨模态检索（{len(imgs)} 对）===")
+    print(f"  图像→文本 top-1 = {i2t*100:.1f}% | 文本→图像 top-1 = {t2i*100:.1f}%")
+    print("=== 图像→文本解码样例（真值 / 预测）===")
+    for i in range(min(3, len(imgs))):
+        truth = tokenizer.decode(ids[i], skip_special_tokens=True)
+        pred = tokenizer.decode(txt_cross[i].tolist(), skip_special_tokens=True)
+        print(f"  真值: {truth}\n  预测: {pred}")
+    return i2t, t2i
+
+
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
@@ -603,6 +736,16 @@ def main():
     parser.add_argument("--dataset-size", type=int, default=2048)
     parser.add_argument("--eval-samples", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
+    # 数据源：synthetic（内置合成图文对，离线） / real（HF datasets 真实图文对）
+    parser.add_argument("--data", choices=["synthetic", "real"], default="synthetic")
+    parser.add_argument("--dataset-name", type=str, default="lambdalabs/pokemon-blip-captions")
+    parser.add_argument("--dataset-config", type=str, default="")
+    parser.add_argument("--split", type=str, default="train")
+    parser.add_argument("--tokenizer-name", type=str, default="gpt2")
+    parser.add_argument("--image-key", type=str, default="image")
+    parser.add_argument("--text-key", type=str, default="text")
+    parser.add_argument("--data-dir", type=str, default="")  # 本地 imagefolder，优先于 dataset-name。
+    parser.add_argument("--hf-endpoint", type=str, default="https://hf-mirror.com")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -625,21 +768,36 @@ def main():
           f"heads={cfg.heads} image={cfg.image_size} patch={cfg.patch_size} "
           f"latent_len={cfg.text_len}")
 
-    # 数据 + 词表
-    images, caption_ids, captions, tokenizer = build_dataset(
-        args.dataset_size, cfg.image_size, cfg.text_len, seed=args.seed
-    )
-    pad_id, mask_id = tokenizer.pad_id, tokenizer.mask_id
+    # —— 数据源 / 词表 ——
+    if args.data == "real":
+        if args.hf_endpoint:
+            os.environ["HF_ENDPOINT"] = args.hf_endpoint
+        tokenizer = load_hf_tokenizer(args.tokenizer_name)
+        pad_id, mask_id, vocab_size = ensure_special_tokens(tokenizer)
+        gen = real_batch_iterator(args, tokenizer, pad_id, cfg.text_len, cfg.image_size)
+        batch_fn = real_batch_fn(gen, args.batch_size, device)
+        source = args.data_dir or args.dataset_name
+        print(f"数据: 真实图文对（{source}） | tokenizer: {args.tokenizer_name} | "
+              f"vocab={vocab_size} pad={pad_id} mask={mask_id}")
+    else:
+        images, caption_ids, captions, tokenizer = build_dataset(
+            args.dataset_size, cfg.image_size, cfg.text_len, seed=args.seed
+        )
+        pad_id, mask_id = tokenizer.pad_id, tokenizer.mask_id
+        vocab_size = tokenizer.vocab_size
+        batch_fn = synthetic_batch_fn(images, caption_ids, args.batch_size, device)
 
-    model = MultimodalJEPA(cfg, tokenizer.vocab_size).to(device)
+    model = MultimodalJEPA(cfg, vocab_size).to(device)
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"参数: {total/1e6:.2f}M 总 | {trainable/1e6:.2f}M 可训练 | vocab={tokenizer.vocab_size}")
+    print(f"参数: {total/1e6:.2f}M 总 | {trainable/1e6:.2f}M 可训练 | vocab={vocab_size}")
 
-    train(model, images, caption_ids, pad_id, mask_id, device,
-          args.steps, args.batch_size, args.lr)
+    train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr)
 
-    evaluate(model, images, caption_ids, captions, tokenizer, device, args.eval_samples)
+    if args.data == "real":
+        evaluate_real(model, gen, tokenizer, pad_id, device, args.eval_samples)
+    else:
+        evaluate(model, images, caption_ids, captions, tokenizer, device, args.eval_samples)
 
 
 if __name__ == "__main__":
