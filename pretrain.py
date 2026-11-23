@@ -35,6 +35,8 @@ except Exception:  # noqa: BLE001  # tensorboard 未安装时静默降级
 
 from flow_matching_jepa import (
     FlowJEPA,
+    enable_flash_attention,
+    load_tokenizer,
     make_corrupted_context,
     reconstruction_loss,
     variance_loss,
@@ -45,39 +47,21 @@ from flow_matching_jepa import (
 # ------------------------- 数据管线 -------------------------
 
 
-def build_char_tokenizer(examples, sample_size=5000, text_field="text"):
-    """从流式语料采样收集唯一字符，构建字符级词表。"""
-    chars = set()
-    seen = 0
-    for example in examples:
-        chars.update(example[text_field])
-        seen += 1
-        if seen >= sample_size:
-            break
-    chars = sorted(chars)
-    stoi = {c: i for i, c in enumerate(chars)}
-    itos = {i: c for i, c in enumerate(chars)}
-    return stoi, itos
-
-
-def encode(text, stoi):
-    """字符级编码，未知字符跳过，保证每个位置都是合法 ID。"""
-    return [stoi[c] for c in text if c in stoi]
-
-
 class WindowDataset(IterableDataset):
     """把流式文本串接成固定长度 seq_len 的 token 窗口。"""
 
-    def __init__(self, examples, stoi, seq_len, text_field="text"):
+    def __init__(self, examples, tokenizer, seq_len, text_field="text"):
         self.examples = examples
-        self.stoi = stoi
+        self.tokenizer = tokenizer
         self.seq_len = seq_len
         self.text_field = text_field
 
     def __iter__(self):
         buffer = []
         for example in self.examples:
-            buffer.extend(encode(example[self.text_field], self.stoi))
+            buffer.extend(
+                self.tokenizer.encode(example[self.text_field], add_special_tokens=False)
+            )
             while len(buffer) >= self.seq_len:
                 yield {"input_ids": buffer[: self.seq_len]}
                 buffer = buffer[self.seq_len :]
@@ -179,9 +163,9 @@ def main():
     parser.add_argument("--dataset-files", type=str, default="")  # 本地 JSONL 路径，优先于 name/config。
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--text-field", type=str, default="text")
-    parser.add_argument("--vocab-sample", type=int, default=5000)
+    parser.add_argument("--tokenizer-name", type=str, default="inclusionAI/LLaDA2.1-mini")
     # 模型
-    parser.add_argument("--seq-len", type=int, default=256)
+    parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--dim", type=int, default=1024)
     parser.add_argument("--n-heads", type=int, default=16)
     parser.add_argument("--encoder-layers", type=int, default=4)
@@ -204,19 +188,22 @@ def main():
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
+    enable_flash_attention()  # CUDA 上走 FlashAttention-2 / memory-efficient SDPA。
     mixed_precision = "bf16" if torch.cuda.is_available() else "no"
     accelerator = Accelerator(
         mixed_precision=mixed_precision, gradient_accumulation_steps=args.grad_accum
     )
 
-    # —— 词表（续训时从 config.json 恢复，保证词表与模型一致）——
+    # —— 词表（BPE tokenizer；续训时 config.json 存 tokenizer 名以保证一致）——
+    tokenizer = load_tokenizer(args.tokenizer_name)
+    vocab_size = tokenizer.vocab_size
+    mask_id = tokenizer.mask_token_id
+    if mask_id is None:  # 兜底：无 mask token 时用最后一个位置。
+        mask_id = vocab_size - 1
+
     if args.resume:
         with open(os.path.join(args.checkpoint_dir, "config.json"), encoding="utf-8") as f:
             config = json.load(f)
-        stoi = {c: i for i, c in enumerate(config["vocab"])}
-        itos = {i: c for i, c in enumerate(config["vocab"])}
-        vocab_size = len(stoi) + 1
-        mask_id = len(stoi)
         args.seq_len = config["seq_len"]
         args.dim = config["dim"]
         args.n_heads = config["n_heads"]
@@ -227,12 +214,8 @@ def main():
         args.quantizer = config["quantizer"]
         args.lr = config["lr"]
     else:
-        raw = load_examples(args)
-        stoi, itos = build_char_tokenizer(raw, args.vocab_sample, args.text_field)
-        vocab_size = len(stoi) + 1
-        mask_id = len(stoi)
         config = {
-            "vocab": sorted(stoi.keys()),
+            "tokenizer_name": args.tokenizer_name,
             "seq_len": args.seq_len,
             "dim": args.dim,
             "n_heads": args.n_heads,
@@ -290,7 +273,7 @@ def main():
 
     # —— 数据加载器（重新取流式迭代器，避免词表采样时的消耗）——
     raw = load_examples(args)
-    dataset = WindowDataset(raw, stoi, args.seq_len, args.text_field)
+    dataset = WindowDataset(raw, tokenizer, args.seq_len, args.text_field)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate)
     dataloader = accelerator.prepare(dataloader)
     data_iter = iter(dataloader)

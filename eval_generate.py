@@ -28,24 +28,21 @@ import flow_matching_jepa as fm  # noqa: E402
 # ------------------------- 词表 -------------------------
 
 
-def load_vocab(config):
-    vocab = config["vocab"]
-    stoi = {c: i for i, c in enumerate(vocab)}
-    itos = {i: c for i, c in enumerate(vocab)}
-    mask_id = len(vocab)
-    return stoi, itos, mask_id
-
-
-def encode(text, stoi):
-    return [stoi[c] for c in text if c in stoi]
+def load_tokenizer(config):
+    """从 config 的 tokenizer_name 加载 BPE tokenizer，返回 (tokenizer, mask_id)。"""
+    tokenizer = fm.load_tokenizer(config["tokenizer_name"])
+    mask_id = tokenizer.mask_token_id
+    if mask_id is None:
+        mask_id = tokenizer.vocab_size - 1
+    return tokenizer, mask_id
 
 
 # ------------------------- 重建指标 -------------------------
 
 
 @torch.no_grad()
-def eval_reconstruction(model, eval_texts, stoi, seq_len, mask_id, device):
-    """在留出文本上统计字符级困惑度与 top-k 准确率。"""
+def eval_reconstruction(model, eval_texts, tokenizer, seq_len, mask_id, device):
+    """在留出文本上统计 token 级困惑度与 top-k 准确率。"""
     model.eval()
     total_ce = 0.0
     total_n = 0
@@ -53,7 +50,7 @@ def eval_reconstruction(model, eval_texts, stoi, seq_len, mask_id, device):
     top5 = 0
     buffer = []
     for t in eval_texts:
-        buffer.extend(encode(t, stoi))
+        buffer.extend(tokenizer.encode(t, add_special_tokens=False))
         while len(buffer) >= seq_len:
             ids = torch.tensor(buffer[:seq_len], dtype=torch.long, device=device).unsqueeze(0)
             buffer = buffer[seq_len:]
@@ -80,18 +77,17 @@ def eval_reconstruction(model, eval_texts, stoi, seq_len, mask_id, device):
 
 
 @torch.no_grad()
-def generate(model, prompt, stoi, itos, mask_id, seq_len, device, steps, solver, readout, temperature):
+def generate(model, prompt, tokenizer, mask_id, seq_len, device, steps, solver, readout, temperature):
     model.eval()
     ids = torch.full((1, seq_len), mask_id, dtype=torch.long, device=device)
-    for i, c in enumerate(prompt[:seq_len]):
-        if c in stoi:
-            ids[0, i] = stoi[c]
+    enc = tokenizer.encode(prompt, add_special_tokens=False)
+    n = min(len(enc), seq_len)
+    ids[0, :n] = torch.tensor(enc[:n], dtype=torch.long, device=device)
     context = model.online(ids)
     z = fm.flow_sample(model, context, steps, device, solver)
     tokens = fm.decode_latents(model, z, mask_id, readout, temperature)[0].tolist()
-    prefix = min(len(prompt), seq_len)
-    tokens[:prefix] = ids[0, :prefix].tolist()
-    text = "".join(itos[i] for i in tokens)
+    tokens[:n] = ids[0, :n].tolist()
+    text = tokenizer.decode(tokens, skip_special_tokens=True)
     return text, z, tokens
 
 
@@ -143,11 +139,11 @@ def main():
 
     with open(f"{args.checkpoint_dir}/config.json", encoding="utf-8") as f:
         config = json.load(f)
-    stoi, itos, mask_id = load_vocab(config)
+    tokenizer, mask_id = load_tokenizer(config)
     seq_len = config["seq_len"]
 
     model = fm.FlowJEPA(
-        vocab_size=len(config["vocab"]) + 1,
+        vocab_size=tokenizer.vocab_size,
         max_len=seq_len,
         dim=config["dim"],
         n_heads=config["n_heads"],
@@ -163,7 +159,7 @@ def main():
     model.eval()
     print(f"已加载 checkpoint：dim={config['dim']} enc={config['encoder_layers']} "
           f"flow={config['flow_layers']} quantizer={config['quantizer']} seq={seq_len} "
-          f"vocab={len(config['vocab'])}")
+          f"vocab={tokenizer.vocab_size}")
 
     # 1) 重建指标
     eval_texts = []
@@ -172,7 +168,7 @@ def main():
             if len(line.strip()) == 0:
                 continue
             eval_texts.append(json.loads(line)["text"])
-    recon = eval_reconstruction(model, eval_texts, stoi, seq_len, mask_id, device)
+    recon = eval_reconstruction(model, eval_texts, tokenizer, seq_len, mask_id, device)
     print("\n=== 1) 留出集重建指标（文本 -> 潜变量 -> 字符） ===")
     if recon:
         print(f"  困惑度 ppl = {recon['ppl']:.2f} | top-1 = {recon['top1']*100:.2f}% | "
@@ -186,7 +182,7 @@ def main():
     with torch.no_grad():
         for prompt in prompts:
             text, z, tokens = generate(
-                model, prompt, stoi, itos, mask_id, seq_len, device,
+                model, prompt, tokenizer, mask_id, seq_len, device,
                 args.inference_steps, args.solver, args.readout, args.temperature,
             )
             gen_texts.append(text)
@@ -195,19 +191,17 @@ def main():
 
     # 3) 多样性
     h1, h2 = entropy_rate(gen_texts)
-    log2v = math.log2(len(config["vocab"]))
+    log2v = math.log2(tokenizer.vocab_size)
     print("\n=== 3) 生成文本多样性（字符熵率） ===")
     print(f"  一元熵 H1 = {h1:.4f} bits/char | 二元熵 H2 = {h2:.4f} bits/char | "
           f"上界 log2|V| = {log2v:.4f}")
 
     # 4) 自洽性 / 重编码失真
     z = torch.cat(zs, dim=0)  # [M,L,D]
-    ids = torch.tensor([[stoi[c] for c in t if c in stoi] for t in gen_texts],
-                       dtype=torch.long, device=device)
-    ids = ids[:, :seq_len]
-    if ids.size(1) < seq_len:
-        pad = torch.full((ids.size(0), seq_len - ids.size(1)), mask_id, dtype=torch.long, device=device)
-        ids = torch.cat([ids, pad], dim=1)
+    ids = torch.full((z.size(0), seq_len), mask_id, dtype=torch.long, device=device)
+    for i, t in enumerate(gen_texts):
+        e = tokenizer.encode(t, add_special_tokens=False)[:seq_len]
+        ids[i, : len(e)] = torch.tensor(e, dtype=torch.long, device=device)
     with torch.no_grad():
         z_hat = model.online(ids)
         mse = F.mse_loss(z_hat, z).item()

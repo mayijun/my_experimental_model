@@ -21,11 +21,34 @@ CORPUS = (
     "机器学习需要数据、模型、损失函数和优化器。训练让损失逐渐降低。"
 ) * 30
 
-SEQ_LEN = 24  # 每个训练样本固定为 24 个字符，避免首版引入长度预测器。
+SEQ_LEN = 1024  # 每个训练样本固定为 1024 个 token（BPE 词表，后续可升 4096）。
 BATCH_SIZE = 16  # 每批样本数量。
 DIM = 32  # Token Embedding 与潜空间的维度。
 HEADS = 4  # 注意力头数，必须能整除 DIM。
 EMA_DECAY = 0.99  # 目标编码器的 EMA 更新系数。
+TOKENIZER_NAME = "inclusionAI/LLaDA2.1-mini"  # 借用的 BPE 词表，vocab=157184。
+
+
+def load_tokenizer(name=TOKENIZER_NAME):
+    """加载 BPE tokenizer（LLaDA2.1-mini 词表，vocab=157184）。
+
+    惰性导入 transformers，避免未安装该依赖时导入本模块就失败。
+    """
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(name, trust_remote_code=True)
+
+
+def enable_flash_attention():
+    """在 CUDA 上优先启用 FlashAttention-2 / memory-efficient SDPA 内核。
+
+    torch 的 scaled_dot_product_attention 会自动选择最快后端；这里显式开启 Flash
+    与 memory-efficient，并关闭低效的 math 后端，保证长上下文训练走 FlashAttention。
+    """
+    if torch.cuda.is_available():
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
 
 
 class ContextEncoder(nn.Module):
@@ -549,34 +572,34 @@ def decode_latents(model, z, mask_id, readout, temperature):
     return logits.argmax(dim=-1)
 
 
-def prompt_ids(prompt, stoi, mask_id, device):
+def prompt_ids(prompt, tokenizer, mask_id, device, seq_len=SEQ_LEN):
     """把前缀写成 [1,L] 的 Token 序列，其余位置填 [MASK]。"""
-    ids = torch.full((1, SEQ_LEN), mask_id, dtype=torch.long, device=device)
-    for index, character in enumerate(prompt[:SEQ_LEN]):
-        ids[0, index] = stoi[character]  # 可见前缀，其余位置保持 [MASK]。
-    return ids
+    ids = torch.full((1, seq_len), mask_id, dtype=torch.long, device=device)
+    enc = tokenizer.encode(prompt, add_special_tokens=False)  # BPE 编码，不额外加 BOS/EOS。
+    n = min(len(enc), seq_len)
+    ids[0, :n] = torch.tensor(enc[:n], dtype=torch.long, device=device)
+    return ids, n
 
 
 @torch.no_grad()
-def generate(model, prompt, stoi, itos, mask_id, device, steps, solver, readout, temperature):
+def generate(model, prompt, tokenizer, mask_id, device, steps, solver, readout, temperature):
     """Flow 一次并行解码：编码前缀 → Flow 采样 → 量化 → 解码。"""
     model.eval()
-    ids = prompt_ids(prompt, stoi, mask_id, device)
+    ids, n = prompt_ids(prompt, tokenizer, mask_id, device)
     context = model.online(ids)
     z = flow_sample(model, context, steps, device, solver)
     tokens = decode_latents(model, z, mask_id, readout, temperature)[0].tolist()
-    prefix_len = min(len(prompt), SEQ_LEN)
-    tokens[:prefix_len] = ids[0, :prefix_len].tolist()  # 保留给定前缀。
-    text = "".join(itos[index] for index in tokens)
+    tokens[:n] = ids[0, :n].tolist()  # 保留给定前缀的 token。
+    text = tokenizer.decode(tokens, skip_special_tokens=True)
     token_ids = torch.tensor([tokens], dtype=torch.long, device=device)
     return text, token_ids
 
 
 @torch.no_grad()
-def maskgit_decode(model, prompt, stoi, itos, mask_id, device, steps):
+def maskgit_decode(model, prompt, tokenizer, mask_id, device, steps):
     """MaskGIT 式并行解码：每步并行预测所有位置，再提交置信度最高的一批。"""
     model.eval()
-    ids = prompt_ids(prompt, stoi, mask_id, device)
+    ids, _ = prompt_ids(prompt, tokenizer, mask_id, device)
     for step in range(steps):
         unknown = ids[0] == mask_id
         if not unknown.any():
@@ -604,11 +627,11 @@ def maskgit_decode(model, prompt, stoi, itos, mask_id, device, steps):
         logits = model.decoder(z_q)
         logits[..., mask_id] = -torch.inf
         ids[0, unknown] = logits.argmax(dim=-1)[0, unknown]
-    return "".join(itos[index] for index in ids[0].tolist())
+    return tokenizer.decode(ids[0].tolist(), skip_special_tokens=True)
 
 
 @torch.no_grad()
-def posterior_demo(model, token_ids, itos, mask_id, device, samples, steps, solver, readout, temperature):
+def posterior_demo(model, token_ids, tokenizer, mask_id, device, samples, steps, solver, readout, temperature):
     """T→Z 后验采样：同一文本采多条潜变量轨迹，度量并展示模糊性。"""
     if samples <= 1:
         return
@@ -617,7 +640,7 @@ def posterior_demo(model, token_ids, itos, mask_id, device, samples, steps, solv
     z = flow_sample(model, context, steps, device, solver)  # [M,L,D]，batch 维并行。
     variance = z.var(dim=0, unbiased=False).mean().item()  # 后验离散度。
     tokens = decode_latents(model, z, mask_id, readout, temperature)
-    variants = ["".join(itos[index] for index in row.tolist()) for row in tokens]
+    variants = [tokenizer.decode(row.tolist(), skip_special_tokens=True) for row in tokens]
     print(f"\n后验采样（T→Z，{samples} 条轨迹）：潜变量平均方差 {variance:.4f}")
     for index, variant in enumerate(variants, 1):
         print(f"  样本 {index}: {variant}")
@@ -647,16 +670,20 @@ def main():
     args = parser.parse_args()
 
     torch.manual_seed(42)  # 固定随机种子，便于复现实验。
+    enable_flash_attention()  # CUDA 上走 FlashAttention-2 / memory-efficient SDPA。
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    chars = sorted(set(CORPUS))
-    stoi = {character: index for index, character in enumerate(chars)}  # 字符到 ID。
-    itos = {index: character for character, index in stoi.items()}  # ID 到字符。
-    mask_id = len(chars)  # 额外分配一个输入专用 [MASK] Token。
-    data = torch.tensor([stoi[character] for character in CORPUS], dtype=torch.long)
+    tokenizer = load_tokenizer()  # LLaDA2.1-mini 的 BPE tokenizer，vocab=157184。
+    vocab_size = tokenizer.vocab_size
+    mask_id = tokenizer.mask_token_id
+    if mask_id is None:  # 兜底：无 mask token 时用最后一个位置。
+        mask_id = vocab_size - 1
+    data = torch.tensor(
+        tokenizer.encode(CORPUS, add_special_tokens=False), dtype=torch.long
+    )
 
     assert args.dim % args.n_heads == 0, f"dim ({args.dim}) 必须能被 n_heads ({args.n_heads}) 整除"
     model = FlowJEPA(
-        vocab_size=len(chars) + 1,
+        vocab_size=vocab_size,
         dim=args.dim,
         n_heads=args.n_heads,
         encoder_layers=args.encoder_layers,
@@ -669,7 +696,7 @@ def main():
     ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"device: {device} | vocab: {len(chars)} + [MASK] | sequence: {SEQ_LEN}")
+    print(f"device: {device} | vocab: {vocab_size} | sequence: {SEQ_LEN}")
     print(
         f"参数: {total_params / 1e6:.1f}M 总 | {trainable_params / 1e6:.1f}M 可训练 | "
         f"dim={args.dim} heads={args.n_heads} enc={args.encoder_layers} flow={args.flow_layers}"
@@ -683,17 +710,16 @@ def main():
     for prompt in ["人工智能", "机器学习"]:
         if args.decode == "maskgit":
             text = maskgit_decode(
-                model, prompt, stoi, itos, mask_id, device, args.maskgit_steps
+                model, prompt, tokenizer, mask_id, device, args.maskgit_steps
             )
             token_ids = torch.tensor(
-                [[stoi[character] for character in text]], dtype=torch.long, device=device
+                [tokenizer.encode(text, add_special_tokens=False)], dtype=torch.long, device=device
             )
         else:
             text, token_ids = generate(
                 model,
                 prompt,
-                stoi,
-                itos,
+                tokenizer,
                 mask_id,
                 device,
                 args.inference_steps,
@@ -706,7 +732,7 @@ def main():
             posterior_demo(
                 model,
                 token_ids,
-                itos,
+                tokenizer,
                 mask_id,
                 device,
                 args.posterior_samples,
