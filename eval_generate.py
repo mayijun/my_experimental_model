@@ -153,6 +153,8 @@ def main():
         n_heads=config["n_heads"],
         encoder_layers=config["encoder_layers"],
         flow_layers=config["flow_layers"],
+        decoder_layers=config.get("decoder_layers", 2),
+        jepa_layers=config.get("jepa_layers", 4),
         quantizer=config["quantizer"],
     ).to(device)
 

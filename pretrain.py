@@ -187,6 +187,7 @@ def main():
     parser.add_argument("--encoder-layers", type=int, default=4)
     parser.add_argument("--flow-layers", type=int, default=12)
     parser.add_argument("--decoder-layers", type=int, default=2)
+    parser.add_argument("--jepa-layers", type=int, default=4)
     parser.add_argument("--quantizer", type=str, default="fsq")
     # 训练
     parser.add_argument("--batch-size", type=int, default=16)
@@ -221,6 +222,8 @@ def main():
         args.n_heads = config["n_heads"]
         args.encoder_layers = config["encoder_layers"]
         args.flow_layers = config["flow_layers"]
+        args.jepa_layers = config.get("jepa_layers", args.jepa_layers)
+        args.decoder_layers = config.get("decoder_layers", args.decoder_layers)
         args.quantizer = config["quantizer"]
         args.lr = config["lr"]
     else:
@@ -235,6 +238,8 @@ def main():
             "n_heads": args.n_heads,
             "encoder_layers": args.encoder_layers,
             "flow_layers": args.flow_layers,
+            "jepa_layers": args.jepa_layers,
+            "decoder_layers": args.decoder_layers,
             "quantizer": args.quantizer,
             "lr": args.lr,
         }
@@ -249,6 +254,7 @@ def main():
         encoder_layers=args.encoder_layers,
         flow_layers=args.flow_layers,
         decoder_layers=args.decoder_layers,
+        jepa_layers=args.jepa_layers,
         quantizer=args.quantizer,
     )
     optimizer1 = torch.optim.AdamW(stage1_parameters(model), lr=args.lr)

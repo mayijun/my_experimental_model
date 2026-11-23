@@ -340,6 +340,7 @@ class FlowJEPA(nn.Module):
         encoder_layers=1,
         flow_layers=2,
         decoder_layers=2,
+        jepa_layers=4,
         max_len=SEQ_LEN,
         quantizer="fsq",
         levels=5,
@@ -354,11 +355,11 @@ class FlowJEPA(nn.Module):
         self.target.load_state_dict(self.online.state_dict())  # 初始权重完全一致。
         for parameter in self.target.parameters():
             parameter.requires_grad_(False)  # 阻止优化器直接更新目标编码器。
-        self.jepa_predictor = nn.Sequential(  # 第一阶段的确定性潜变量预测器。
-            nn.Linear(dim, dim * 2),
-            nn.GELU(),
-            nn.Linear(dim * 2, dim),
-        )
+        predictor_layers = [nn.Linear(dim, dim * 2), nn.GELU()]
+        for _ in range(jepa_layers - 2):  # 中间隐藏层保持 2*dim 宽度。
+            predictor_layers += [nn.Linear(dim * 2, dim * 2), nn.GELU()]
+        predictor_layers.append(nn.Linear(dim * 2, dim))
+        self.jepa_predictor = nn.Sequential(*predictor_layers)  # 第一阶段的确定性潜变量预测器。
         self.quantizer = build_quantizer(  # p(T|Z) 的离散化前端。
             quantizer,
             dim,
