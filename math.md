@@ -8,22 +8,22 @@
 
 | 数学符号 | 含义 | 源码对应 |
 |---|---|---|
-| $x, x_c, x_y$ | 干净 token 序列、掩码上下文、干净目标 | `clean`, `context_ids`；掩码比例见 [L306-L319](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L306-L319) |
-| $E_\theta$ | 在线编码器（接收梯度） | `model.online`，[L271](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L271) |
-| $E_\xi$ | 目标编码器（仅 EMA 更新） | `model.target`，[L272](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L272) |
-| $P_\phi$ | JEPA 潜变量预测器 | `model.jepa_predictor`，[L276-L280](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L276-L280) |
-| $v_\psi$ | Flow Matching 速度场预测器 | `model.flow`，[L289](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L289) |
-| $D_\eta$ | 潜变量→token 解码器 | `model.decoder`，[L290](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L290) |
-| $\mu$ | EMA 衰减系数 | `EMA_DECAY=0.99`，[L27](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L27) |
-| $L$ | 序列长度 / token 数 | `SEQ_LEN=24`，[L23](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L23) |
-| $d$ | 潜空间维度 | `DIM=32`，[L25](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L25) |
-| $\mathcal{V}$ | 输出词表（不含 `[MASK]`） | 输出有效词表 $|\mathcal{V}|=77$；`vocab_size=len(chars)+1=78` 含输入专用 `[MASK]`（[L548](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L548)） |
-| $z_0, z_1, z_t$ | 噪声、干净潜变量、时刻 $t$ 插值 | `noise`, `target`, `z_t`，[L404-L409](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L404-L409) |
-| $u_t$ | 真实速度场 | `velocity_target`，[L410](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L410) |
+| $x, x_c, x_y$ | 干净 token 序列、掩码上下文、干净目标 | `clean`, `context_ids`；掩码比例见 [L394-L399](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L394-L399) |
+| $E_\theta$ | 在线编码器（接收梯度） | `model.online`，[L352](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L352) |
+| $E_\xi$ | 目标编码器（仅 EMA 更新） | `model.target`，[L353](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L353) |
+| $P_\phi$ | JEPA 潜变量预测器 | `model.jepa_predictor`，[L357-L361](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L357-L361) |
+| $v_\psi$ | Flow Matching 速度场预测器 | `model.flow`，[L370](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L370) |
+| $D_\eta$ | 潜变量→token 解码器（位置混合 Transformer + 线性头） | `model.decoder`，`Decoder` |
+| $\mu$ | EMA 衰减系数 | `EMA_DECAY=0.99`，[L28](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L28) |
+| $L$ | 序列长度 / token 数 | `SEQ_LEN=24`，[L24](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L24) |
+| $d$ | 潜空间维度 | `DIM=32`，[L26](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L26) |
+| $\mathcal{V}$ | 输出词表（不含 `[MASK]`） | 输出有效词表 $|\mathcal{V}|=77$；`vocab_size=len(chars)+1=78` 含输入专用 `[MASK]`（[L658](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L658)） |
+| $z_0, z_1, z_t$ | 噪声、干净潜变量、时刻 $t$ 插值 | `noise`, `target`, `z_t`，[L497-L499](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L497-L499) |
+| $u_t$ | 真实速度场 | `velocity_target`，[L500](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L500) |
 | $W$ | 世界状态 | 概念量，本脚本不实现 |
 | $I, V$ | 图像 / 视频连续观测 | 概念量，本脚本不实现 |
 | $Y$ | 跨模态共享语义因子 | 概念量，可由跨模态对齐或线性探针估计 |
-| $g$ | 文本量化器 $Z \mapsto \mathcal{V}^L$ | `generate` 的 argmax 解码，[L437-L445](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L437-L445) |
+| $g$ | 文本量化器 $Z \mapsto \mathcal{V}^L$ | `generate` 的 argmax 解码，[L560-L569](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L560-L569) |
 | $\mathcal{F}_t$ | 文本 $t$ 对应的潜空间纤维 | 概念量，$\mathcal{F}_t = g^{-1}(t)$ |
 | $\phi, M$ | 马赛克算子与马赛克观测 $M=\phi(I)$ | 概念量（plan P2），下采样 + 分块平均，未实现 |
 | $\Omega, E^{\text{cmd}}, \Psi$ | 算子空间、指令编码器、状态变换 $Z'=\Psi(Z,\omega)$ | 概念量（plan P5），未实现 |
@@ -42,13 +42,13 @@
 - 在线编码器 $E_\theta$（可训练），
 - 目标编码器 $E_\xi$（参数冻结，仅靠 EMA 追随 $\theta$），
 
-初始化时 $\xi \leftarrow \theta$（[L273](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L273)），并对 $E_\xi$ 关闭梯度（[L274-L275](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L274-L275)）。
+初始化时 $\xi \leftarrow \theta$（[L354](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L354)），并对 $E_\xi$ 关闭梯度（[L355-L356](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L355-L356)）。
 
 对每个样本 $x$，构造掩码上下文 $x_c = M(x)$，其中掩码比例
 
 $$m \sim \mathcal{U}(0.2,\, 0.95)$$
 
-即 [L313-L315](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L313-L315) 的 `min_ratio + (max_ratio - min_ratio) * torch.rand(...)`，默认 `min_ratio=0.2`、`max_ratio=0.95`。被遮位置替换为 `[MASK]` token，干净目标 $x_y = x$ 保持不变（[L317-L319](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L317-L319)）。
+即 [L394-L396](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L394-L396) 的 `min_ratio + (max_ratio - min_ratio) * torch.rand(...)`，默认 `min_ratio=0.2`、`max_ratio=0.95`。被遮位置替换为 `[MASK]` token，干净目标 $x_y = x$ 保持不变（[L397-L399](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L397-L399)）。
 
 ### 1.2 预测目标与余弦损失
 
@@ -56,19 +56,19 @@ $$m \sim \mathcal{U}(0.2,\, 0.95)$$
 
 $$c = E_\theta(x_c), \qquad z_y = E_\xi(x_y).$$
 
-$z_y$ 在 `torch.no_grad()` 下计算（[L363-L364](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L363-L364)），梯度只回传到 $E_\theta$ 与 $P_\phi$。预测器从上下文预测目标潜变量：
+$z_y$ 在 `torch.no_grad()` 下计算（[L452-L453](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L452-L453)），梯度只回传到 $E_\theta$ 与 $P_\phi$。预测器从上下文预测目标潜变量：
 
 $$\hat z = P_\phi(c),$$
 
-对应 [L366](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L366)。损失采用余弦相似度（而非原 I-JEPA 的 $\ell_2$）：
+对应 [L455](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L455)。损失采用余弦相似度（而非原 I-JEPA 的 $\ell_2$）：
 
 $$\mathcal{L}_{\text{JEPA}} = \mathbb{E}_{x}\left[\, 1 - \cos\!\bigl(\hat z,\; z_y\bigr)\,\right],$$
 
-即 [L367](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L367)。最小化该式等价于把预测方向对齐到目标表示方向。
+即 [L456](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L456)。最小化该式等价于把预测方向对齐到目标表示方向。
 
 ### 1.3 EMA 目标更新
 
-每次优化步之后执行（[L297-L303](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L297-L303)、[L379](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L379)）：
+每次优化步之后执行（[L379-L384](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L379-L384)、[L468](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L468)）：
 
 $$\xi \leftarrow \mu\,\xi + (1-\mu)\,\theta, \qquad \mu = 0.99.$$
 
@@ -82,29 +82,29 @@ $$\xi \leftarrow \mu\,\xi + (1-\mu)\,\theta, \qquad \mu = 0.99.$$
 
 $$\mathcal{L}_{\text{recon}} = \mathrm{CE}\!\bigl(D_\eta(E_\theta(x)),\; x\bigr),$$
 
-对应 [L329-L332](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L329-L332)、[L369](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L369)。若 $E_\theta(x)$ 在不同位置退化为常数，解码器无法区分 token，交叉熵将爆炸。该项强制表示中保留**位置可辨别的 token 信息**，是抑制塌缩的主力。
+对应 [L410-L413](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L410-L413)、[L458](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L458)。若 $E_\theta(x)$ 在不同位置退化为常数，解码器无法区分 token，交叉熵将爆炸。该项强制表示中保留**位置可辨别的 token 信息**，是抑制塌缩的主力。
 
 **(b) VICReg 风格方差约束（次要防线）**
 
 $$\mathcal{L}_{\text{var}} = \mathbb{E}_{j}\bigl[\mathrm{relu}(1 - \sigma_j)\bigr], \qquad \sigma_j = \mathrm{std}(z_{:,j}),$$
 
-即 [L322-L326](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L322-L326)。惩罚在 batch 与位置维度上方差过小的潜空间维度，防止维度塌缩。
+即 [L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)。惩罚在 batch 与位置维度上方差过小的潜空间维度，防止维度塌缩。
 
-阶段一总目标（[L374](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L374)）：
+阶段一总目标（[L463](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L463)）：
 
 $$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{masked\_recon}} + 0.1\,\mathcal{L}_{\text{var}} + \mathcal{L}_{\text{quant}},$$
 
-其中 $\mathcal{L}_{\text{masked\_recon}} = \mathrm{CE}\bigl(D_\eta(Q(P_\phi(c))),\, x\bigr)$ 是"掩码上下文→预测→解码"路径上的重建项（[L371-L372](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L371-L372)），用于消除推理时读预测潜变量的分布偏移；$\mathcal{L}_{\text{quant}}$ 是量化器辅助损失（[L368](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L368)，FSQ 下为 0，VQ/RVQ 下为 commitment 项）。
+其中 $\mathcal{L}_{\text{masked\_recon}} = \mathrm{CE}\bigl(D_\eta(Q(P_\phi(c))),\, x\bigr)$ 是"掩码上下文→预测→解码"路径上的重建项（[L460-L461](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L460-L461)），用于消除推理时读预测潜变量的分布偏移；$\mathcal{L}_{\text{quant}}$ 是量化器辅助损失（[L457](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L457)，FSQ 下为 0，VQ/RVQ 下为 commitment 项）。
 
 ---
 
 ## 2. Flow Matching 生成的数学原理
 
-阶段一结束后冻结 $E_\theta$（[L390-L391](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L390-L391)），潜空间被固定，Flow 只需拟合这个静止的数据分布。
+阶段一结束后冻结 $E_\theta$（[L479-L480](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L479-L480)），潜空间被固定，Flow 只需拟合这个静止的数据分布。
 
 ### 2.1 概率路径与线性（OT）插值
 
-设 $p_0 = \mathcal{N}(0, I)$ 为噪声分布，$p_1$ 为目标编码器诱导的数据分布 $z_1 = E_\xi(x) \sim p_1$。Flow Matching 在两者之间构造一条概率路径 $p_t$（$t\in[0,1]$）。本模型采用**线性插值路径**（[L409](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L409)）：
+设 $p_0 = \mathcal{N}(0, I)$ 为噪声分布，$p_1$ 为目标编码器诱导的数据分布 $z_1 = E_\xi(x) \sim p_1$。Flow Matching 在两者之间构造一条概率路径 $p_t$（$t\in[0,1]$）。本模型采用**线性插值路径**（[L499](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L499)）：
 
 $$z_t = (1-t)\,z_0 + t\,z_1, \qquad z_0 \sim p_0,\; z_1 \sim p_1,\; t \sim \mathcal{U}(0,1).$$
 
@@ -116,15 +116,15 @@ $$z_t = (1-t)\,z_0 + t\,z_1, \qquad z_0 \sim p_0,\; z_1 \sim p_1,\; t \sim \math
 
 $$u_t(z_t) = \frac{d z_t}{d t} = z_1 - z_0.$$
 
-源码中即 `velocity_target = target - noise`（[L410](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L410)）。模型学习一个条件速度场 $v_\psi(z_t, t, c)$ 去回归它（[L411](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L411)），损失为均方误差（[L412](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L412)）：
+源码中即 `velocity_target = target - noise`（[L500](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L500)）。模型学习一个条件速度场 $v_\psi(z_t, t, c)$ 去回归它（[L501](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L501)），损失为均方误差（[L502](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L502)）：
 
 $$\mathcal{L}_{\text{flow}} = \mathbb{E}_{t, z_0, z_1}\left[\left\| v_\psi(z_t, t, c) - (z_1 - z_0) \right\|^2\right].$$
 
-条件 $c = E_\theta(x_c)$ 通过 `FlowBlock` 中的交叉注意力注入（[L72-L80](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L72-L80)），使生成的潜变量与可见前缀一致。
+条件 $c = E_\theta(x_c)$ 通过 `FlowBlock` 中的交叉注意力注入（[L115-L117](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L115-L117)），使生成的潜变量与可见前缀一致。
 
 ### 2.3 时间嵌入
 
-连续时间 $t$ 经正弦嵌入后由 MLP 非线性化（[L83-L93](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L83-L93)、[L103-L107](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L103-L107)）：
+连续时间 $t$ 经正弦嵌入后由 MLP 非线性化（[L122-L132](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L122-L132)、[L142-L146](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L142-L146)）：
 
 $$\mathrm{emb}(t) = [\sin(t \cdot 1000 \cdot f),\; \cos(t \cdot 1000 \cdot f)], \qquad f_j = \exp\!\left(-\frac{\ln 10000 \cdot j}{d/2 - 1}\right),$$
 
@@ -132,11 +132,11 @@ $$\mathrm{emb}(t) = [\sin(t \cdot 1000 \cdot f),\; \cos(t \cdot 1000 \cdot f)], 
 
 ### 2.4 Euler 采样：从噪声积分到潜变量
 
-推理时求解由学习速度场定义的 ODE（[L425-L435](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L425-L435)）：
+推理时求解由学习速度场定义的 ODE（[L515-L536](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L515-L536)）：
 
 $$\frac{d z}{d t} = v_\psi(z, t, c), \qquad z(0) \sim \mathcal{N}(0, I),$$
 
-用 Euler 法离散，步长 $\Delta t = 1/N$（$N$ = `inference_steps`，[L429](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L429)）：
+用 Euler 法离散，步长 $\Delta t = 1/N$（$N$ = `inference_steps`，[L524](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L524)）：
 
 $$z_{k+1} = z_k + \Delta t \cdot v_\psi(z_k,\; k\Delta t,\; c), \qquad k = 0, 1, \dots, N-1.$$
 
@@ -150,11 +150,11 @@ $$z_{k+1} = z_k + \Delta t \cdot v_\psi(z_k,\; k\Delta t,\; c), \qquad k = 0, 1,
 
 在引入统一潜空间假设之前，先明确当前代码实现的是什么：一个**两阶段潜变量生成器**。本节余下部分讨论的都是它的文本通道。
 
-一句话：**掩码 JEPA 学连续潜表征，条件 Flow Matching 在潜空间生成，线性解码器把潜变量确定性映射回 token。**
+一句话：**掩码 JEPA 学连续潜表征，条件 Flow Matching 在潜空间生成，带位置混合的 Transformer 解码器把潜变量确定性映射回 token。**
 
 **(a) 前向流程。**
 
-阶段一（表征学习，[L346-L387](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L346-L387)）：
+阶段一（表征学习，[L446-L476](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L446-L476)）：
 
 1. 对干净序列 $x$ 施加掩码得到 $x_c$，$c=E_\theta(x_c)$，目标表示 $z_y=E_\xi(x)$（`no_grad`）；
 2. 预测器 $\hat z=P_\phi(c)$，用 $1-\cos(\hat z,z_y)$ 训练；
@@ -162,12 +162,13 @@ $$z_{k+1} = z_k + \Delta t \cdot v_\psi(z_k,\; k\Delta t,\; c), \qquad k = 0, 1,
 4. 对方差过小的潜维度加正则，总损失
 $$\mathcal L_1=\mathcal L_{\text{JEPA}}+\mathcal L_{\text{recon}}+0.5\,\mathcal L_{\text{masked\_recon}}+0.1\,\mathcal L_{\text{var}}+\mathcal L_{\text{quant}}.$$
 
-阶段二（潜空间生成，[L389-L421](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L389-L421)）：
+阶段二（潜空间生成，[L487-L511](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L487-L511)）：
 
 1. 冻结 $E_\theta$ 与 $E_\xi$，潜分布静止；
 2. $z_1=E_\xi(x)$，$z_0\sim\mathcal N(0,I)$，$z_t=(1-t)z_0+t z_1$；
 3. 速度场 $v_\psi(z_t,t,c)$ 回归 $z_1-z_0$，条件 $c$ 经交叉注意力注入；
-4. 推理用 Euler 积分 $N$ 步得 $\hat z(1)$，再取 $T=\arg\max D_\eta(\hat z)$。
+4. 解码器 $D_\eta$ 用教师强制的 $Q(z_1)$ 重建训练；`pretrain.py` 的 `stage2_step` 另加 Flow 预测端点 $Q\bigl(z_t+(1-t)v_\psi\bigr)$（对 $v_\psi$ detach，只训解码器）作采样重建，使解码器对采样误差鲁棒；
+5. 推理用 Euler 积分 $N$ 步得 $\hat z(1)$，再取 $T=\arg\max D_\eta(\hat z)$。
 
 注意：$P_\phi$ 只在阶段一使用；生成时由 $v_\psi$ 接替"条件 $\to$ 潜变量"的映射。$E_\theta$ 提供条件，$E_\xi$ 定义目标分布。
 
@@ -177,7 +178,7 @@ $$\mathcal L_1=\mathcal L_{\text{JEPA}}+\mathcal L_{\text{recon}}+0.5\,\mathcal 
 |---|---|---|
 | $c=E_\theta(x_c)$，$z_y=E_\xi(x)$ | 双编码器 | 上下文表示 / 目标表示 |
 | $\hat z=P_\phi(c)$，$1-\cos(\hat z,z_y)$ | JEPA 预测器 | 潜空间预测（仅阶段一） |
-| $\mathrm{CE}(D_\eta(E_\theta(x)),x)$ | 线性解码器 | 保留 token 信息、防塌缩 |
+| $\mathrm{CE}(D_\eta(E_\theta(x)),x)$ | 位置混合 Transformer 解码器 | 保留 token 信息、防塌缩 |
 | $\mathcal L_{\text{var}}$ | 方差正则 | 防止维度塌缩 |
 | $z_t=(1-t)z_0+t z_1$ | 线性概率路径 | OT 插值 |
 | $v_\psi(z_t,t,c)$ | Flow Transformer | 学速度场 |
@@ -195,7 +196,7 @@ $$p(T\mid x_c)\approx\int p_\theta(T\mid Z)\,p_\psi(Z\mid c)\,dZ,\qquad c=E_\the
 **(d) 与后文的关系。**
 
 - 3.1–3.4 把 $T=g(Z)$ 抽象成统一潜空间 $Z$ 的离散有损通道；
-- 3.5 对齐当前实现（线性解码、无显式码本、率由 $|\mathcal{V}|^L$ 硬约束）；
+- 3.5 对齐当前实现（位置混合解码、无显式码本、率由 $|\mathcal{V}|^L$ 硬约束）；
 - 3.6 给出显式离散瓶颈（FSQ/VQ/RVQ）、条件后验 $p_\phi(Z\mid T)$ 与并行解码的扩展。
 
 ### 3.1 统一潜空间假设与命题陈述
@@ -212,7 +213,7 @@ V = R_V(Z) + \varepsilon,\qquad
 T = g(Z) \in \mathcal{V}^L .
 $$
 
-其中 $I, V$ 是连续观测（图像、视频），$T$ 是离散 token 序列，$g$ 是文本量化器。本模型只实现最后一条通道：$g$ 为逐位置线性解码器的 $\arg\max$（[L437-L445](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L437-L445)）；$R_I, R_V$ 是概念量。
+其中 $I, V$ 是连续观测（图像、视频），$T$ 是离散 token 序列，$g$ 是文本量化器。本模型只实现最后一条通道：$g$ 为位置混合 Transformer 解码器的 $\arg\max$（[L560-L569](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L560-L569)）；$R_I, R_V$ 是概念量。
 
 为使命题有意义，需要三条假设：
 
@@ -239,7 +240,7 @@ $T$ 取值于有限集 $\mathcal{V}^L$，故
 
 $$H(T) \le L \log_2 |\mathcal{V}|. \tag{1}$$
 
-本模型语料有 77 个不同字符（[L541-L548](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L541-L548)）；`[MASK]` 只出现在输入上下文、从不进入输出文本，故输出词表 $|\mathcal{V}|=77$，于是
+本模型语料有 77 个不同字符（[L650-L653](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L650-L653)）；`[MASK]` 只出现在输入上下文、从不进入输出文本，故输出词表 $|\mathcal{V}|=77$，于是
 
 $$H(T) \le 24 \log_2 77 \approx 150.40\ \text{bit}. \tag{2}$$
 
@@ -339,18 +340,21 @@ $$H(T) \;=\; \underbrace{I(T;Y)}_{\text{语义码率}} \;+\; \underbrace{H(T\mid
 
 ### 3.5 验证四：与本模型实现的对齐
 
-**(a) 量化器是线性打分，不是欧氏最近邻。**
-解码器是线性层（[L290](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L290)），输出
+**(a) 解码器带位置混合，读出头仍是线性打分，不是欧氏最近邻。**
+解码器是「位置混合 Transformer + 线性读出头」（`Decoder`，`decoder_layers` 层 self-attention）：先对量化潜变量做位置间交互，再逐位置线性输出
 
-$$T_j = \arg\max_{v \in \mathcal{V}} \bigl( w_v^{\top} Z_j + b_v \bigr), \tag{16}$$
+$$h = \mathrm{Norm}\bigl(\mathrm{Attn}(Q(Z) + \mathrm{pos})\bigr),\qquad
+T_j = \arg\max_{v \in \mathcal{V}} \bigl( w_v^{\top} h_j + b_v \bigr), \tag{16}$$
 
-其中 $w_v$ 是 `decoder` 权重矩阵的第 $v$ 行。这诱导的是**由超平面划分的 Voronoi 型量化**，一般**不等于**最近邻量化 $\arg\min_v \|Z_j - e(v)\|^2$。只有当权重与 token embedding 绑定、且 $w_v = 2e(v)$、$b_v = -\|e(v)\|^2 + \text{const}$ 时才退化为此形式；本模型没有绑定。因此：
+其中 $w_v$ 是读出头的权重第 $v$ 行，$h_j$ 是位置混合后的特征（依赖全部位置的潜变量）。读出头仍是**由超平面划分的 Voronoi 型量化**，一般**不等于**最近邻量化 $\arg\min_v \|h_j - e(v)\|^2$；只有当 $w_v = 2e(v)$、$b_v = -\|e(v)\|^2 + \text{const}$ 时才退化为此形式，本模型没有绑定。因此：
 
 - 不能把 $w_v$ 称为"token embedding"；
-- 不能用 $\|Z - e(T)\|^2$ 作为式 (10) 中 $D_T$ 的估计。正确做法是用重编码失真 $\mathbb{E}\|Z - E_\theta(T)\|^2$（[L362](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L362)，阶段二已冻结），或直接用 (7) 的条件方差。
+- 不能用 $\|Z - e(T)\|^2$ 作为式 (10) 中 $D_T$ 的估计。正确做法是用重编码失真 $\mathbb{E}\|Z - E_\theta(T)\|^2$（阶段二已冻结），或直接用 (7) 的条件方差。
+
+位置混合使解码器能借助其他位置纠正单个位置的采样误差，从而对 Flow 采样误差更鲁棒（旧实现是逐位置 `nn.Linear`，单点噪声直接变成乱码）。
 
 **(b) 率是架构硬约束，不是损失项。**
-本模型没有任何 KL 项或码率惩罚。码率由 $|\mathcal{V}|^L$ 硬性封顶，对应 (14) 的约束集而不是 (13) 的 $\beta$。训练中只有失真项（重建交叉熵 [L369](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L369)、[L413](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L413)）和防塌缩正则。
+本模型没有任何 KL 项或码率惩罚。码率由 $|\mathcal{V}|^L$ 硬性封顶，对应 (14) 的约束集而不是 (13) 的 $\beta$。训练中只有失真项（重建交叉熵：阶段一 [L458](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L458)、阶段二的教师强制重建；`pretrain.py` 的 `stage2_step` 另加 Flow 端点采样重建一路）和防塌缩正则。
 
 **(c) 确定性编码器下 ELBO 不成立。**
 若 $q(z\mid x)$ 是点质量（确定性编码器），则 $\mathrm{KL}(q(z\mid x)\|p(z)) = +\infty$，VAE 型 ELBO 只是形式类比，不是本模型的目标。不能写成"训练目标已隐含率–失真结构"：真正的结构是"失真项 + 架构率约束"。
@@ -360,10 +364,10 @@ $$T_j = \arg\max_{v \in \mathcal{V}} \bigl( w_v^{\top} Z_j + b_v \bigr), \tag{16
 $$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1 - \sigma_j)\bigr],\qquad
 \sigma_j = \mathrm{std}\bigl(\mathrm{reshape}(z,\,[-1, d])_{:,j}\bigr), \tag{17}$$
 
-即 [L322-L326](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L322-L326)。它在 $\sigma_j < 1$ 时受罚，作用是**抬高**潜空间各维的熵、防止维度塌缩，方向与"压低 $I(Z;T)$"的率惩罚相反。它与率无关，只是防塌缩正则。
+即 [L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)。它在 $\sigma_j < 1$ 时受罚，作用是**抬高**潜空间各维的熵、防止维度塌缩，方向与"压低 $I(Z;T)$"的率惩罚相反。它与率无关，只是防塌缩正则。
 
 **(e) 潜空间静止的前提。**
-阶段二没有再调用 `update_target`（[L389-L421](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L389-L421)），$E_\xi$ 在阶段二完全冻结，$p_1$ 恒定。式 (7)–(15) 中的 $Z$ 正是这个静止分布的样本，论证因此成立。
+阶段二没有再调用 `update_target`（[L487-L511](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L487-L511)），$E_\xi$ 在阶段二完全冻结，$p_1$ 恒定。式 (7)–(15) 中的 $Z$ 正是这个静止分布的样本，论证因此成立。
 
 命题 3.1–3.4 的信息论结论：
 
@@ -407,7 +411,7 @@ $$\hat z_i=\frac{\mathrm{round}\!\big(\tfrac{L_i-1}{2}\tanh(z_i)\big)}{(L_i-1)/2
 $$k^{\star}=\arg\min_k\|z-e_k\|_2^2,\qquad
 \mathcal L_{\mathrm{VQ}}=\gamma\,\big\|z-\mathrm{sg}[e_{k^{\star}}]\big\|^2, \tag{19}$$
 
-其中距离矩阵可用 $d_{bk}=\|z_b\|^2+\|e_k\|^2-2z_be_k^\top$ 一次矩阵乘得到，码本向量用 EMA 追踪分配到该码字的编码器输出（[L200-L209](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L200-L209)）。RVQ 再把残差逐级量化：
+其中距离矩阵可用 $d_{bk}=\|z_b\|^2+\|e_k\|^2-2z_be_k^\top$ 一次矩阵乘得到，码本向量用 EMA 追踪分配到该码字的编码器输出（[L231-L253](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L231-L253)）。RVQ 再把残差逐级量化：
 
 $$\hat z=\sum_{m=1}^{M}e^{(m)}_{k_m},\qquad
 r^{(m+1)}=r^{(m)}-e^{(m)}_{k_m},\qquad
@@ -461,7 +465,7 @@ $$h(q)=-\infty .$$
 
 点质量无法表达后验的宽度——它只报告"最可能的一个点"，把"文字背后有多种可能"整件事抹掉。而 $H(Z\mid T)$（连续版本 $h(Z\mid T)$）要度量的正是这个宽度。
 
-**(b) 噪声是采样器随机性的唯一来源。** 推理起点是 `torch.randn`（[L491](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L491)），即 $z_0\sim\mathcal N(0,I)$；训练端同样以 `torch.randn_like(target)` 注入噪声（[L466](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L466)）。采样器 $\Phi_1$ 是 Flow ODE 在 $t\in[0,1]$ 上的积分映射，给定 $T$ 后 $\hat Z=\Phi_1(z_0)$ 的全部随机性来自 $z_0$。连续流可逆，由微分熵的变量替换公式
+**(b) 噪声是采样器随机性的唯一来源。** 推理起点是 `torch.randn`（[L522](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L522)），即 $z_0\sim\mathcal N(0,I)$；训练端同样以 `torch.randn_like(target)` 注入噪声（[L497](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L497)）。采样器 $\Phi_1$ 是 Flow ODE 在 $t\in[0,1]$ 上的积分映射，给定 $T$ 后 $\hat Z=\Phi_1(z_0)$ 的全部随机性来自 $z_0$。连续流可逆，由微分熵的变量替换公式
 
 $$h(\hat Z\mid T)=h(z_0)+\mathbb E_{z_0}\Big[\log\Big|\det\tfrac{\partial\Phi_1(z_0)}{\partial z_0}\Big|\Big]. \tag{25}$$
 
@@ -469,7 +473,7 @@ $$h(\hat Z\mid T)=h(z_0)+\mathbb E_{z_0}\Big[\log\Big|\det\tfrac{\partial\Phi_1(
 
 $$h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{26}$$
 
-**(c) 噪声熵为什么是输出熵的上界。** 严格成立的是式 (25)；"上界"来自流在数据支撑上**收缩**这一典型情形：variance_loss（式 (17)，[L372-L376](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L372-L376)）把潜空间各维尺度约束在 $\sigma_j\gtrsim 1$，与 $z_0$ 的单位方差同阶，于是 $\Phi_1$ 在数据支撑上近似体积守恒、雅可比行列式 $\det J\approx 1$，$\mathbb E[\log|\det J|]\le 0$，代入式 (25) 得
+**(c) 噪声熵为什么是输出熵的上界。** 严格成立的是式 (25)；"上界"来自流在数据支撑上**收缩**这一典型情形：variance_loss（式 (17)，[L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)）把潜空间各维尺度约束在 $\sigma_j\gtrsim 1$，与 $z_0$ 的单位方差同阶，于是 $\Phi_1$ 在数据支撑上近似体积守恒、雅可比行列式 $\det J\approx 1$，$\mathbb E[\log|\det J|]\le 0$，代入式 (25) 得
 
 $$h(\hat Z\mid T)\;\le\; h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{27}$$
 
@@ -483,9 +487,9 @@ $$h(z_0)\;\gtrsim\; h(Z\mid T). \tag{28}$$
 
 $$H(Z_\delta\mid T)\approx h(Z\mid T)+Ld\,\log_2\tfrac{1}{\delta},$$
 
-固定分辨率 $\delta$ 后只差一个与 $T$ 无关的常数。因此式 (24) 的经验离散度 $\widehat{\mathrm{Var}}(Z\mid T)=\tfrac1M\sum_m\|Z^{(m)}-\bar Z\|^2$（源码 [L586](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L586) 的 `z.var(dim=0, unbiased=False).mean()`）度量的是连续宽度 $h(Z\mid T)$，不是离散码率 $H(T)$——它测"这段文字背后潜变量有多散"，与"文字本身多少 bit"是两回事。
+固定分辨率 $\delta$ 后只差一个与 $T$ 无关的常数。因此式 (24) 的经验离散度 $\widehat{\mathrm{Var}}(Z\mid T)=\tfrac1M\sum_m\|Z^{(m)}-\bar Z\|^2$（源码 [L617](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L617) 的 `z.var(dim=0, unbiased=False).mean()`）度量的是连续宽度 $h(Z\mid T)$，不是离散码率 $H(T)$——它测"这段文字背后潜变量有多散"，与"文字本身多少 bit"是两回事。
 
-**(e) 熵源 ≠ 被去噪的噪声。** 式 (25)–(28) 表明 $\mathcal N(0,I)$ 的熵最终转化为后验 $\hat Z$ 的宽度，代表"文字说不清的那部分"（$h(Z\mid T)$）。它**不是**压缩时注入、等着被去噪还原的细节：压缩端 $g$ 是确定性的（$H(T\mid Z)=0$，式 A2，argmax 解码见 [L517](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L517)），随机性全部来自生成端 $z_0$。这与 3.5(c) 的"确定性编码器下 ELBO 不成立"是同一类辨析——不能把采样器的随机性误读成编码端的噪声。
+**(e) 熵源 ≠ 被去噪的噪声。** 式 (25)–(28) 表明 $\mathcal N(0,I)$ 的熵最终转化为后验 $\hat Z$ 的宽度，代表"文字说不清的那部分"（$h(Z\mid T)$）。它**不是**压缩时注入、等着被去噪还原的细节：压缩端 $g$ 是确定性的（$H(T\mid Z)=0$，式 A2，argmax 解码见 [L548](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L548)），随机性全部来自生成端 $z_0$。这与 3.5(c) 的"确定性编码器下 ELBO 不成立"是同一类辨析——不能把采样器的随机性误读成编码端的噪声。
 
 综合：
 
@@ -495,11 +499,11 @@ $$H(Z_\delta\mid T)\approx h(Z\mid T)+Ld\,\log_2\tfrac{1}{\delta},$$
 
 把「通路映射」与「数据内部关系」分开是有意的：二者在复杂度与并行度上完全不同，混在一起会妨碍各自优化。
 
-**通路映射是逐位置独立的 $O(L)$ 操作。** $g$（式 16 逐位置 argmax）、FSQ（式 18 逐维量化）、马赛克 $\phi$（3.7 节逐块平均）都只看单个位置/块，位置间无耦合，是 $L$ 个独立运算，串行深度 $O(1)$，天然 GPU 并行。
+**通路映射是逐位置独立的 $O(L)$ 操作。** FSQ（式 18 逐维量化）、马赛克 $\phi$（3.7 节逐块平均）都只看单个位置/块，位置间无耦合，是 $L$ 个独立运算，串行深度 $O(1)$，天然 GPU 并行。注意解码器 $g$ 的读出头虽是逐位置线性打分，但其前有 self-attention 做位置混合，属于下面的关系类 $O(L^2)$，不再是纯通路投影。
 
 **数据内部关系由 self-attention 承载，是 $O(L^2)$ 的成对交互。** 编码器 $E_\theta$ 用 attention 让 $z_i$ 聚合整条序列上下文，token $i$ 与 $j$ 的关系被折叠进 $z_i,z_j$ 的坐标值（分布式表征），而非一条显式边。$Z=(z_1,\dots,z_L)$ 的联合结构 $p(Z)$ 承载关系；JEPA 掩码预测 $\hat z=P_\phi(c)$ 显式学习 $p(z_{\text{masked}}\mid z_{\text{visible}})$，即位置间依赖。
 
-**因此关系是 $O(L^2)$ 瓶颈，通路是 $O(L)$ 廉价投影。** 注意力矩阵是 $L\times L$ 成对计算（计算与显存的主开销），量化/解码是 $L$ 个独立投影。分离二者后各自可独立优化：通路可稀疏化/低精度，attention 可线性化（FlashAttention、线性注意力、Mamba 等）。这正是本节串行深度讨论的根源——关系建模的成本集中在 attention 层，而非通路层。
+**因此关系是 $O(L^2)$ 瓶颈，通路是 $O(L)$ 廉价投影。** 注意力矩阵是 $L\times L$ 成对计算（计算与显存的主开销），量化与解码读出头是 $L$ 个独立投影，而解码器的位置混合 self-attention 属于关系类。分离二者后各自可独立优化：通路可稀疏化/低精度，attention 可线性化（FlashAttention、线性注意力、Mamba 等）。这正是本节串行深度讨论的根源——关系建模的成本集中在 attention 层，而非通路层。
 
 **有损性正是「关系被丢弃」。** $T=g(Z)$ 逐位置量化只保留符号，位置间关系信息进入纤维 $\mathcal F_t$（式 6），构成 $H(Z\mid T)>0$ 的一部分。生成时关系不是从数据直接搬来，而是 $v_\psi$ 的 attention 每步动态"注入"：起点 $z_0\sim\mathcal N(0,I)$ 各维独立（无关系），经 self-attention 逐步编织成有结构的 $z_1$。
 

@@ -1,0 +1,177 @@
+{
+  "version": 1,
+  "created_at": "2026-11-23T03:17:17Z",
+  "updated_at": "2026-11-23T03:24:10Z",
+  "files": {
+    ".gitattributes": {
+      "role": "index",
+      "sha256": "21fa16a2122e2b0360b47502c577428b645437e08e9e87ffba661f84853cb476",
+      "size": 291,
+      "normalized_sha256": "21fa16a2122e2b0360b47502c577428b645437e08e9e87ffba661f84853cb476"
+    },
+    ".gitignore": {
+      "role": "index",
+      "sha256": "8559f47a80b7dce53ff7acb4a24e348060346b3e6a56b2df9926fe99d2c45d87",
+      "size": 1426,
+      "normalized_sha256": "8559f47a80b7dce53ff7acb4a24e348060346b3e6a56b2df9926fe99d2c45d87"
+    },
+    "AGENTS.md": {
+      "role": "index",
+      "sha256": "8dfc9de92509cb22289cefa4ad652c5df2d079221b407b6a67572d5ef75007e8",
+      "size": 14078,
+      "normalized_sha256": "8dfc9de92509cb22289cefa4ad652c5df2d079221b407b6a67572d5ef75007e8"
+    },
+    "README.md": {
+      "role": "index",
+      "sha256": "ba57d32519b1f82de0738a605c4ffbd28266d5dab0da4952ec173fc5affe0428",
+      "size": 7220,
+      "normalized_sha256": "ba57d32519b1f82de0738a605c4ffbd28266d5dab0da4952ec173fc5affe0428"
+    },
+    "analyze.py": {
+      "role": "index",
+      "sha256": "fd8bef7d41b436b7236380889d0c9aab9cf847bf33e1d1b3baa33f5daf39d0f3",
+      "size": 8196,
+      "normalized_sha256": "fd8bef7d41b436b7236380889d0c9aab9cf847bf33e1d1b3baa33f5daf39d0f3"
+    },
+    "aoci.code.txt": {
+      "role": "index",
+      "sha256": "e227e5adb66a32ab544c432102daf3e950592cdeca61d5dccb96577d726ee955",
+      "size": 4682,
+      "normalized_sha256": "e227e5adb66a32ab544c432102daf3e950592cdeca61d5dccb96577d726ee955"
+    },
+    "aoci.meta.txt": {
+      "role": "index",
+      "sha256": "5ccd06dd2198435423141174e4f3eaed7e7645644070e0b5cc2e20dbc889172a",
+      "size": 2187,
+      "normalized_sha256": "5ccd06dd2198435423141174e4f3eaed7e7645644070e0b5cc2e20dbc889172a"
+    },
+    "aoci.txt": {
+      "role": "index",
+      "sha256": "ec73f80aef09fc923a5d9782aa9dea230858aabce4583db6334276b3dfae3999",
+      "size": 293,
+      "normalized_sha256": "ec73f80aef09fc923a5d9782aa9dea230858aabce4583db6334276b3dfae3999"
+    },
+    "data_prepare.py": {
+      "role": "index",
+      "sha256": "3f4a3b96b73b717676e0d9e9775c386c485cf36cb6958f68a982f235fc5ef410",
+      "size": 8501,
+      "normalized_sha256": "3f4a3b96b73b717676e0d9e9775c386c485cf36cb6958f68a982f235fc5ef410"
+    },
+    "download_full.py": {
+      "role": "index",
+      "sha256": "307c56712165efd55c2c23ee7e82095586c2ce75fc8a80c3152227cb39aebb18",
+      "size": 4656,
+      "normalized_sha256": "307c56712165efd55c2c23ee7e82095586c2ce75fc8a80c3152227cb39aebb18"
+    },
+    "eval_generate.py": {
+      "role": "index",
+      "sha256": "afa3cfaa4f7dbb9b1cf88dd27880c3ef056f1af4ffb4d99088c81a342a0ca66d",
+      "size": 8225,
+      "normalized_sha256": "afa3cfaa4f7dbb9b1cf88dd27880c3ef056f1af4ffb4d99088c81a342a0ca66d"
+    },
+    "flow_matching_jepa.py": {
+      "role": "index",
+      "sha256": "8d4022ac5b56c0b8ccf1f2b9144f6a7e4f477a18c556456769ce6edb2a40e75c",
+      "size": 33687,
+      "normalized_sha256": "8d4022ac5b56c0b8ccf1f2b9144f6a7e4f477a18c556456769ce6edb2a40e75c"
+    },
+    "math.md": {
+      "role": "index",
+      "sha256": "6816e1d47ebc83171c4a0584e01b2da2abce1efb4f30afbd5983cafe7c562907",
+      "size": 63201,
+      "normalized_sha256": "6816e1d47ebc83171c4a0584e01b2da2abce1efb4f30afbd5983cafe7c562907"
+    },
+    "pretrain.py": {
+      "role": "index",
+      "sha256": "c152a0c2594d56463f3e06455deefefee60eeccd0b788c8068da545024d5074f",
+      "size": 17314,
+      "normalized_sha256": "c152a0c2594d56463f3e06455deefefee60eeccd0b788c8068da545024d5074f"
+    },
+    "run_full_pipeline.sh": {
+      "role": "index",
+      "sha256": "fa0efa9c3079dd7109952c1bad4c474b73e865f20c535f5252d682b667532f50",
+      "size": 1613,
+      "normalized_sha256": "fa0efa9c3079dd7109952c1bad4c474b73e865f20c535f5252d682b667532f50"
+    },
+    "run_pipeline.sh": {
+      "role": "index",
+      "sha256": "4f1887708422d01a6faeeeefcb79e94fe88175bd95c313f0ecde080d9ef1841c",
+      "size": 3087,
+      "normalized_sha256": "4f1887708422d01a6faeeeefcb79e94fe88175bd95c313f0ecde080d9ef1841c"
+    },
+    "run_pretrain_a100.sh": {
+      "role": "index",
+      "sha256": "092e6a43b6464586da87f8cbc9f27df402054c1259eb272625d3bd7d0386bd8a",
+      "size": 2584,
+      "normalized_sha256": "092e6a43b6464586da87f8cbc9f27df402054c1259eb272625d3bd7d0386bd8a"
+    }
+  },
+  "managed_scope": {
+    "version": "managed-scope-baseline/v1",
+    "policy_identity": "e0f548d87fe5462c412a1c54409871a60ddf2ae5c30609258ff8739fdfcc8e76",
+    "observe_change_policy": "review_required",
+    "budget_policy_identity": "15e9b37a6c57e9bf03c9df3d0d049eb5b9a7f5540f9d34960408114e2538a32d",
+    "budget_policy": {
+      "version": "cognition-budget-policy/v1",
+      "mode": "enforce",
+      "whole_index": {
+        "target_tokens": 200000,
+        "warning_tokens": 300000,
+        "max_tokens": 400000
+      },
+      "r": [
+        {
+          "min_c": 1,
+          "max_c": 4,
+          "target_tokens": 25,
+          "max_tokens": 50
+        },
+        {
+          "min_c": 5,
+          "max_c": 7,
+          "target_tokens": 45,
+          "max_tokens": 90
+        },
+        {
+          "min_c": 8,
+          "max_c": 8,
+          "target_tokens": 70,
+          "max_tokens": 140
+        },
+        {
+          "min_c": 9,
+          "max_c": 9,
+          "target_tokens": 90,
+          "max_tokens": 180
+        }
+      ],
+      "s": [
+        {
+          "min_c": 1,
+          "max_c": 4,
+          "target_tokens": 20,
+          "max_tokens": 40
+        },
+        {
+          "min_c": 5,
+          "max_c": 7,
+          "target_tokens": 40,
+          "max_tokens": 80
+        },
+        {
+          "min_c": 8,
+          "max_c": 8,
+          "target_tokens": 70,
+          "max_tokens": 140
+        },
+        {
+          "min_c": 9,
+          "max_c": 9,
+          "target_tokens": 100,
+          "max_tokens": 200
+        }
+      ]
+    },
+    "apply_authorization_mode": "auto"
+  }
+}
