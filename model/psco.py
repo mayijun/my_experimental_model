@@ -5,7 +5,7 @@
   2. 收缩算子收敛到不动点，残差按几何级数衰减；
   3. 反塌缩机制：谱夹层 + 不动点读出头 + 方差正则，使不动点保持输入依赖（不塌成一点）。
 
-运行：  .venv/bin/python psco.py
+运行：  .venv/bin/python -m model.psco
 """
 import torch
 import torch.nn as nn

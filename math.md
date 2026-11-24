@@ -927,7 +927,7 @@ def forward(Z0, h, N, eps, m):
 # 谱正则：L_spec = relu(||Ah_tilde||_2 - (1-gamma))^2  钳住收缩
 ```
 
-**PyTorch 落地要点（适配当前 multimodal_jepa.py）。** 现有实现是 `TransformerBlock`（`nn.MultiheadAttention` + MLP，无 SSM/scan 依赖），PSCO 与它正交，作为**算子迭代层**接入：把 §3.5 的 $\Psi_h$ 实现为「线性骨架 + 残差」模块，替换/包裹 `LatentPredictor` 或作为推理专用头。并行扫描在 PyTorch 有三档实现，按序列长度递进：
+**PyTorch 落地要点（适配当前 `model/` 包）。** 现有实现是 `TransformerBlock`（`nn.MultiheadAttention` + MLP，无 SSM/scan 依赖），PSCO 与它正交，作为**算子迭代层**接入：把 §3.5 的 $\Psi_h$ 实现为「线性骨架 + 残差」模块，替换/包裹 `LatentPredictor`（`model/representation.py`）或作为推理专用头。并行扫描在 PyTorch 有三档实现，按序列长度递进：
 
 1. **纯 PyTorch log-depth 扫描**：用 reshape + 逐级组合手写 Blelloch 两趟，零新依赖；配合 `torch.compile` 融合逐元素 op。当前 `dim ≤ 256`、短序列下完全够用，先用它验证正确性。
 2. **chunked scan + `torch.compile`**：把 $N$ 切成 $N/C$ 块，块内串行、块间并行扫描，减少 kernel 启动、提升 occupancy——长序列下的工程折中。
@@ -953,7 +953,7 @@ PSCO 不替代 reflow，而是给 reflow 提供一个**有据可依、能自适�
 | 表征塌缩 | 所有输入收敛到同一不动点 $Z^*$ | 强收缩 $\tilde A_h\to0$ 把轨迹一步拉到共享的 $b_h$，输入信息被抹掉 |
 | 算子塌缩 | $\Psi_h\to\mathrm{id}$（$\tilde A_h\to1$）或常值映射 | 模型学到「不做计算 / 恒等」的最省力解 |
 
-五道防线（前三道已在 [`psco.py`](file:///home/simon-ma/JEPA/psco.py) 验证，后两道留作扩展）：
+五道防线（前三道已在 [`model/psco.py`](file:///home/simon-ma/JEPA/model/psco.py) 验证，后两道留作扩展）：
 
 1. **谱夹层（spectral sandwich）** $\delta<\rho(\tilde A_h)<1-\gamma$：上界保收敛（§3.7.1 收缩条件），下界 $\delta$ 封死「$\tilde A_h\to0$ 一步塌成一点」这条最阴的路径——只给上界时模型会学 $\tilde A_h\to0$，一步把所有 $Z$ 拉到共享 $b_h$，轨迹不再区分输入。参数化取 $\tilde A_h=\operatorname{diag}\big(\delta+(1-\gamma-\delta)\,\sigma(h)\big)$，逐维钳进 $(\delta,1-\gamma)$。
 2. **不动点读出头锚定**：$Z^*$ 必须能预测任务目标 $\mathcal L_{\text{readout}}=\|r(Z^*)-\tilde Z_y\|^2$（$r$ 为读出头）。塌成常数就预测不了，梯度把 $Z^*$ 重新推开。对应 §3.8 的预测目标与 §3.7 的 $\mathcal L_{\text{consist}}$。

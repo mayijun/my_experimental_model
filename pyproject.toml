@@ -1,0 +1,67 @@
+[project]
+name = "jepa"
+version = "0.1.0"
+description = "多模态 JEPA：图像 + 文本共享潜空间 Z 的编码 / 表征 / 解码模型"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+]
+
+# torch 只放在下面的互斥 extra 里，且版本锁死为同一个 2.14.1：
+# 这样 CPU 与 GPU 环境除 wheel 构建标签（+cpu / +cu126 / +cu130）外完全一致，行为可比。
+# 2.14.1 是当前同时提供 CPU 与 CUDA 构建的最新版本（2.15.x 只有 CPU 构建）。
+#
+# CPU 机器：uv sync --extra cpu   --extra data --extra hf --extra train
+# GPU 机器：uv sync --extra cu126 --extra data --extra hf --extra train   # 驱动 >= 525.60
+#           uv sync --extra cu130 --extra data --extra hf --extra train   # 驱动 >= 580（Blackwell 等新卡）
+[project.optional-dependencies]
+cpu = ["torch==2.14.1"]
+cu126 = ["torch==2.14.1"]
+cu130 = ["torch==2.14.1"]
+# 语料下载与整理（data_prepare）
+data = [
+    "requests>=2.31",
+    "pyarrow>=14.0",
+]
+# 真实图文对与 HF tokenizer（data_prepare/hf_datasets.py）
+hf = [
+    "datasets>=2.18",
+    "transformers>=4.40",
+    "pillow>=10.0",
+]
+# 多卡 / bf16 / 断点续训
+train = [
+    "accelerate>=0.30",
+]
+
+[tool.uv]
+# 三个 torch extra 两两互斥：同一环境只能装一种 torch，且 --all-extras 不再可用。
+conflicts = [
+    [{ extra = "cpu" }, { extra = "cu126" }],
+    [{ extra = "cpu" }, { extra = "cu130" }],
+    [{ extra = "cu126" }, { extra = "cu130" }],
+]
+
+# torch 的下载源由所选 extra 决定；不选任何 extra 时 torch 不会被安装（也不回落到 PyPI）。
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

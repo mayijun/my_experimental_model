@@ -1,7 +1,7 @@
 """并行预下载「全量」中英预训练语料的分片到缓存目录，并实测每个分片精确字节数。
 
 背景：hf-mirror 单连接只有 ~50KB/s，但支持 HTTP Range；用 8 段并行下载可到 ~2.2MB/s。
-下载到缓存后，data_prepare.py 的 _download 会命中缓存、跳过重复下载。
+下载到缓存后，prepare.py 的 _download 会命中缓存、跳过重复下载。
 
 鲁棒性：
 - 每个分片切成 8 段并行下载，每段先写到 <file>.partN 临时文件，全部成功后再拼装成最终文件；
@@ -13,7 +13,7 @@
 
 用法：
     export HF_ENDPOINT=https://hf-mirror.com
-    python download_full.py
+    python -m data_prepare.download
 """
 import concurrent.futures
 import glob
