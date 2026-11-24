@@ -1,6 +1,6 @@
-# Flow Matching + JEPA 字符模型：端到端四阶段架构与数学基础（含核心命题验证）
+# 多阶段潜空间推理多模态模型：端到端架构与数学基础（含核心命题验证）
 
-> 本文按「端到端四阶段流水线」组织：**阶段一编码（§2）→ 阶段二对齐与推理（§3）→ 阶段三解码（§4）→ 阶段四自反馈修正（§5）**。§2.2（JEPA 表征学习）与 §4（Flow Matching / 解码）的公式与 [`flow_matching_jepa.py`](file:///home/simon-ma/JEPA/flow_matching_jepa.py) 的实现逐式对齐，行号引用指向该文件；§2.1、§2.7、§3 引入的 $W, I, V, Y, \phi, M, \Omega, \Psi, E^I, E^V, E^A, R_I, R_V, R_A, K, e_t$ 是概念量，对应 [`plan`](file:///home/simon-ma/JEPA/.trae/plan_mosaic_text_unified_lossy_channel.md) 的 P1–P8，本脚本暂不实现。
+> 本文按「端到端四阶段流水线」组织：**阶段一编码（§2）→ 阶段二对齐与推理（§3）→ 阶段三解码（§4）→ 阶段四自反馈修正（§5）**。§2.2（JEPA 表征学习）的公式与当前实现（`model/`、`training/` 各模块）对齐；§4（Flow Matching / 解码）为规划章节，其旧实现 `flow_matching_jepa.py` 已废弃、尚未重构；§2.1、§2.7、§3 引入的 $W, I, V, Y, \phi, M, \Omega, \Psi, E^I, E^V, E^A, R_I, R_V, R_A, K, e_t$ 是概念量，对应 [`plan`](file:///home/simon-ma/JEPA/.trae/plan_mosaic_text_unified_lossy_channel.md) 的 P1–P8，本脚本暂不实现。
 
 ---
 
@@ -8,22 +8,23 @@
 
 | 数学符号 | 含义 | 源码对应 |
 |---|---|---|
-| $x, x_c, x_y$ | 干净 token 序列、掩码上下文、干净目标 | `clean`, `context_ids`；掩码比例见 [L394-L399](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L394-L399) |
-| $E_\theta$ | 在线编码器（接收梯度） | `model.online`，[L352](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L352) |
-| $E_\xi$ | 目标编码器（仅 EMA 更新） | `model.target`，[L353](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L353) |
-| $P_\phi$ | JEPA 潜变量预测器 | `model.jepa_predictor`，[L357-L361](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L357-L361) |
-| $v_\psi$ | Flow Matching 速度场预测器 | `model.flow`，[L370](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L370) |
-| $D_\eta$ | 潜变量→token 解码器（位置混合 Transformer + 线性头） | `model.decoder`，`Decoder` |
-| $\mu$ | EMA 衰减系数 | `EMA_DECAY=0.99`，[L28](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L28) |
-| $L$ | 序列长度 / token 数 | `SEQ_LEN=24`，[L24](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L24) |
-| $d$ | 潜空间维度 | `DIM=32`，[L26](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L26) |
-| $\mathcal{V}$ | 输出词表（不含 `[MASK]`） | 输出有效词表 $|\mathcal{V}|=77$；`vocab_size=len(chars)+1=78` 含输入专用 `[MASK]`（[L658](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L658)） |
-| $z_0, z_1, z_t$ | 噪声、干净潜变量、时刻 $t$ 插值 | `noise`, `target`, `z_t`，[L497-L499](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L497-L499) |
-| $u_t$ | 真实速度场 | `velocity_target`，[L500](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L500) |
+| $x, x_c, x_y$ | 干净图文对、掩码上下文、干净目标 | `(img, txt)`；掩码见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `mask_patches`/`mask_text` |
+| $E_\theta$ | 在线编码器（接收梯度，图像/文本各一） | `model.image_online`/`model.text_online`，[jepa.py](file:///home/simon-ma/JEPA/model/jepa.py) 的 `MultimodalJEPA` |
+| $E_\xi$ | 目标编码器（仅 EMA 更新，图像/文本各一） | `model.image_target`/`model.text_target`，[jepa.py](file:///home/simon-ma/JEPA/model/jepa.py) 的 `MultimodalJEPA` |
+| $P_\phi$ | JEPA 潜变量预测器（图像/文本各一） | `model.image_predictor`/`model.text_predictor`，[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `LatentPredictor` |
+| $v_\psi$ | Flow Matching 速度场预测器 | 概念量（§4 为规划章节，旧 `flow_matching_jepa.py` 已废弃、当前未实现） |
+| $D_\eta$ | 潜变量→各模态解码器 | `model.image_decoder`/`model.text_decoder`，[decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `ImageDecoder`/`TextDecoder` |
+| $\mu$ | EMA 衰减系数 | `ema_decay=0.99`，[config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `MJEPAConfig` |
+| $L$ | 潜序列长度（硬对齐要求两模态同长） | `text_len = n_patches = (image_size/patch_size)^2`，随规模伸缩；冒烟 tiny/small 为 16 |
+| $d$ | 潜空间维度 | `dim`，随规模伸缩；冒烟 tiny=64/small=128，大规模按 §2.2.7 的 $r=8$ 解耦 |
+| $\mathcal{V}$ | 输出词表 | 冒烟用字符级 `CharTokenizer`（[synthetic.py](file:///home/simon-ma/JEPA/data_prepare/synthetic.py)）；大模型接现成 tokenizer（LLaDA 等，见 §2.2.7） |
+| $z_0, z_1, z_t$ | 噪声、干净潜变量、时刻 $t$ 插值 | `noise`, `target`, `z_t` |
+| $u_t$ | 真实速度场 | `velocity_target` |
 | $W$ | 世界状态 | 概念量，本脚本不实现 |
 | $I, V$ | 图像 / 视频连续观测 | 概念量，本脚本不实现 |
 | $Y$ | 跨模态共享语义因子 | 概念量，可由跨模态对齐或线性探针估计 |
-| $g$ | 文本量化器 $Z \mapsto \mathcal{V}^L$ | `generate` 的 argmax 解码，[L560-L569](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L560-L569) |
+| $g$ | 文本量化器 $Z \mapsto \mathcal{V}^L$ | `generate` 的 argmax 解码，[decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `TextDecoder` |
+| $\mathbf G$ | 解码器诱导的拉回度量 $\mathbf G=J_D^\top J_D$（黎曼度量，区别于量化器 $g$） | 概念量，§2.1.1 / §2.2.6 / §3.7.1 |
 | $\mathcal{F}_t$ | 文本 $t$ 对应的潜空间纤维 | 概念量，$\mathcal{F}_t = g^{-1}(t)$ |
 | $\phi, M$ | 马赛克算子与马赛克观测 $M=\phi(I)$ | 概念量（plan P2），下采样 + 分块平均，未实现 |
 | $\Psi_h, H$ | 状态依赖算子、隐含模式编码 $Z'=\Psi_h(Z),\ h=H(x)$ | 概念量（plan P5），未实现 |
@@ -120,13 +121,15 @@ flowchart TB
 
 **(a) 前向流程。**
 
-阶段一 · 编码（表征学习，[L446-L476](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L446-L476)）：
+阶段一 · 编码（表征学习，[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`）：
 
-1. 对干净序列 $x$ 施加掩码得到 $x_c$，$c=E_\theta(x_c)$，目标表示 $z_y=E_\xi(x)$（`no_grad`）；
-2. 预测器 $\hat z=P_\phi(c)$，用 $1-\cos(\hat z,z_y)$ 训练；
-3. 解码器 $D_\eta(E_\theta(x))\to x$，用交叉熵重建；
-4. 对方差过小的潜维度加正则，总损失
-$$\mathcal L_1=\mathcal L_{\text{JEPA}}+\mathcal L_{\text{recon}}+0.5\,\mathcal L_{\text{masked\_recon}}+0.1\,\mathcal L_{\text{var}}+\mathcal L_{\text{quant}}.$$
+1. 对图像/文本施加掩码得到上下文（图像换 `mask_token`、文本换 `mask_id`），在线编码器给出上下文表示 $c$，目标编码器（`no_grad`）给出干净目标表示 $z_y$；
+2. 模态各自的预测器 $\hat z=P_\phi(c)$，用 $1-\cos(\hat z,z_y)$ 训练；
+3. 解码器重建本模态输入（图像 MSE、文本交叉熵），并做跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本）；
+4. InfoNCE 软对齐图像/文本 `[CLS]`，方差正则防维度塌缩，总损失
+$$\mathcal L_1=\mathcal L_{\text{JEPA}}+\mathcal L_{\text{recon}}+0.5\,\mathcal L_{\text{cross}}+0.1\,\mathcal L_{\text{align}}+0.1\,\mathcal L_{\text{var}}.$$
+
+其中 $\mathcal L_{\text{cross}}$ 是硬对齐双向重建（图像与文本穿过同一 $Z$），$\mathcal L_{\text{align}}$ 是 InfoNCE 软对齐；权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`。
 
 阶段二 · 对齐与推理（跨模态统一 + 表征空间内计算，概念，见 §3）：
 
@@ -137,12 +140,12 @@ $$\mathcal L_1=\mathcal L_{\text{JEPA}}+\mathcal L_{\text{recon}}+0.5\,\mathcal 
 5. 状态变换 $Z'=\Psi_h(Z)$ 全程在 $Z$ 内闭环；闭环观测器再加 $K e_t$ 修正；
 6. token 化 $g$ 降级为可选的可解释性出口，非推理必经环节。
 
-阶段三 · 解码（潜空间生成，[L487-L511](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L487-L511)）：
+阶段三 · 解码：
 
 1. 冻结 $E_\theta$ 与 $E_\xi$，潜分布静止；
 2. $z_1=E_\xi(x)$，$z_0\sim\mathcal N(0,I)$，$z_t=(1-t)z_0+t z_1$；
 3. 速度场 $v_\psi(z_t,t,c)$ 回归 $z_1-z_0$，条件 $c$ 经交叉注意力注入；
-4. 解码器 $D_\eta$ 用教师强制的 $Q(z_1)$ 重建训练；`pretrain.py` 的 `stage2_step` 另加 Flow 预测端点 $Q\bigl(z_t+(1-t)v_\psi\bigr)$（对 $v_\psi$ detach，只训解码器）作采样重建，使解码器对采样误差鲁棒；
+4. 解码器 $D_\eta$ 用教师强制的 $Q(z_1)$ 重建训练；训练另加 Flow 预测端点 $Q\bigl(z_t+(1-t)v_\psi\bigr)$（对 $v_\psi$ detach，只训解码器）作采样重建，使解码器对采样误差鲁棒；
 5. 推理用 Euler 积分 $N$ 步得 $\hat z(1)$，再取 $T=\arg\max D_\eta(\hat z)$。
 
 阶段四 · 自反馈修正（闭环校正，概念，见 §5）：
@@ -199,7 +202,7 @@ V = R_V(Z) + \varepsilon,\qquad
 T = g(Z) \in \mathcal{V}^L .
 $$
 
-其中 $I, V$ 是连续观测（图像、视频），$T$ 是离散 token 序列，$g$ 是文本量化器。本模型只实现最后一条通道：$g$ 为位置混合 Transformer 解码器的 $\arg\max$（[L560-L569](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L560-L569)）；$R_I, R_V$ 是概念量。
+其中 $I, V$ 是连续观测（图像、视频），$T$ 是离散 token 序列，$g$ 是文本量化器。本模型只实现最后一条通道：$g$ 为位置混合 Transformer 解码器的 $\arg\max$（[decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `TextDecoder`）；$R_I, R_V$ 是概念量。
 
 为使命题有意义，需要三条假设：
 
@@ -245,7 +248,7 @@ $$\mathcal M = \mathrm{supp}(E_\# p_W) \subseteq \mathbb{R}^{L\times d}.$$
 
 **引理（最短路径不一定是直线）。** 设 $\mathcal M\subset\mathbb{R}^{L\times d}$ 是弯曲黎曼子流形，$z_0,z_1\in\mathcal M$。则 $\mathcal M$ 上连接二者最短的路径（测地线）一般**不等于**欧氏直线。
 
-*证。* 测地线 $\gamma$ 最小化内在长度 $\ell[\gamma]=\int_0^1\sqrt{\dot\gamma^\top g(\gamma)\,\dot\gamma}\,dt$（$g=J_D^\top J_D$ 是解码器诱导的拉回度量），并满足测地线方程
+*证。* 测地线 $\gamma$ 最小化内在长度 $\ell[\gamma]=\int_0^1\sqrt{\dot\gamma^\top \mathbf G(\gamma)\,\dot\gamma}\,dt$（$\mathbf G=J_D^\top J_D$ 是解码器诱导的拉回度量，记粗体 $\mathbf G$ 以区别于文本量化器 $g$），并满足测地线方程
 
 $$\ddot\gamma + \Gamma(\dot\gamma,\dot\gamma)=0,$$
 
@@ -257,22 +260,49 @@ $$\ddot\gamma + \Gamma(\dot\gamma,\dot\gamma)=0,$$
 
 **可测判据。** 路径是否存在于 $\mathcal M$ 可由解码置信度沿路径判定：$c(t)=\max_v p_\theta(v\mid z_t)$。直线穿过 off-manifold 区时中途 $c(t)$ 塌陷；测地线则 $c(t)$ 全程平稳。
 
-### 2.2 文本通道的 JEPA 表征学习
+### 2.2 JEPA 表征学习（图像/文本双通道，共享 $Z$）
 
 #### 2.2.1 双编码器与上下文构造
 
-设数据分布为 $x \sim p_{\text{data}}$。JEPA 维护两个结构相同的编码器：
+设数据分布为 $x \sim p_{\text{data}}$。JEPA 维护**在线/目标**两个角色的编码器，图像与文本各有一对（§0 的 `image_online/text_online`、`image_target/text_target`）：
 
 - 在线编码器 $E_\theta$（可训练），
 - 目标编码器 $E_\xi$（参数冻结，仅靠 EMA 追随 $\theta$），
 
-初始化时 $\xi \leftarrow \theta$（[L354](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L354)），并对 $E_\xi$ 关闭梯度（[L355-L356](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L355-L356)）。
+初始化时 $\xi \leftarrow \theta$（[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `update_target`），并对 $E_\xi$ 关闭梯度（[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `update_target`）。
 
-对每个样本 $x$，构造掩码上下文 $x_c = M(x)$，其中掩码比例
+对每个样本 $x$，构造掩码上下文 $x_c = M(x)$，掩码比例为固定值 $m$（[config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `mask_ratio=0.5`）。被遮位置替换为掩码 token（图像换 `mask_token`、文本换 `mask_id`），干净目标 $x_y = x$ 保持不变（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `mask_patches`/`mask_text`，均为逐位置独立 Bernoulli：`torch.rand(...) < ratio`）。
 
-$$m \sim \mathcal{U}(0.2,\, 0.95)$$
+**mask 预测的角色与必要性。** mask 不是架构的组成部分，而是**训练阶段的关系建模自监督信号**——表征、预测器、解码器都不「是」mask；推理/生成阶段的 Flow Matching（§4）完全不依赖它（§4 用噪声→潜变量，mask 只在训练时出现）。
 
-即 [L394-L396](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L394-L396) 的 `min_ratio + (max_ratio - min_ratio) * torch.rand(...)`，默认 `min_ratio=0.2`、`max_ratio=0.95`。被遮位置替换为 `[MASK]` token，干净目标 $x_y = x$ 保持不变（[L397-L399](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L397-L399)）。
+目的（§4.5）是让 $Z$ 折叠 token 间的全对全关系——「$z_i,z_j$ 的坐标值承载 $i,j$ 的关系」。mask 预测是逼出这个关系的可微信号：要预测被掩位置的潜表征，模型只能聚合所有可见位置的关系、无捷径可走，因此它与 §4.5「关系由 $O(L^2)$ attention 成对交互承载」是同一数学结构的两面。
+
+mask 不是数学必然，但去掉它需要给出同样「迫使全对全关系 + 并行 + 硬对齐」的替代信号，当前无更强候选：
+
+| 替代自监督目标 | 为何不如 mask |
+|---|---|
+| 自回归（下一 token） | 串行深度 $O(L)$、GPU 不友好；只利用单向关系，非 §4.5 的全对全 |
+| 对比学习 | §3.4 定位为「软对齐」，与本框架「硬对齐」冲突；负样本构造复杂 |
+| 去噪/扩散目标 | Flow 阶段已有，学分布而非 token 间关系 |
+| 纯重建 | §2.2.4(a) 已有，只测「编码-解码闭环」，不测「可见→被掩」的预测能力 |
+
+结论：「预测性」（从部分观测推断完整语义）是架构的硬要求，mask 是当前满足它的最优实现；未来若出现更强的「关系建模信号」可替换 mask，但那是换训练目标、不是动架构。
+
+**多位置同时掩码的利弊与掩码分布选型。** 当前实现是逐位置独立 Bernoulli 掩码（[losses.py](file:///home/simon-ma/JEPA/training/losses.py#L14-L18) 的 `mask_text` / `mask_patches`：`torch.rand(...) < ratio`），一次前向即同时遮掉约 `ratio` 比例的位置——这正是 JEPA 相对自回归并行预测的核心优势。
+
+利：(i) 并行预测、串行深度 $O(1)$，GPU 友好（§4.3）；(ii) 同时预测多个被掩位置，强迫全对全关系建模（§4.5 目的）；(iii) 每步产生多个位置的预测梯度，样本效率高。
+
+弊：(i) **mask 比例过高时上下文不足**——可见位置数 $=L(1-r)$，短序列（冒烟 $L=16$）下 $r$ 过高时可见位置过少、任务退化为无信息猜测；故固定 $m=0.5$ 偏激进时，建议按 $L$ 收紧上限（$r\le 0.6$ 保证可见位置 $\approx 0.4L$）；(ii) **被掩位置间依赖被忽略**——预测器对每个位置独立输出 $z_i$，未显式建模被掩位置间的协调，这是「并行」换来的代价；(iii) Bernoulli 实际被掩数有方差，任务难度随 batch 漂移。
+
+掩码**分布**比数量更关键——逐位置随机 mask 对图像 patch 太简单（相邻 patch 强相关，模型可「抄」相邻可见 patch 作弊、学不到全局结构），I-JEPA 为此改用 block mask：
+
+| mask 分布 | 适用 | 理由 |
+|---|---|---|
+| 逐位置随机（当前） | 字符级短文本 | 字符间局部相关弱，作弊空间小 |
+| block mask（I-JEPA） | 图像 patch | 阻断「抄相邻 patch」捷径，强迫全局理解 |
+| span mask（T5/ERNIE 式） | 未来 BPE 长文本 | 相邻子词相关，掩连续 span 强迫长程依赖 |
+
+建议：图像改 block mask、文本未来切 BPE 后改 span mask，并按序列长度 $L$ 收紧 `mask_ratio` 上限（如 $r\le 0.6$）。
 
 #### 2.2.2 预测目标与余弦损失
 
@@ -280,19 +310,19 @@ $$m \sim \mathcal{U}(0.2,\, 0.95)$$
 
 $$c = E_\theta(x_c), \qquad z_y = E_\xi(x_y).$$
 
-$z_y$ 在 `torch.no_grad()` 下计算（[L452-L453](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L452-L453)），梯度只回传到 $E_\theta$ 与 $P_\phi$。预测器从上下文预测目标潜变量：
+$z_y$ 在 `torch.no_grad()` 下计算（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`），梯度只回传到 $E_\theta$ 与 $P_\phi$。预测器从上下文预测目标潜变量：
 
 $$\hat z = P_\phi(c),$$
 
-对应 [L455](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L455)。损失采用余弦相似度（而非原 I-JEPA 的 $\ell_2$）：
+对应 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`。损失采用余弦相似度（而非原 I-JEPA 的 $\ell_2$）：
 
 $$\mathcal{L}_{\text{JEPA}} = \mathbb{E}_{x}\left[\, 1 - \cos\!\bigl(\hat z,\; z_y\bigr)\,\right],$$
 
-即 [L456](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L456)。最小化该式等价于把预测方向对齐到目标表示方向。
+即 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `cosine_loss`。最小化该式等价于把预测方向对齐到目标表示方向。
 
 #### 2.2.3 EMA 目标更新
 
-每次优化步之后执行（[L379-L384](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L379-L384)、[L468](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L468)）：
+每次优化步之后执行（[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `update_target`、[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `update_target`）：
 
 $$\xi \leftarrow \mu\,\xi + (1-\mu)\,\theta, \qquad \mu = 0.99.$$
 
@@ -302,19 +332,23 @@ $$\xi \leftarrow \mu\,\xi + (1-\mu)\,\theta, \qquad \mu = 0.99.$$
 
 > ⚠️ 严谨说明：余弦损失 + EMA 本身**并不能完全排除塌缩**——若在线编码器把所有位置映到同一常向量 $a$，预测器输出 $a$，目标经 EMA 也趋于 $a$，仍有 $\cos(a,a)=1$、损失为 0。因此本模型真正的塌缩防线是下面两项。防塌缩在本框架分三层：本节为**表征层**，**模态层**见 §3.4（交叉掩码），**算子层**见 §3.7.3（谱夹层 + 读出头 + 方差），三层总表见 §3.7.3。
 
-**(a) 重建损失（主要防线）**
+**(a) 重建损失（主要防线；文本侧交叉熵、图像侧均方误差）**
 
-$$\mathcal{L}_{\text{recon}} = \mathrm{CE}\!\bigl(D_\eta(E_\theta(x)),\; x\bigr),$$
+$$\mathcal{L}_{\text{recon}} = \mathrm{CE}\!\bigl(D_\eta(E_\theta(x)),\; x\bigr)\ \ \text{（文本）},\qquad \mathcal{L}_{\text{recon}} = \bigl\|D_\eta(E_\theta(x))-x\bigr\|^2\ \ \text{（图像）}.$$
 
-对应 [L410-L413](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L410-L413)、[L458](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L458)。若 $E_\theta(x)$ 在不同位置退化为常数，解码器无法区分 token，交叉熵将爆炸。该项强制表示中保留**位置可辨别的 token 信息**，是抑制塌缩的主力。
+对应 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`（图像 `MSE`、文本 `CE`）。若 $E_\theta(x)$ 在不同位置退化为常数，解码器无法区分 token，交叉熵（或像素 MSE）将爆炸。该项强制表示中保留**位置可辨别的 token 信息**，是抑制塌缩的主力。
 
-**(b) VICReg 风格方差约束（次要防线）**：$\mathcal{L}_{\text{var}}=\mathbb{E}_j[\mathrm{relu}(1-\sigma_j)]$（式 (33)），惩罚在 batch 与位置维度上方差过小的潜空间维度，防止维度塌缩；见 [L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)，其「方向与率惩罚相反」的辨析见 §4.2(d)。
+**(b) VICReg 风格方差约束（次要防线）**：对每个潜维度 $j$ 在 batch×位置维度上算边际标准差 $\sigma_j$，方差正则
 
-JEPA 阶段总目标（[L463](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L463)）：
+$$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1-\sigma_j)\bigr],\qquad \sigma_j = \mathrm{std}\bigl(\mathrm{reshape}(z,\,[-1,d])_{:,j}\bigr),$$
 
-$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{masked\_recon}} + 0.1\,\mathcal{L}_{\text{var}} + \mathcal{L}_{\text{quant}},$$
+惩罚方差过小的潜空间维度、防止维度塌缩；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`。其「方向与率惩罚相反」的辨析见 §4.2(d)（编号式 (33) 亦在 §4.2(d)）。
 
-其中 $\mathcal{L}_{\text{masked\_recon}} = \mathrm{CE}\bigl(D_\eta(Q(P_\phi(c))),\, x\bigr)$ 是"掩码上下文→预测→解码"路径上的重建项（[L460-L461](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L460-L461)），用于消除推理时读预测潜变量的分布偏移；$\mathcal{L}_{\text{quant}}$ 是量化器辅助损失（[L457](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L457)，FSQ 下为 0，VQ/RVQ 下为 commitment 项）。
+阶段一总目标（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`，图文双模态各取一组）：
+
+$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}},$$
+
+其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的 InfoNCE 软对齐（§3.4）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
 
 #### 2.2.5 编码器主干的候选选型（测试不理想时的备选路径）
 
@@ -322,7 +356,7 @@ $$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,
 
 当前主干是位置混合 Transformer（self-attention）。若实测不理想（内存、单步耗时、长序列扩展性），可按需切换到以下候选：
 
-1. **Mamba-2 / Mamba-3（SSM 选择性扫描）**：输出连续（§2.6 接口契约已确认），"discretization" 是 ZOH 数值积分而非输出离散化。训练 $O(L)$ 时间、$O(1)$ 状态，长序列（$L\gtrsim10^3$）下比注意力省时省内存；短序列（当前 `SEQ_LEN=24`）无明显收益、常数因子略亏。
+1. **Mamba-2 / Mamba-3（SSM 选择性扫描）**：输出连续（§2.6 接口契约已确认），"discretization" 是 ZOH 数值积分而非输出离散化。训练 $O(L)$ 时间、$O(1)$ 状态，长序列（$L\gtrsim10^3$）下比注意力省时省内存；短序列（冒烟 $L=16$）无明显收益、常数因子略亏。
 2. **混合骨干（注意力 + SSM 交错）**：前几层注意力抓局部/位置敏感模式、后几层 SSM 做长程压缩，兼顾表达力与线性复杂度，工程上常见的折中。
 3. **其他线性复杂度序列模型**：RWKV、RetNet、线性注意力（Performer / 线性核）、xLSTM、Hyena 等，同属"把二次注意力换成线性/卷积/递归"一族，选型判据与 Mamba 相同。
 4. **纯卷积 / 局部注意力 + 全局池化**：对字符级短序列局部感受野已够，全局信息经池化注入，训练最快但长程依赖最弱。
@@ -331,6 +365,116 @@ $$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,
 
 关键：换主干不改变本框架的两条既有契约——(i) $Z$ 全程连续、不施加量化瓶颈（§2.6）；(ii) 有损压缩只发生在 token 层（§2.6）。因此任何候选都只是 $E$ 的内部实现细节，对外接口 $x \mapsto Z$ 不变。
 
+#### 2.2.6 潜预测损失的备选度量（含 GPU 友好性）
+
+§2.2.2 的 cosine 损失 $1-\cos(\hat z,z_y)$ 是**欧氏度量**：它在环境空间 $\mathbb{R}^{L\times d}$ 上算内积，隐含假设 $\mathcal M$ 平坦。但 §2.1.1 已证明 $\mathcal M$ 是弯曲黎曼子流形、正确度量是解码器诱导的拉回度量 $\mathbf G=J_D^\top J_D$，§2.3 进一步说明同一纤维 $\mathcal F_t$ 内的点语义等价（解码到同一 token）。据此给出三个在框架内自洽的备选，均属「备选路径」，实际取舍须实测（同 §2.2.5 与 §3.7.3 的判据原则）。
+
+**(a) 拉回度量距离（黎曼 ℓ2）。**
+
+$$\mathcal{L}_{\text{JEPA}}^{(\mathbf G)} = \mathbb{E}\Big[\big(\hat z - z_y\big)^\top \mathbf G(z_y)\big(\hat z - z_y\big)\Big] = \mathbb{E}\Big[\big\|J_D(z_y)\,(\hat z - z_y)\big\|^2\Big],\qquad \mathbf G(z)=J_D(z)^\top J_D(z).$$
+
+依据：§2.1.1 的度量定义。它是方案 (b) 的一阶线性化——泰勒展开 $\|D(\hat z)-D(z_y)\|^2\approx\|J_D(z_y)(\hat z-z_y)\|^2$。纤维切方向上 $J_D$ 特征值趋 0，误差被自动压 0，同一纤维内判定为「预测正确」，这是 cosine/ℓ2 做不到的。
+
+**(b) 经解码器的 token 分布对齐。**
+
+$$\mathcal{L}_{\text{JEPA}}^{(\text{dec})} = \mathbb{E}\Big[\mathrm{KL}\big(p_\theta(\cdot\mid z_y)\,\big\|\,p_\theta(\cdot\mid\hat z)\big)\Big]\quad\text{或}\quad\mathrm{CE}\big(D(\hat z),\,g(z_y)\big).$$
+
+依据：§2.3 纤维几何 + §2.2.4(a) recon 损失。直接在可观测的 token 分布层对齐，同纤维 $\Rightarrow$ KL=0。
+
+**(c) 拉回度量内积（黎曼 cosine）。**
+
+$$\mathcal{L}_{\text{JEPA}}^{(\cos,\mathbf G)} = \mathbb{E}\left[1 - \frac{\hat z^\top \mathbf G\, z_y}{\sqrt{(\hat z^\top \mathbf G\,\hat z)\,(z_y^\top \mathbf G\, z_y)}}\right].$$
+
+保留 cosine 的尺度无关性，把欧氏内积换成 $\mathbf G$ 内积。
+
+**GPU 友好性对比。** 三者都无跨样本串行依赖，全是 batch 并行逐元素/矩阵乘运算，与 §2.6 的 token 层压缩、§4.3 的串行深度判据一致——没有变长循环。差异只在额外算子的形态：
+
+| 方案 | 额外算子 | 内存 | 额外串行深度 |
+|---|---|---|---|
+| (a) 拉回距离 | JVP $\|J_D(z_y)\delta\|^2$，$\delta=\hat z-z_y$ | $O(Ld)$（无需显式 $\mathbf G$） | $O(1)$ |
+| (b) 解码对齐 | 一次解码器前向 | $O(Ld)$ | $O(1)$ |
+| (c) 拉回 cosine | 同 (a) 的 $\mathbf G$ 内积 | $O(Ld)$ | $O(1)$ |
+
+细节：冒烟尺度 $d=64$ 时显式构造 $\mathbf G$（$64\times64$）比 JVP 更省（$d^2$ 标量、一次矩阵乘）；JVP 用 `torch.autograd.grad` / `torch.func.jvp` 批量并行，代价约一次反向。方案 (b) 多一次解码前向，但解码器是 §4.5 的 $O(L)$ 通路 + 位置混合，成本低于 attention 主干。**三者对 GPU 均友好、无串行瓶颈；差别是 (a)(c) 付一次 JVP 代价、(b) 付一次解码前向代价。** 关键工程注意：$\mathbf G$ 随解码器 $D$ 训练漂移，损失的地面度量（ground metric）不稳定，宜在 $D$ 相对冻结（如 Flow 阶段 $E_\xi$ 冻结后）启用，或对 $\mathbf G$ 做 stop-gradient。
+
+#### 2.2.7 前端翻译层设计与潜空间维度 $d$ 的跨规模选型
+
+**(a) 前端翻译层的设计要点。** 当前前端为文本 `nn.Embedding`（离散→连续嵌入）与图像 `patch_embed=Conv2d(stride=patch_size)`（非重叠 patch 化）。受三条契约约束——§4.5「通路/关系分离」（前端是纯通路、逐位置 $O(L)$）、§2.6「输出连续、不量化」、§3.2「薄物理翻译层」——文本 embedding 是离散 token 的唯一合理翻译，数学正确、无需替换。
+
+图像前端有一处与 §2.7 命题 5 的张力需修正：单层非重叠 patch 化是「连续→离散」的提前硬切割，与命题 5 主张的「连续→连续降采样、损失靠分辨率、可逼近无损」不一致。两个改进方向（均属备选、须实测）：
+
+1. **卷积 stem（重叠、多级 stride-2 卷积）** 替代单层非重叠 patch，保持连续降采样、patch 间重叠，消除 patch 边界伪影；
+2. **把前端纳入 §2.6 的「先写后压」统一框架**：先连续降采样得稠密特征序列，再由 $\rho=\|v-M^\top k\|^2$ 判据决定保留位置，使图像前端的「有损」与 token 层的「$\rho$ 压缩」成为同一机制，消除「图像前端提前硬丢信息 vs 文本 token 层按 $\rho$ 自适应丢」的不对称。
+
+注意：编码器前端 embedding（查表）与解码器读出头（线性打分，§4.2(a)）**不对称是正确设计**——前者「离散→连续嵌入」、后者「连续→离散判别」，不应 weight tying。
+
+**(b) 潜空间维度 $d$ 与主干 $d_{\text{hidden}}$ 的比例选型。** 先区分两个易混的「$d$」：
+
+- **主干 hidden 维度 $d_{\text{hidden}}$**：决定参数量与表达力，$P\approx 12\,n\,d_{\text{hidden}}^2$（标准 Transformer、FFN $4d$，不含 embedding 层）；
+- **潜空间维度 $d$**：编码器输出 $Z\in\mathbb{R}^{L\times d}$ 的语义瓶颈维度，是 §2.6「已压缩精华」的落点。
+
+当前 tiny/small/base 三者绑定（`dim` 同时是主干宽度与潜空间维度，[config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `PRESETS`），这是小规模的简化；**大规模下应解耦**——主干宽、潜空间窄。
+
+**比例约定：$d = d_{\text{hidden}} / r$，取 $r=8$（即 $d : d_{\text{hidden}} = 1:8$）**，可调范围 $r\in[4,16]$。模型放大后按此比例等比例缩放。依据：
+
+1. **压缩定位**（§2.6）：潜空间是「已压缩精华」，$d$ 应明显小于主干；$r$ 太小（如 1:2）则潜空间冗余、压缩语义弱、信息率偏高；
+2. **信息率充分**（§4.4）：$r$ 太大（如 1:32）则潜空间过窄、语义丢失、$\widehat{\mathrm{Var}}(Z\mid T)$ 抬升；
+3. **业界 VAE 潜空间压缩比**（latent:hidden）集中在 $1:4$–$1:16$，$1:8$ 是居中、可等比例放大的安全默认；
+4. **拉回度量秩约束**（§4.2(a)+§2.2.6）：$\mathrm{rank}(\mathbf G)\le\min(|V|,d)$，在现成多模态词表 $|V|\approx 15\text{万}$ 下 $d\ll |V|$，$\mathbf G$ 满秩、方案 (a)/(c) 不再受词表约束。
+
+主干 $d_{\text{hidden}}$ 按业界成熟经验（GPT-3/LLaMA 同构）随参数量增长，潜空间 $d$ 按 $r=8$ 等比例缩放：
+
+| 规模 | 参数量 | 主干 $d_{\text{hidden}}$ | 层数 $n$ | 潜空间 $d$ | 词表 |
+|---|---|---|---|---|---|
+| tiny（CPU 冒烟） | ~0.87M | 64 | 2 | 64（冒烟绑定 $d=d_{\text{hidden}}$） | 字符级 |
+| small | ~5.7M | 128 | 4 | 128（冒烟绑定） | 字符级 |
+| base（冒烟/过渡） | — | 256 | 6 | 256（冒烟绑定，$L=64$） | 字符级 |
+| 中型 0.3B | ~0.3B | 1024 | 24 | 128（$=d_{\text{hidden}}/8$） | 现成多模态 |
+| 中型 1B | ~1B | 2048 | 24 | 256 | 现成多模态 |
+| 中型 3B | ~3B | 3072 | 32 | 384 | 现成多模态 |
+| 中型 7B | ~7B | 4096 | 32 | 512 | 现成多模态 |
+
+（冒烟三档与 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `PRESETS` 一致：tiny `dim=64/depth=2`、small `dim=128/depth=4`、base `dim=256/depth=6`，此时潜空间维度尚未从主干解耦。）
+
+**词表（tokenizer）选型——用现成 mask 预测模型词表，不自建 BPE。** 自建 BPE 脱离主流研究生态，直接复用带 mask id 的现成 tokenizer：
+
+- **首选 LLaDA tokenizer**（`GSAI-ML/LLaDA-8B-Instruct` 或 `GSAI-ML/LLaDA-8B-Base`）：LLaDA 本身即 masked diffusion 模型，词表内置专用 mask token `<|md|>`（`mask_token_id=126336`，词表约 12.6 万、基于 Qwen2 扩展）；多模态方向已有 LLaDA-V（CVPR 2026）/ MMaDA 证明该 tokenizer 的 mask 机制可扩展到视觉；
+- **备选 Qwen2.5-VL / Qwen3-VL tokenizer**：视觉特殊 token（`<|vision_start|>`、`<|image_pad|>` 等）已内置，但无专用 mask token，需 `add_special_tokens({'mask_token': '<|mask|>'})` 自补。
+
+注意：本架构图像通道走连续潜空间（§2.6「$Z$ 全程连续、不量化」），**不引入** LLaDA-V / MMaDA 的视觉 VQ tokenizer（MAGVIT-v2 / SigLIP-VQ）；统一发生在连续 $Z$ 层（§3.2），不在离散 token 层。故只需文本侧 mask id，视觉侧沿用本模型的 `ImageEncoder` 连续 patch 化。
+
+**LLaDA tokenizer 接入代码（对接 `CharTokenizer` 接口）。** 现有 `train.py` 通过 `tokenizer.pad_id / mask_id / vocab_size / encode / decode` 消费 tokenizer（`data_prepare/synthetic.py` 的 `CharTokenizer` 同构）。LLaDA 用如下包装类即可无缝替换：
+
+```python
+"""LLaDA tokenizer：对接现有 CharTokenizer 接口（pad_id/mask_id/vocab_size/encode/decode）。"""
+from transformers import AutoTokenizer
+
+class LLaDATokenizer:
+    def __init__(self, model="GSAI-ML/LLaDA-8B-Instruct"):
+        self.tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        if self.tok.pad_token is None:            # Qwen2 系兜底：用 eos 作 pad
+            self.tok.pad_token = self.tok.eos_token
+        if self.tok.mask_token is None:           # LLaDA 词表内置 <|md|>，此处仅兜底
+            self.tok.add_special_tokens({"mask_token": "<|md|>"})
+        self.pad_id = self.tok.pad_token_id
+        self.mask_id = self.tok.mask_token_id     # = 126336
+        self.vocab_size = len(self.tok)
+
+    def encode(self, text, length):
+        ids = self.tok.encode(text, add_special_tokens=False)[:length]
+        return ids + [self.pad_id] * (length - len(ids))
+
+    def decode(self, ids):
+        keep = [i for i in ids if i not in (self.pad_id, self.mask_id)]
+        return self.tok.decode(keep, skip_special_tokens=True)
+```
+
+接入点：`TextEncoder` 的 `nn.Embedding(vocab_size, dim)` 用 `vocab_size=len(tokenizer)`（约 12.6 万），`mask_text` 用 `tokenizer.mask_id` 替换被掩位置；`encode/decode` 与 `CharTokenizer` 完全同构，`train.py` 的 `tokenizer.pad_id/mask_id/vocab_size` 路径无需改动。
+
+**词表扩展对比例的影响**：$d:d_{\text{hidden}}=1:8$ 的比例与 $|V|$ 大小无关（只要 $|V|\gg d$）。词表从字符级（合成语料）→ 12.6 万的实际影响只有两处：(i) embedding 层参数量 $|V|\times d_{\text{hidden}}$（7B 档约 $12.6\text{万}\times4096\approx5.2\text{亿}$，占 ~7.4%，需计入参数量预算或对 embedding 层单独处理）；(ii) 拉回度量秩上界从字符级放宽到 $\min(|V|,d)=d$，方案 (a)/(c) 不再受词表约束。
+
+**结论（3B–7B）**：主干 $d_{\text{hidden}}=3072$（3B）/ $4096$（7B），潜空间 $d=384$（3B）/ $512$（7B），即 $r=8$ 等比例缩放，词表用 LLaDA 现成 tokenizer（内置 mask id）。潜空间 $d$ 的最终值仍须按 §2.2.6 的实验判据实测（$I(Z;Y)$ 饱和点 + $\widehat{\mathrm{Var}}(Z\mid T)$），比例 $r$ 可在 $[4,16]$ 内据实调整。
+
 ### 2.3 纤维几何与数据处理不等式（验证有损性）
 
 **(a) 离散码率的硬上界。**
@@ -338,23 +482,23 @@ $T$ 取值于有限集 $\mathcal{V}^L$，故
 
 $$H(T) \le L \log_2 |\mathcal{V}|. \tag{1}$$
 
-本模型语料有 77 个不同字符（[L650-L653](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L650-L653)）；`[MASK]` 只出现在输入上下文、从不进入输出文本，故输出词表 $|\mathcal{V}|=77$，于是
+输出词表大小 $|\mathcal{V}|$ 与序列长度 $L$ 都是**规模相关的超参数**、不是固定常数：冒烟用字符级 `CharTokenizer`（[synthetic.py](file:///home/simon-ma/JEPA/data_prepare/synthetic.py)，$|\mathcal{V}|$ 为合成语料字符集大小、$L=\text{text\_len}=16$）；大模型接现成 tokenizer（LLaDA 等，$|\mathcal{V}|\sim10^5$，见 §2.2.7）。`[MASK]` 只出现在输入上下文、从不进入输出文本，故输出词表为 $|\mathcal{V}|$。于是
 
-$$H(T) \le 24 \log_2 77 \approx 150.40\ \text{bit}. \tag{2}$$
+$$H(T) \le L \log_2 |\mathcal{V}|. \tag{2}$$
 
-这是一个**与 $Z$ 无关的有限常数**。
+这是一个**与 $Z$ 无关、仅由 $(L,|\mathcal{V}|)$ 决定的有限上界**；它随规模伸缩（冒烟 $L=16,|\mathcal{V}|\approx20$ 时约 $69$ bit；$L=1024,|\mathcal{V}|=10^5$ 时约 $17$ kbit，完整演算见 §2.8）。
 
 **(b) $T$ 是 $Z$ 的确定函数。**
 因 $T = g(Z)$，给定 $Z$ 时 $T$ 完全确定，$H(T\mid Z)=0$，故
 
-$$I(Z;T) = H(T) - H(T\mid Z) = H(T) \le 150.40\ \text{bit}. \tag{3}$$
+$$I(Z;T) = H(T) - H(T\mid Z) = H(T) \le L\log_2|\mathcal{V}|. \tag{3}$$
 
 **(c) 连续潜变量的量化熵无界。**
-设 $Z$ 有密度。将 $Z$ 量化到分辨率为 $\delta$ 的网格，得离散变量 $Z_\delta$。$Z$ 有 $Ld = 24 \times 32 = 768$ 个实数维度，高分辨率极限下（单位统一为 bit）
+设 $Z$ 有密度。将 $Z$ 量化到分辨率为 $\delta$ 的网格，得离散变量 $Z_\delta$。$Z$ 有 $Ld$ 个实数维度，高分辨率极限下（单位统一为 bit）
 
 $$H(Z_\delta) \approx h(Z) + Ld \log_2 \frac{1}{\delta} \;\xrightarrow{\delta \to 0}\; +\infty. \tag{4}$$
 
-例如 $\delta = 10^{-2}$ 时 $Ld\log_2 100 \approx 5102$ bit，远超 (2) 的 150.40 bit。
+例如 $\delta = 10^{-2}$ 时量化熵增量项 $Ld\log_2 100 \approx 6.64\,Ld$ bit；只要 $d \log_2(1/\delta) > \log_2|\mathcal{V}|$（几乎总成立，见 §2.8），(4) 就远超 (2)，$\delta\to0$ 时 $H(Z_\delta)\gg H(T)$。
 
 **(d) 数据处理不等式。**
 $Z_\delta$ 与 $T$ 都是 $Z$ 的函数，构成 Markov 链 $Z_\delta \to Z \to T$。由**数据处理不等式**，
@@ -456,7 +600,7 @@ $$x \xrightarrow{\ \text{按 }\rho\text{ 丢/留}\ } \tilde x \xrightarrow{\ E\ 
 
 丢/留与比特由冗余度 $\rho=\|v-M^\top k\|^2$ 决定（见下文「创新编码」）；token 通道走无损（LM 熵模型），token 层走有损，$Z$ 完整保留。
 
-**接口契约：$Z$ 保持连续，不施加量化瓶颈 $Q$。** 三条理由：
+**接口契约：$Z$ 保持连续，不施加量化瓶颈 $Q$。**（注：本节讨论的语义量化器 FSQ/VQ/RVQ 来自已废弃的 Flow Matching 旧实现，仅作历史记录与备选参考，**非强制约束**；主表征路径以连续 $Z$ 为准。）三条理由：
 
 1. **$Z$ 是精华，量化即二次有损**：本节的目标是让 $Z$ 完整承载 $I(Z;Y)$；若再对 $Z$ 施加 FSQ/VQ/RVQ，等于在已压好的精华上再砍一刀，与"有损只发生在 token 层"的定位直接矛盾。
 2. **§4 的 Flow 阶段要求连续潜变量**：线性路径 $z_t=(1-t)z_0+tz_1$ 与速度场 $v_\psi$ 的连续回归都要求 $z_1\in\mathbb R^{L\times d}$；$Z$ 一旦离散化，生成退化为离散序列建模，串行深度从 $O(N)$ 恶化到 $O(L)$（§4.3(a)）。
@@ -467,7 +611,7 @@ $$x \xrightarrow{\ \text{按 }\rho\text{ 丢/留}\ } \tilde x \xrightarrow{\ E\ 
 1. **语义量化（FSQ / VQ / RVQ）**：把连续 $Z$ 映射到**有限码本索引**，改变表征语义、破坏连续可微，故不作主表征路径上的常设瓶颈，但**保留为备选测试方案**——是否在某处启用、对 loss 与下游的影响如何，需实测观察后再定。两种用法：(i) 作**序列化格式层**（仅落盘/传输时启用，读入后立即反量化回连续 $Z$，要求 $\|\hat Z-Z\|$ 低于阈值）；(ii) 作**实验性瓶颈**（在 §3/§4 某处插入，观察不动点/生成质量的退化幅度，若性价比可接受则保留）。
 2. **数值精度量化（FP16 / FP8 / FP4，按需选择）**：只降浮点位宽、**保留 $Z$ 仍是连续实数**，是"运算/传输/存储层面的位宽压缩"而非"语义瓶颈"。位宽越低，$Z$ 的实际比特消耗越小，代价是数值精度与可微稳定性越弱。**可分层混合精度**——编码器层、表征层（$Z$ 与 $\Psi_h$）、解码器层不必统一精度，各自独立选择；判据是"哪层参数容量大、哪层降精度对 loss 的边际影响小（性价比高）"：对容量大且对精度不敏感的层优先降位宽（FP8/FP4），对承载关键语义/长程依赖的层保留高精度（FP16/BF16）。
 
-两者都不改变主契约"$Z$ 全程连续、语义不量化"：语义量化是可测试的**备选方案**（实测证明某处瓶颈的 loss 代价可接受才保留），数值精度量化只降位宽、不改语义、且可按层差异化精度。当前脚本 [`flow_matching_jepa.py`](file:///home/simon-ma/JEPA/flow_matching_jepa.py) 中的量化瓶颈 $Q$ 属于实现现状，按本契约应降级为可选的 I/O 组件，主表征路径以连续 $Z$ 为准。
+两者都不改变主契约"$Z$ 全程连续、语义不量化"：语义量化是可测试的**备选方案**（实测证明某处瓶颈的 loss 代价可接受才保留），数值精度量化只降位宽、不改语义、且可按层差异化精度。量化瓶颈 $Q$ 属于实现现状，按本契约应降级为可选的 I/O 组件，主表征路径以连续 $Z$ 为准。
 
 **熵是码率信号，可约损失才是取舍信号。** 前面用 $H(Z\mid Y)$ 表述"丢什么"，但没给出"如何测什么该留"。操作性判据要区分两个角色，**熵≠显著性**：
 
@@ -476,7 +620,31 @@ $$x \xrightarrow{\ \text{按 }\rho\text{ 丢/留}\ } \tilde x \xrightarrow{\ E\ 
 
 **"测差值、别估熵"是可约损失的操作核心**：$\ell_t=\ell^*_t+r_t$，不可约 $\ell^*_t$ 即条件熵 $H(x_t\mid c)$，可约 $r_t$ 即 KL 散度。但"不可约"是**相对的**——$H(x_t\mid c)=H(x_t\mid c,M)+I(x_t;M\mid c)$，第二项正是表征/记忆能吃掉的部分。这把 §2.1 命题 1 的"有损"从绝对损失修正为"相对当前表征容量的损失"，也把 $I(Z;Y)$ 精确化：**"该留的信息"不是绝对熵，而是"当前表征容量能消掉的那部分可约损失"**。
 
+**可约损失的五种可计算估计。** 核心要求：验证集必须是"未来/他处"的，不能是刚写进去的内容本身：
+
+| 方法 | 公式/做法 | 成本 | 适用 |
+|---|---|---|---|
+| (1) 重放集差分（金标准） | 维护 buffer $B$，写前后各算一次 loss 差 | $2|B|$ 前向 | 离线/批量 |
+| (2) 前视窗口（最便宜） | 写完后在接下来 $W$ 个 token 上算 loss 差 | 无需 buffer | 在线 |
+| (3) 双模型差分 | 带/不带记忆两次前向的 loss 差 | (1) 的特例 | 无 buffer 对照 |
+| (4) 熵分解上界 | $H_{\text{tot}}-H_{\text{alea}}=\mathrm{MI}$（dropout 采样） | 单前向 | 粗筛 |
+| (5) 经验条件熵查表 | 后缀数组统计下一 token 经验分布熵 | 高 | 离线校准 |
+
+其中 (4) 的 $\mathrm{MI}=H[\frac1K\sum_k p_k]-\frac1K\sum_k H[p_k]$ 是"更多数据能消掉多少"的上界，不完全等于"更多容量能消掉多少"。
+
+**比特预算。** 统一单位：$\Delta$ 用 nat，除以 $\ln 2$ 得 bit；理想校准下 $\Delta(\text{bits})\approx I(M;x_{\text{future}}\mid c)$，与目标对齐；每比特收益 = $\Delta/\text{bits}(z)$，按此贪心/背包分配。判据：$\Delta(z)-\lambda\cdot\text{bits}(z)>0$ 才写。
+
 **与本框架的两处对齐**：(1) "测差值"就是 §5 的创新 $e=\hat Z-\tilde Z$ 与 §3.7 的一致性损失 $\mathcal L_{\text{consist}}$ 的同一原理——不可约项抵消后，剩下的差值正是可约/可改进部分；(2) attention sink 反例（低熵但关键）印证"生成元识别"——种子可能低熵，但绝不可因低熵而丢弃；熵只能决定码率、不能决定去留。现成机制（DeltaNet 的 $v-M^\top k$、Titans 的 surprisal 门控 + momentum/decay）都是"可约损失单步估计 + 预算 + 衰减"的组合，与本节三步方法论同构。
+
+**本文概念与本框架的映射。**
+
+| 本文概念 | 框架已有件 | 对应 |
+|---|---|---|
+| token 残差 $\rho=\|v-M^\top k\|^2$ | delta rule 中间量 | 冗余度/可约损失的单步代理 |
+| token 层丢/留掩码 | 记忆 $M$ + 掩码 gather | 按 $\rho$ 决定丢留与比特 |
+| "测差值" | §5 自反馈、§3.7 $\mathcal L_{\text{consist}}$ | 不可约项抵消的同一原理 |
+| 下游 loss 增量 | §5 自反馈闭环 | 失真度量 |
+| 生成元/轨道 | 算子空间 $\Omega$、$\Psi_h$ | 存算子、按需生成轨道 |
 
 **创新编码（修正）：token 层残差压缩，$Z$ 是完整精华。** 有损压缩发生在 **token 层**，不是潜空间——$Z$ 是编码器已压好的精华 $I(Z;Y)$，不该再损失；该丢的是 token 层的冗余：
 
@@ -538,6 +706,53 @@ $$H(I \mid M) > 0. \tag{16}$$
 > **命题 5（通道不对称的中间地带）**：马赛克是连续→连续降采样，失真随块大小 $B\to 1$（码率上升）而趋于 $0$（式 11 的 $R_{\text{vis}}(D)$ 情形）；文本是连续→离散有限码本，固定 $L,|\mathcal V|$ 下失真永远高于地板 $D^\star>0$（式 10）。马赛克是 $R_I$ 的低码率切片，补上"近无损 ↔ 离散码本"之间的整段过渡。
 
 含义：视觉通道 $R_I$ 无需离散码本即可有损——连续降采样本身就产生正条件熵 $H(I\mid M)>0$；文本的损失机制是**离散码本基数**。一个靠分辨率（连续尺度），一个靠基数（离散计数）。这正是命题 4 中两类通道不对称的根源。
+
+### 2.8 规模不变性：信息论结论跨规模的统一性验证与数值取舍
+
+§2.3–2.5 的结论（有损性 $H(Z\mid T)>0$、失真地板 $D^\star>0$、噪声熵源）是**结构性的**，不依赖任何具体数字；但其中的上界 $\le L\log_2|\mathcal V|$、量化熵增量 $Ld\log_2(1/\delta)$、噪声熵 $h(z_0)=\frac{Ld}{2}\log_2(2\pi e)$ 都显式含 $(L,d,|\mathcal V|)$。本节把这三个超参数在 §2.2.7 的规模表上扫一遍，验证结论**是否跨规模统一**，并给出**数值取舍**。
+
+**规模表**（$L,d$ 取自 §2.2.7；$|\mathcal V|$ 冒烟为合成语料字符级、大模型为 LLaDA 约 12.6 万）：
+
+| 规模 | $L$ | $d$ | $|\mathcal V|$ | $\log_2|\mathcal V|$ |
+|---|---|---|---|---|---|
+| tiny | 16 | 64 | ~20 | 4.32 |
+| small | 16 | 128 | ~20 | 4.32 |
+| base | 64 | 256 | ~20 | 4.32 |
+| 0.3B | 1024 | 128 | $1.26\times10^5$ | 16.94 |
+| 1B | 1024 | 256 | $1.26\times10^5$ | 16.94 |
+| 3B | 2048 | 384 | $1.26\times10^5$ | 16.94 |
+| 7B | 4096 | 512 | $1.26\times10^5$ | 16.94 |
+
+**结论只依赖两个无量纲比值**（都与 $L$ 无关，因为 $L$ 在分子分母中抵消）：
+
+**比值 A：有损裕度 $m = \dfrac{d\,\log_2(1/\delta)}{\log_2|\mathcal V|}$**（$\delta$ 取 $10^{-2}$，$\log_2(1/\delta)\approx 6.64$）。它度量式 (6) 中「潜空间量化熵 vs 文本码率」的差：$m>1$ 时 $H(Z_\delta\mid T)>0$。
+
+**比值 B：噪声熵预算 $r = \dfrac{h(z_0)/L}{H(T)/L}\approx\dfrac{d\cdot 2.047}{\log_2|\mathcal V|}$**。它度量 §4.4 中「噪声端熵源 vs 文本端码率」的比。
+
+| 规模 | 有损裕度 $m$ | 噪声/文本 $r$ | $H(T)\le L\log_2|\mathcal V|$ | $h(z_0)=Ld\cdot2.047$ |
+|---|---|---|---|---|
+| tiny | 98× | 30× | 69 bit | 2096 bit |
+| small | 197× | 61× | 69 bit | 4192 bit |
+| base | 394× | 121× | 277 bit | 33.5 kbit |
+| 0.3B | 50× | 15× | 17.3 kbit | 268 kbit |
+| 1B | 100× | 31× | 17.3 kbit | 536 kbit |
+| 3B | 151× | 46× | 34.7 kbit | 1.61 Mbit |
+| 7B | 201× | 62× | 69.4 kbit | 4.29 Mbit |
+
+**结论统一性验证。** 两个比值在所有规模下都 $\gg 1$（$m\in[50,394]$、$r\in[15,121]$），且 $\delta$ 即使放宽到 $10^{-1}$（$\log_2(1/\delta)=3.32$）仍满足 $m\gg1$。因此：
+
+- 命题 1/4（$H(Z\mid T)>0$、$D^\star>0$）：在**所有规模**成立，且裕度随 $d/\log_2|\mathcal V|$ 单调增长；
+- §4.4 的「噪声熵预算 ≫ 文本码率」：在所有规模成立，比值 $r\in[15,121]$，即 **1～2 个数量级**（原文「约一个数量级」是冒烟低端值 $r\approx10$ 的低估）；
+- 词表从字符级 → 12.6 万时 $\log_2|\mathcal V|$ 只从 $4.3\to16.9$（约 4×），而 $d$ 同步从 $64\to512$（8×），故换大词表**不会破坏**结论，反而在 7B 档把 $m$ 拉回 $\sim200×$。
+
+**数值取舍（设计判据）。**
+
+1. **唯一关键不等式是 $d \gg \log_2|\mathcal V|$**（更精确地 $d \gg \log_2|\mathcal V|/\min\{2.047,\ \log_2(1/\delta)\}$，约 $d\gtrsim 2\log_2|\mathcal V|$）。它同时保证有损性与噪声熵源两条结论。$\log_2|\mathcal V|\in[4,17]$，而 $d\in[64,512]$，富余 $15$～$400×$，无任何规模触碰红线。
+2. **$r=d_{\text{hidden}}/d=8$ 是安全的**：$r$ 的下限由「$d$ 不能逼近 $\log_2|\mathcal V|$」决定（7B 档安全下限 $d_{\min}\approx 2\log_2|\mathcal V|\approx 34$，$r=8$ 给的 $d=512$ 富余 15×），故 $r$ 可在 $[4,16]$ 内自由调而结论不变。
+3. **$\delta$ 只是分析参数**：$Z$ 全程连续（§2.6），$\delta$ 不进入训练；更细的 $\delta$ 只增大 $m$，结论不依赖 $\delta$ 的精确取值。
+4. **$L$ 只定总量、不定方向**：$L$ 同时缩放 $H(T)$ 与 $h(z_0)$，在比值中抵消，不改变定性结论；它决定绝对预算（7B 档 $h(z_0)\approx4.3$ Mbit），对应「文字高压缩、潜空间高冗余」的直觉。
+
+> **结论**：§2.3–2.5 的信息论结论是**规模不变的**——有损性、失真地板、噪声熵源在 tiny 到 7B 全部成立，且安全裕度只随 $d/\log_2|\mathcal V|$ 增长。唯一需要遵守的数值判据是 $d\gg\log_2|\mathcal V|$（几乎自动满足），故跨规模缩放时无需为维持这些结论而引入额外约束。
 
 ---
 
@@ -832,11 +1047,11 @@ $$J \;=\; D\Psi_h(Z^*) \;=\; I + \nabla v_h(Z^*),$$
 
 其中 $I$ 是 $T_{Z^*}\mathcal M$ 上的恒等，$\nabla v_h$ 是速度场的协变导数（因 $v_h(Z^*)=0$，Christoffel 项消失，$\nabla v_h=D v_h$）。于是 $I-J=-\nabla v_h(Z^*)$，式 25 的隐式微分重述为
 
-$$\nabla_\theta\ell \;=\; -\big(D_\theta\Psi_h(Z^*)\big)^{\dagger}\;\big((\nabla v_h(Z^*))^{\dagger}\big)^{-1}\;\nabla_{Z^*}^g\ell,$$
+$$\nabla_\theta\ell \;=\; -\big(D_\theta\Psi_h(Z^*)\big)^{\dagger}\;\big((\nabla v_h(Z^*))^{\dagger}\big)^{-1}\;\nabla_{Z^*}^{\mathbf G}\ell,$$
 
-其中 $\nabla_{Z^*}^g\ell=g(Z^*)^{-1}\frac{\partial\ell}{\partial Z}\big|_{Z^*}$ 是**黎曼梯度**（用解码器拉回度量 $g=J_D^\top J_D$ 把环境梯度提升到切空间），$\dagger$ 是**度量伴随**（对自同态 $T\to T$：$A^\dagger=g^{-1}A^\top g$；对 $D_\theta\Psi_h:\mathbb R^p\to T$：$B^\dagger=B^\top g$；均非欧氏转置）。收缩条件 $\rho(J)<1$ 要求 $\nabla v_h(Z^*)$ 的特征值落在 $(-2,0)$：负定（收缩）且大于 $-2$（不过冲、不振荡）。
+其中 $\nabla_{Z^*}^{\mathbf G}\ell=\mathbf G(Z^*)^{-1}\frac{\partial\ell}{\partial Z}\big|_{Z^*}$ 是**黎曼梯度**（用解码器拉回度量 $\mathbf G=J_D^\top J_D$ 把环境梯度提升到切空间），$\dagger$ 是**度量伴随**（对自同态 $T\to T$：$A^\dagger=\mathbf G^{-1}A^\top \mathbf G$；对 $D_\theta\Psi_h:\mathbb R^p\to T$：$B^\dagger=B^\top \mathbf G$；均非欧氏转置）。收缩条件 $\rho(J)<1$ 要求 $\nabla v_h(Z^*)$ 的特征值落在 $(-2,0)$：负定（收缩）且大于 $-2$（不过冲、不振荡）。
 
-**含义**：测地整流下，隐式微分的关键量从"算子雅可比的逆 $(I-J)^{-1}$"变成"速度场协变导数的伴随逆 $\big((\nabla v_h)^{\dagger}\big)^{-1}$"——后者正是 flow matching 所学的 $v_\theta$ 在不动点处的切线性化。这把 Loop Transformer 的算子不动点与 §4.1.5 的整流流统一到同一对象：$v_\theta$ 的稳定零点。欧氏情形是 $\mathcal M$ 平坦（$g=I$、$\nabla=\partial$、$\dagger=\top$）时的退化，式 25 是其特例。⚠️ 关键：$(\nabla v_h)^{-1}$ 必须取**度量伴随**后再作逆，不可省略 $\dagger$。仅当 $v_h$ 是（局部）梯度场（$dv_h^\flat=0$，即 $\nabla v_h$ 自伴）时 $(\nabla v_h)^{\dagger}=\nabla v_h$，二者才相等；一般测地速度场非梯度，伴随不可省。欧氏退化时上式退化为式 25 的 $(\partial_\theta\Psi_h)^\top(I-J)^{-\top}\nabla_Z\ell$。
+**含义**：测地整流下，隐式微分的关键量从"算子雅可比的逆 $(I-J)^{-1}$"变成"速度场协变导数的伴随逆 $\big((\nabla v_h)^{\dagger}\big)^{-1}$"——后者正是 flow matching 所学的 $v_\theta$ 在不动点处的切线性化。这把 Loop Transformer 的算子不动点与 §4.1.5 的整流流统一到同一对象：$v_\theta$ 的稳定零点。欧氏情形是 $\mathcal M$ 平坦（$\mathbf G=I$、$\nabla=\partial$、$\dagger=\top$）时的退化，式 25 是其特例。⚠️ 关键：$(\nabla v_h)^{-1}$ 必须取**度量伴随**后再作逆，不可省略 $\dagger$。仅当 $v_h$ 是（局部）梯度场（$dv_h^\flat=0$，即 $\nabla v_h$ 自伴）时 $(\nabla v_h)^{\dagger}=\nabla v_h$，二者才相等；一般测地速度场非梯度，伴随不可省。欧氏退化时上式退化为式 25 的 $(\partial_\theta\Psi_h)^\top(I-J)^{-\top}\nabla_Z\ell$。
 
 **可借用的三点结论。**
 
@@ -956,11 +1171,11 @@ PSCO 不替代 reflow，而是给 reflow 提供一个**有据可依、能自适�
 | 模态坍缩 | 某模态被另一模态/共享表征吞并 | 对齐目标单侧收敛、交叉掩码缺位（防线见 §3.4） |
 | 算子塌缩 | $\Psi_h\to\mathrm{id}$（$\tilde A_h\to1$）或常值映射 | 模型学到「不做计算 / 恒等」的最省力解 |
 
-五道防线（前三道已在 [`psco.py`](file:///home/simon-ma/JEPA/psco.py) 验证，后两道留作扩展）：
+五道防线（前三道已在 [`psco.py`](file:///home/simon-ma/JEPA/model/psco.py) 验证，后两道留作扩展）：
 
 1. **谱夹层（spectral sandwich）** 逐维 $\delta<\tilde a_{h,i}<1-\gamma$（等价于 $\rho(\tilde A_h)<1-\gamma$ 且 $\min_i\tilde a_{h,i}>\delta$）：上界保收敛（§3.7.1 收缩条件），下界 $\delta$ 封死「$\tilde A_h\to0$ 一步塌成一点」这条最阴的路径——只给上界时模型会学 $\tilde A_h\to0$，一步把所有 $Z$ 拉到共享 $b_h$，轨迹不再区分输入。参数化取 $\tilde A_h=\operatorname{diag}\big(\delta+(1-\gamma-\delta)\,\sigma(h)\big)$，逐维钳进 $(\delta,1-\gamma)$。
 2. **不动点读出头锚定**：$Z^*$ 必须能预测任务目标 $\mathcal L_{\text{readout}}=\|r(Z^*)-\tilde Z_y\|^2$（$r$ 为读出头）。塌成常数就预测不了，梯度把 $Z^*$ 重新推开。对应 §3.8 的预测目标与 §3.7 的 $\mathcal L_{\text{consist}}$。
-3. **方差正则**：对 $Z^*$ 每维标准差设下限 $\mathcal L_{\text{var}}=\mathrm{relu}(1-\sigma_j)$（式 33 同款），防维度塌缩。
+3. **方差正则**：对 $Z^*$ 每维标准差设下限 $\mathcal L_{\text{var}}=\mathrm{relu}(1-\sigma_j)$（同 §2.2.4(b) 式 (33)），防维度塌缩。
 4. **$h$ 的信息量约束**：$a_h,b_h$ 由 $h$ 自推断；若 $h$ 网络塌缩（所有输入同一 $h$），算子退化为常值。把 $h$ 接一个判别/预测任务（或 DIB 约束 §2.5）强制 $h$ 随输入变化。
 5. **轨迹非平凡性**：扫描物化整条轨迹，加「首步位移 / 轨迹长度」下限惩罚，防算子第一步就跳到不动点（瞬态段 $m$ 步被跳过）。对应 §2.6「ε 强制采样」防自我强化退化。
 
@@ -1019,7 +1234,7 @@ def text_to_operator(ids, H, W_ch, proj_a, proj_b, r):
 
 PSCO 相对三者独有、学不来的：**早停免费**（扫描物化轨迹，无需串行等停机概率）、**停机语义统一**（残差归零 = 改分量归零，而非外挂网络）、**$O(\log N)$ 深度**与**收敛保证**。代价是**实现复杂度最高**与**线性化假设**（渐近段需收缩）。
 
-**备选方案与实验判据。** 本小节把自适应深度的四条路线一并列为备选：ACT、Universal Transformer、PonderNet、PSCO。四者不是替代而是互补——**停机策略（借 ACT/PonderNet/UT）、收敛保证（PSCO）、$O(\log N)$ 深度（PSCO）可以合体**。但要诚实：目前所有结论都来自机制分析与 [`psco.py`](file:///home/simon-ma/JEPA/psco.py) 的线性骨架原型，**哪一个在真实多模态 JEPA 任务上更好，只能靠具体实验判定**，本小节不作先验取舍。
+**备选方案与实验判据。** 本小节把自适应深度的四条路线一并列为备选：ACT、Universal Transformer、PonderNet、PSCO。四者不是替代而是互补——**停机策略（借 ACT/PonderNet/UT）、收敛保证（PSCO）、$O(\log N)$ 深度（PSCO）可以合体**。但要诚实：目前所有结论都来自机制分析与 [`psco.py`](file:///home/simon-ma/JEPA/model/psco.py) 的线性骨架原型，**哪一个在真实多模态 JEPA 任务上更好，只能靠具体实验判定**，本小节不作先验取舍。
 
 ### 3.8 重建作为预测的特例：统一预测框架
 
@@ -1080,17 +1295,19 @@ $$\mathcal L = \mathbb E_{(x_c,\ h,\ x_y)\sim \mathcal D}\Big[ d\big(P_\phi(c,h)
 
 ## 4. 阶段三 · 解码：表征空间 → 多模态输出
 
+> **【废弃方案 · 记录备查，非强制约束】** 本节（§4）的 Flow Matching 数学与实现方案——§4.1 线性插值 OT 路径、速度场回归、Euler 采样、FlowBlock 交叉注意力、时间嵌入，以及 §4.2 的解码——来自已废弃的旧实现 `flow_matching_jepa.py`，其代码已从当前仓库移除（当前仅保留 JEPA 核心 + PSCO 骨架）。本节仅作为历史记录与备选参考，**不作为本架构的强制约束**；解码/生成路径可按需重新选型（自回归、MaskGIT、离散 diffusion、或重写 Flow），不受本节公式束缚。
+
 ### 4.1 Flow Matching 潜空间生成
 
-JEPA 阶段结束后冻结 $E_\theta$（[L479-L480](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L479-L480)），潜空间被固定，Flow 只需拟合这个静止的数据分布。
+JEPA 阶段结束后冻结 $E_\theta$，潜空间被固定，Flow 只需拟合这个静止的数据分布。
 
 #### 4.1.1 概率路径与线性（OT）插值
 
-设 $p_0 = \mathcal{N}(0, I)$ 为噪声分布，$p_1$ 为目标编码器诱导的数据分布 $z_1 = E_\xi(x) \sim p_1$。Flow Matching 在两者之间构造一条概率路径 $p_t$（$t\in[0,1]$）。本模型采用**线性插值路径**（[L499](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L499)）：
+设 $p_0 = \mathcal{N}(0, I)$ 为噪声分布，$p_1$ 为目标编码器诱导的数据分布 $z_1 = E_\xi(x) \sim p_1$。Flow Matching 在两者之间构造一条概率路径 $p_t$（$t\in[0,1]$）。本模型采用**线性插值路径**：
 
 $$z_t = (1-t)\,z_0 + t\,z_1, \qquad z_0 \sim p_0,\; z_1 \sim p_1,\; t \sim \mathcal{U}(0,1).$$
 
-这是最优传输（OT）在高斯与数据分布之间的一条直线插值路径，也是 Conditional Flow Matching 中最简单且稳定的选择。
+这是高斯与数据分布之间的直线插值路径，采用**独立耦合**（$z_0,z_1$ 各自独立采样，即 Rectified Flow 的默认设定），也是 Conditional Flow Matching 中最简单且稳定的选择。注意它**不是** OT 耦合——OT 是 reflow 迭代的极限（§4.1.5）。
 
 #### 4.1.2 速度场与回归目标
 
@@ -1098,27 +1315,27 @@ $$z_t = (1-t)\,z_0 + t\,z_1, \qquad z_0 \sim p_0,\; z_1 \sim p_1,\; t \sim \math
 
 $$u_t(z_t) = \frac{d z_t}{d t} = z_1 - z_0.$$
 
-源码中即 `velocity_target = target - noise`（[L500](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L500)）。模型学习一个条件速度场 $v_\psi(z_t, t, c)$ 去回归它（[L501](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L501)），损失为均方误差（[L502](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L502)）：
+源码中即 `velocity_target = target - noise`。模型学习一个条件速度场 $v_\psi(z_t, t, c)$ 去回归它，损失为均方误差：
 
 $$\mathcal{L}_{\text{flow}} = \mathbb{E}_{t, z_0, z_1}\left[\left\| v_\psi(z_t, t, c) - (z_1 - z_0) \right\|^2\right].$$
 
-条件 $c = E_\theta(x_c)$ 通过 `FlowBlock` 中的交叉注意力注入（[L115-L117](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L115-L117)），使生成的潜变量与可见前缀一致。
+条件 $c = E_\theta(x_c)$ 通过 `FlowBlock` 中的交叉注意力注入，使生成的潜变量与可见前缀一致。
 
 #### 4.1.3 时间嵌入
 
-连续时间 $t$ 经正弦嵌入后由 MLP 非线性化（[L122-L132](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L122-L132)、[L142-L146](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L142-L146)）：
+连续时间 $t\in[0,1]$ 经正弦嵌入（标准 transformer 频率约定）后由 MLP 非线性化：
 
-$$\mathrm{emb}(t) = [\sin(t \cdot 1000 \cdot f),\; \cos(t \cdot 1000 \cdot f)], \qquad f_j = \exp\!\left(-\frac{\ln 10000 \cdot j}{d/2 - 1}\right),$$
+$$\mathrm{emb}(t) = \big[\sin(t\,f_j),\ \cos(t\,f_j)\big]_{j=0}^{d/2-1}, \qquad f_j = 10000^{-2j/d} = \exp\!\left(-\frac{2\ln 10000}{d}\,j\right),$$
 
-再与 $z_t$ 相加后送入主干。
+频率按对数几何间隔从 $f_0=1$（最高频）降到 $f_{d/2-1}\approx 10000^{-1}$（最低频），覆盖多个数量级、同时捕捉时间的高频变化与低频趋势；再与 $z_t$ 相加后送入主干。
 
 #### 4.1.4 Euler 采样：从噪声积分到潜变量
 
-推理时求解由学习速度场定义的 ODE（[L515-L536](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L515-L536)）：
+推理时求解由学习速度场定义的 ODE：
 
 $$\frac{d z}{d t} = v_\psi(z, t, c), \qquad z(0) \sim \mathcal{N}(0, I),$$
 
-用 Euler 法离散，步长 $\Delta t = 1/N$（$N$ = `inference_steps`，[L524](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L524)）：
+用 Euler 法离散，步长 $\Delta t = 1/N$（$N$ = `inference_steps`）：
 
 $$z_{k+1} = z_k + \Delta t \cdot v_\psi(z_k,\; k\Delta t,\; c), \qquad k = 0, 1, \dots, N-1.$$
 
@@ -1132,7 +1349,7 @@ $$z_{k+1} = z_k + \Delta t \cdot v_\psi(z_k,\; k\Delta t,\; c), \qquad k = 0, 1,
 
 **训练阶段：把速度场矫正成直线。** 三个手段：
 
-1. **OT 耦合（§4.1.1 默认）**：训练目标本就取直线插值、回归恒定速度 $z_1-z_0$，从定义上把「直线」设为靶子；
+1. **直线插值 + 独立耦合（§4.1.1 默认，Rectified Flow）**：训练目标本就取直线插值、回归恒定速度 $z_1-z_0$，从定义上把「直线」设为靶子；
 2. **矫正流（Rectified Flow / ReFlow）**：迭代「拟合→沿拟合流重采样→再拟合」，每轮把路径拉直一点、运输成本单调降到 OT 下限——这是「把曲线救国的 CoT 逐轮拉直」的算法原型；
 3. **直线性正则**：显式惩罚曲率 $\mathcal L_{\text{straight}}=\mathbb E_t\|\ddot z_t\|^2$，等价于惩罚偏离直线 $z_t-((1-t)z_0+t z_1)$。
 
@@ -1171,6 +1388,31 @@ $$\nabla_\theta\mathcal L\Big|_{\text{BPTT},\,L} = \sum_{k=0}^{L-1} \frac{\parti
 
 **直线 → 测地线：非欧修正。** 本节"直线 / 零曲率"默认了 $\mathcal M$ 平坦且测地凸。按 §2.1.1，$\mathcal M$ 泛型弯曲，故"最短流"应重述为"$\mathcal M$ 上的测地流"，"零曲率"应指**零内在曲率**（沿切丛 $T\mathcal M$ 平行移动的方向恒定），而非零外在加速度 $\ddot z=0$；reflow 应重述为**测地整流**（geodesic rectification），极限是 OT 测地线而非欧氏直线。欧氏 reflow 只在局部（小测地球 / 低曲率）是一阶近似，全局会离开 $\mathcal M$。这条修正同时解释了 §3.7 的"曲线救国"：CoT 的中间步骤之所以"绕"，正是因为它贴着弯曲的 $\mathcal M$（可解码 / 可解释的流形）走，测地线在环境空间里看就是弯的。
 
+#### 4.1.6 黎曼流匹配（Riemannian Flow Matching）备选：数学意义与 GPU 友好性
+
+§4.1.2 的速度场回归目标 $z_1-z_0$ 是**欧氏直线速度**。但 §2.1.1 已证明 $\mathcal M$ 泛型弯曲，欧氏直线段 $[z_0,z_1]$ 会离开 $\mathcal M$（off-manifold，中途 $c(t)=\max_v p_\theta(v\mid z_t)$ 塌陷）。欧氏 FM 因此回归了一条**在可解码流形上不可行**的路径。
+
+**数学意义。** 严谨推广是把 OT 直线换成流形测地线（§2.1.1 推论）：
+
+$$z_t = \exp_{z_0}\!\big(t\cdot\log_{z_0}(z_1)\big),\qquad v_\psi \in T\mathcal M,$$
+
+速度场活在切丛 $T\mathcal M$ 上，回归目标是测地速度（Chen & Lipman, ICLR 2024）。意义有三：
+
+1. **生成路径始终在 $\mathcal M$ 上**：中间态 $z_t$ 全程可解码、$c(t)$ 平稳，生成质量高——欧氏直线则中途穿过 off-manifold 区；
+2. **与 §4.1.5 自洽**：「最短流」应重述为测地流、「零曲率」指零内在曲率（切丛平行移动方向恒定），reflow 极限是 OT 测地线而非欧氏直线（§4.1.5 末段已点出此修正）；
+3. **度量统一**：若 §2.2.6 的潜预测损失升级为拉回度量 $\mathbf G$，Flow 速度场回归也应同步用 $\mathbf G$——两处度量统一，避免「预测用黎曼、生成用欧氏」的新矛盾。
+
+**GPU 友好性。** RFM 的代价集中在 $\exp_z$ / $\log_z$（指数/对数映射）的计算：
+
+| 项 | 欧氏 FM（当前） | Riemannian FM |
+|---|---|---|
+| 回归目标 | $z_1-z_0$，$O(1)$ 逐元素 | 需解测地线 ODE $\ddot\gamma+\Gamma(\dot\gamma,\dot\gamma)=0$ |
+| 采样 $z_t$ | 线性插值，$O(1)$ | $\exp_{z_0}(t\log_{z_0}z_1)$，数值积分 |
+| 训练并行 | batch 全并行、零串行 | 每对 $(z_0,z_1)$ 独立解测地线，batch 内可并行向量化，但每条测地线是 $K$ 步串行积分 |
+| 推理串行深度 | $O(N)$（Euler 步，与 $L$ 解耦） | $O(N\cdot K)$（每步 Euler 外再套测地积分） |
+
+**关键瓶颈**：我们的 $\mathcal M$ 是**隐式定义**的（$\mathbf G=J_D^\top J_D$，无闭式 $\exp/\log$），每一步都要数值求解测地线方程，串行深度从 $O(N)$ 恶化到 $O(NK)$，且 $\mathbf G$ 随解码器漂移使测地线不稳定。因此 RFM **数学上更正确、GPU 上明显更贵**，仅在 $d$ 很小（如冒烟 $d=64$）或流形有闭式 $\exp/\log$（球面/双曲等）时才划算。当前建议：保持欧氏 FM，把 RFM 列为「当 off-manifold 生成退化（中途 $c(t)$ 塌陷）被实测观察到时」的备选，不强制切换。
+
 ### 4.2 与本模型实现的对齐
 
 **(a) 解码器带位置混合，读出头仍是线性打分，不是欧氏最近邻。**
@@ -1187,7 +1429,7 @@ T_j = \arg\max_{v \in \mathcal{V}} \bigl( w_v^{\top} h_j + b_v \bigr), \tag{32}$
 位置混合使解码器能借助其他位置纠正单个位置的采样误差，从而对 Flow 采样误差更鲁棒（旧实现是逐位置 `nn.Linear`，单点噪声直接变成乱码）。
 
 **(b) 率是架构硬约束，不是损失项。**
-本模型没有任何 KL 项或码率惩罚。码率由 $|\mathcal{V}|^L$ 硬性封顶，对应 (14) 的约束集而不是 (13) 的 $\beta$。训练中只有失真项（重建交叉熵：JEPA 阶段 [L458](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L458)、Flow 阶段的教师强制重建；`pretrain.py` 的 `stage2_step` 另加 Flow 端点采样重建一路）和防塌缩正则。
+本模型没有任何 KL 项或码率惩罚。码率由 $|\mathcal{V}|^L$ 硬性封顶，对应 (14) 的约束集而不是 (13) 的 $\beta$。训练中只有失真项（重建交叉熵：JEPA 阶段 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`、Flow 阶段的教师强制重建；另加 Flow 端点采样重建一路）和防塌缩正则。
 
 **(c) 确定性编码器下 ELBO 不成立。**
 若 $q(z\mid x)$ 是点质量（确定性编码器），则 $\mathrm{KL}(q(z\mid x)\|p(z)) = +\infty$，VAE 型 ELBO 只是形式类比，不是本模型的目标。不能写成"训练目标已隐含率–失真结构"：真正的结构是"失真项 + 架构率约束"。
@@ -1197,10 +1439,10 @@ T_j = \arg\max_{v \in \mathcal{V}} \bigl( w_v^{\top} h_j + b_v \bigr), \tag{32}$
 $$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1 - \sigma_j)\bigr],\qquad
 \sigma_j = \mathrm{std}\bigl(\mathrm{reshape}(z,\,[-1, d])_{:,j}\bigr), \tag{33}$$
 
-即 [L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)。它在 $\sigma_j < 1$ 时受罚，作用是**抬高**潜空间各维的熵、防止维度塌缩，方向与"压低 $I(Z;T)$"的率惩罚相反。它与率无关，只是防塌缩正则。
+即 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`（$\sigma_j$ 是 batch×位置维度上的边际标准差）。它在 $\sigma_j < 1$ 时受罚，作用是**抬高**潜空间各维的熵、防止维度塌缩，方向与"压低 $I(Z;T)$"的率惩罚相反。它与率无关，只是防塌缩正则。
 
 **(e) 潜空间静止的前提。**
-Flow 阶段没有再调用 `update_target`（[L487-L511](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L487-L511)），$E_\xi$ 在 Flow 阶段完全冻结，$p_1$ 恒定。式 (7)–(15) 中的 $Z$ 正是这个静止分布的样本，论证因此成立。
+Flow 阶段没有再调用 `update_target`，$E_\xi$ 在 Flow 阶段完全冻结，$p_1$ 恒定。式 (7)–(15) 中的 $Z$ 正是这个静止分布的样本，论证因此成立。
 
 **(f) 连续潜变量 → 离散 token 的解码器选型：两族方案。**
 
@@ -1234,7 +1476,7 @@ Flow 阶段没有再调用 `update_target`（[L487-L511](file:///home/simon-ma/J
 
 但要诚实标注边界——"能否节省训练时间"取决于序列长度：
 
-- 本脚本 `SEQ_LEN=24`、`DIM=32`，序列极短，$L^2$ 项在 $L=24$ 时远未成瓶颈，Mamba 不会带来可测的训练加速，反而引入 SSM 的 $A,B,C$ 参数与 ZOH 离散化开销；
+- 冒烟配置（`image_size=32`、`patch_size=8`、`dim=64/128`）序列极短（$L=16$），$L^2$ 项远未成瓶颈，Mamba 不会带来可测的训练加速，反而引入 SSM 的 $A,B,C$ 参数与 ZOH 离散化开销；
 - Mamba 的训练优势在长序列（$L \gtrsim 10^3$）才兑现，短序列下 Transformer 常数因子更优、实现更成熟；
 - 因此当前字符级短序列不必换 Mamba；若要扩到文档/视频帧级长上下文，Mamba 的线性复杂度与 $O(1)$ 缓存是直接收益。
 
@@ -1273,7 +1515,7 @@ Flow 阶段没有再调用 `update_target`（[L487-L511](file:///home/simon-ma/J
 **FSQ**（无码本，最省显存）逐维取整并用直通估计梯度；$L_i$ 需为奇数，码字关于 0 对称：
 
 $$\hat z_i=\frac{\mathrm{round}\!\big(\tfrac{L_i-1}{2}\tanh(z_i)\big)}{(L_i-1)/2},\qquad
-\hat z_i\leftarrow z_i+\mathrm{sg}\big(\hat z_i-z_i\big). \tag{34}$$
+\hat z_i\leftarrow \tanh(z_i)+\mathrm{sg}\big(\hat z_i-\tanh(z_i)\big). \tag{34}$$
 
 码本大小为 $\prod_i L_i$，计算是纯逐元素，没有 $K$ 维距离矩阵。
 
@@ -1282,7 +1524,7 @@ $$\hat z_i=\frac{\mathrm{round}\!\big(\tfrac{L_i-1}{2}\tanh(z_i)\big)}{(L_i-1)/2
 $$k^{\star}=\arg\min_k\|z-e_k\|_2^2,\qquad
 \mathcal L_{\mathrm{VQ}}=\gamma\,\big\|z-\mathrm{sg}[e_{k^{\star}}]\big\|^2, \tag{35}$$
 
-其中距离矩阵可用 $d_{bk}=\|z_b\|^2+\|e_k\|^2-2z_be_k^\top$ 一次矩阵乘得到，码本向量用 EMA 追踪分配到该码字的编码器输出（[L231-L253](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L231-L253)）。RVQ 再把残差逐级量化：
+其中距离矩阵可用 $d_{bk}=\|z_b\|^2+\|e_k\|^2-2z_be_k^\top$ 一次矩阵乘得到，码本向量用 EMA 追踪分配到该码字的编码器输出。RVQ 再把残差逐级量化：
 
 $$\hat z=\sum_{m=1}^{M}e^{(m)}_{k_m},\qquad
 r^{(m+1)}=r^{(m)}-e^{(m)}_{k_m},\qquad
@@ -1317,7 +1559,7 @@ $M$ 个样本落在同一 batch，GPU 并行；$\widehat{\mathrm{Var}}$ 越大�
 
 **(d) 离散侧也要并行时。**
 
-若不想让文本 token 本身自回归生成，用 MaskGIT / 离散扩散：每步对所有位置并行预测，按置信度保留前 $k$ 个，串行深度 $O(T_{\text{refine}})$，与 $L$ 解耦。它与 (29)–(32) 的离散码本配合，构成"压缩 + 并行解码"。
+若不想让文本 token 本身自回归生成，用 MaskGIT / 离散扩散：每步对所有位置并行预测，按置信度保留前 $k$ 个，串行深度 $O(T_{\text{refine}})$，与 $L$ 解耦。它与 (34)–(37) 的离散码本配合，构成"压缩 + 并行解码"。
 
 **(e) 大模型证据与取舍。**
 
@@ -1336,7 +1578,7 @@ $$h(q)=-\infty .$$
 
 点质量无法表达后验的宽度——它只报告"最可能的一个点"，把"文字背后有多种可能"整件事抹掉。而 $H(Z\mid T)$（连续版本 $h(Z\mid T)$）要度量的正是这个宽度。
 
-**(b) 噪声是采样器随机性的唯一来源。** 推理起点是 `torch.randn`（[L522](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L522)），即 $z_0\sim\mathcal N(0,I)$；训练端同样以 `torch.randn_like(target)` 注入噪声（[L497](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L497)）。采样器 $\Phi_1$ 是 Flow ODE 在 $t\in[0,1]$ 上的积分映射，给定 $T$ 后 $\hat Z=\Phi_1(z_0)$ 的全部随机性来自 $z_0$。连续流可逆，由微分熵的变量替换公式
+**(b) 噪声是采样器随机性的唯一来源。** 推理起点是 `torch.randn`，即 $z_0\sim\mathcal N(0,I)$；训练端同样以 `torch.randn_like(target)` 注入噪声。采样器 $\Phi_1$ 是 Flow ODE 在 $t\in[0,1]$ 上的积分映射，给定 $T$ 后 $\hat Z=\Phi_1(z_0)$ 的全部随机性来自 $z_0$。连续流可逆，由微分熵的变量替换公式
 
 $$h(\hat Z\mid T)=h(z_0)+\mathbb E_{z_0}\Big[\log\Big|\det\tfrac{\partial\Phi_1(z_0)}{\partial z_0}\Big|\Big]. \tag{41}$$
 
@@ -1344,7 +1586,7 @@ $$h(\hat Z\mid T)=h(z_0)+\mathbb E_{z_0}\Big[\log\Big|\det\tfrac{\partial\Phi_1(
 
 $$h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{42}$$
 
-**(c) 噪声熵在收缩流下是输出熵的上界。** 严格成立的是式 (41)；"上界"来自流在数据支撑上**收缩**这一典型情形：variance_loss（式 (33)，[L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)）把潜空间各维尺度约束在 $\sigma_j\gtrsim 1$，与 $z_0$ 的单位方差同阶，于是 $\Phi_1$ 在数据支撑上近似体积守恒、雅可比行列式 $\det J\approx 1$，$\mathbb E[\log|\det J|]\le 0$，代入式 (41) 得
+**(c) 噪声熵在收缩流下是输出熵的上界。** 严格成立的是式 (41)；"上界"成立与否完全取决于流 $\Phi_1$ 的雅可比行列式 $\det J$ 的符号。本节把它作为一个**假设（收缩流假设）**：$\Phi_1$ 在数据支撑上体积不膨胀，即 $\mathbb E[\log|\det J|]\le 0$。⚠️ 该假设**不能**由 variance_loss（式 (33)，[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`）推出——后者约束的是**编码器输出分布各维的边际标准差** $\sigma_j\gtrsim 1$，而 $\det J$ 是**采样器** $\Phi_1$ 的体积变化率，二者是不同对象的性质、无蕴含关系。收缩流假设是「数据支撑上近似体积守恒」的经验性前提，需实测或另加正则保证，而非自动成立。在该假设下代入式 (41) 得
 
 $$h(\hat Z\mid T)\;\le\; h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{43}$$
 
@@ -1352,15 +1594,15 @@ $$h(\hat Z\mid T)\;\le\; h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{43}$$
 
 $$h(z_0)\;\gtrsim\; h(Z\mid T). \tag{44}$$
 
-以默认配置 $L=24$、$d=32$ 计，$h(z_0)\approx 24\times 32\times 2.047\approx 1572$ bit，比文本码率上界 $H(T)\le 150.40$ bit（式 (2)）高出约一个数量级——噪声端的熵预算远大于文本端，与"文字高压缩、潜空间高冗余"的直觉一致。
+以冒烟尺度 tiny（$L=16$、$d=64$）计，$h(z_0)\approx 16\times 64\times 2.047\approx 2096$ bit，比文本码率上界 $H(T)\le L\log_2|\mathcal V|$（式 (2)）高出约一个数量级以上——噪声端的熵预算远大于文本端，与"文字高压缩、潜空间高冗余"的直觉一致。该比例 $\approx d\cdot 2.047/\log_2|\mathcal V|$ 与 $L$ 无关，各规模下的完整演算见 §2.8。
 
 **(d) 与离散熵的衔接。** 式 (4)–(6) 用网格量化 $Z_\delta$ 定义的是离散熵 $H(Z_\delta\mid T)$；本节 $h(Z\mid T)$ 是连续微分熵。二者由式 (4) 的条件版本联系：
 
 $$H(Z_\delta\mid T)\approx h(Z\mid T)+Ld\,\log_2\tfrac{1}{\delta},$$
 
-固定分辨率 $\delta$ 后只差一个与 $T$ 无关的常数。因此式 (40) 的经验离散度 $\widehat{\mathrm{Var}}(Z\mid T)=\tfrac1M\sum_m\|Z^{(m)}-\bar Z\|^2$（源码 [L617](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L617) 的 `z.var(dim=0, unbiased=False).mean()`）度量的是连续宽度 $h(Z\mid T)$，不是离散码率 $H(T)$——它测"这段文字背后潜变量有多散"，与"文字本身多少 bit"是两回事。
+固定分辨率 $\delta$ 后只差一个与 $T$ 无关的常数。注意式 (40) 的经验离散度 $\widehat{\mathrm{Var}}(Z\mid T)=\tfrac1M\sum_m\|Z^{(m)}-\bar Z\|^2$ 度量的是**同一文本 $T$ 采样 $M$ 条生成轨迹的跨样本方差**，即连续条件宽度 $h(Z\mid T)$；它**不是** [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`（后者是 `z.reshape(-1,d).std(dim=0)`，度量 batch×位置维度上各维的**边际**标准差、防维度塌缩，对应 $h(Z)$ 的各维宽度）。二者对象不同：式 (40) 测"这段文字背后潜变量有多散"（需对同一 $T$ 重复采样），`variance_loss` 测"不同样本的潜变量各维是否塌缩"，与"文字本身多少 bit"是两回事。
 
-**(e) 熵源 ≠ 被去噪的噪声。** 式 (41)–(44) 表明 $\mathcal N(0,I)$ 的熵最终转化为后验 $\hat Z$ 的宽度，代表"文字说不清的那部分"（$h(Z\mid T)$）。它**不是**压缩时注入、等着被去噪还原的细节：压缩端 $g$ 是确定性的（$H(T\mid Z)=0$，式 A2，argmax 解码见 [L548](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L548)），随机性全部来自生成端 $z_0$。这与 §4.2(c) 的"确定性编码器下 ELBO 不成立"是同一类辨析——不能把采样器的随机性误读成编码端的噪声。
+**(e) 熵源 ≠ 被去噪的噪声。** 式 (41)–(44) 表明 $\mathcal N(0,I)$ 的熵最终转化为后验 $\hat Z$ 的宽度，代表"文字说不清的那部分"（$h(Z\mid T)$）。它**不是**压缩时注入、等着被去噪还原的细节：压缩端 $g$ 是确定性的（$H(T\mid Z)=0$，式 A2，argmax 解码见 [decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `TextDecoder`），随机性全部来自生成端 $z_0$。这与 §4.2(c) 的"确定性编码器下 ELBO 不成立"是同一类辨析——不能把采样器的随机性误读成编码端的噪声。
 
 综合：
 
@@ -1415,14 +1657,14 @@ $e$ 是**创新**——推理表征与可观测表征之间的失配。由命题
 
 ## 6. 落到本模型的可检验推论与实验
 
-由第 2、4、5 节可直接导出在 [`flow_matching_jepa.py`](file:///home/simon-ma/JEPA/flow_matching_jepa.py) 上可跑的验证实验：
+由第 2、4、5 节可直接导出：
 
 | 推论 | 实验 | 预期 |
 |---|---|---|
-| $H(T) \le L\log_2\|\mathcal{V}\|$（式 2） | 采样生成文本，用 held-out n-gram 或独立 LM 估计 $\hat H(T)$ | $\hat H(T) < 24\log_2 77 \approx 150.40$ 比特；生成样本近确定性，经验熵会偏低，需交叉估计 |
+| $H(T) \le L\log_2|\mathcal{V}|$（式 2） | 采样生成文本，用 held-out n-gram 或独立 LM 估计 $\hat H(T)$ | $\hat H(T) < L\log_2|\mathcal{V}|$（数值随规模，见 §2.8）；生成样本近确定性，经验熵会偏低，需交叉估计 |
 | 失真地板 $D_T \ge D^{\star}$（式 10） | 把生成文本 $T$ 重新编码 $\hat Z = E_\theta(T)$，与真实 $Z$ 比较 | $\mathbb{E}\|Z-\hat Z\|^2$ 显著大于 0；须与随机 token 基线对比，不能只看余弦相似度 |
 | 率失真曲线（式 11–12） | 改变词表粒度（字符 → 子词 → 词）重训，画 $(\hat H(T),\, \hat D_T)$ | 文本工作点落在"低码率、高失真"区域，$D$ 随 $|\mathcal{V}|$ 减小而上升 |
-| 语义选择性（式 15） | 用跨模态 / 下游探针定义 $Y$，比较 $I(T;Y)$ 与 $H(Z\mid T)$ | 语义码率占比高；细节损失集中在低语义方向，需用探针方向而非裸 $d=32$ 维度 |
+| 语义选择性（式 15） | 用跨模态 / 下游探针定义 $Y$，比较 $I(T;Y)$ 与 $H(Z\mid T)$ | 语义码率占比高；细节损失集中在低语义方向，需用探针方向而非裸 $d$ 维度 |
 
 ---
 
