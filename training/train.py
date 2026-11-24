@@ -81,6 +81,10 @@ def main():
     # 主干选型（§2.2.5）
     parser.add_argument("--backbone", choices=["transformer", "mamba", "hybrid"], default=None)
     parser.add_argument("--attn-layers", type=int, default=None)
+    # 图像前端（§2.2.7）：patch（单层卷积）/ siglip2（LLaDA-V 前端：SigLIP-2 + MLP）
+    parser.add_argument("--image-frontend", choices=["patch", "siglip2"], default=None)
+    parser.add_argument("--siglip2-model", type=str, default=None)
+    parser.add_argument("--freeze-vision", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     # 训练
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -118,14 +122,18 @@ def main():
         heads=args.heads,
         backbone=args.backbone,
         attn_layers=args.attn_layers,
+        image_frontend=args.image_frontend,
+        siglip2_model=args.siglip2_model,
+        freeze_vision=args.freeze_vision,
     )
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
-    assert cfg.image_size % cfg.patch_size == 0, "image_size 必须能被 patch_size 整除"
+    assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device} | preset: {args.preset} | d={cfg.dim} d_hidden={cfg.width} "
           f"depth={cfg.depth} heads={cfg.heads} backbone={cfg.backbone} "
-          f"image={cfg.image_size} patch={cfg.patch_size} latent_len={cfg.text_len}")
+          f"frontend={cfg.image_frontend} image={cfg.image_size} patch={cfg.patch_size} "
+          f"latent_len={cfg.text_len}")
 
     # —— 词表（tokenizer）选择 ——
     tokenizer_meta = None

@@ -6,6 +6,7 @@ E^I 与 E^T 各自把模态编译进同一个连续潜空间 Z = [B, L, d]，并
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .psco import associative_scan
 
@@ -121,6 +122,114 @@ def build_backbone(backbone, dim, heads, depth, mlp_ratio=4.0, attn_layers=2):
     return TransformerEncoder(dim, heads, depth, mlp_ratio)
 
 
+class LinearMemory(nn.Module):
+    """delta rule 线性记忆（§2.6 创新编码的记忆 M）。
+
+    更新：M_t = M_{t-1} + β (v_t − M_{t-1} k_t) k_tᵀ；
+    冗余度 ρ_t = ‖v_t − M_{t-1} k_t‖²（写入前用旧记忆 M_{t-1} 预测 v_t）。
+    ρ≈0 表示该 token 已被记忆吸收、可丢；ρ 大表示不可预测、必须留。
+
+    冒烟阶段用 O(L) 顺序循环（tiny 档 L=16 完全够）；§2.6 第 671 行的并行扫描
+    （O(log L) 深度，复用 psco.associative_scan）留待中型档再落地。
+    """
+
+    def __init__(self, dim, head_dim=64, beta=0.1):
+        super().__init__()
+        self.k_proj = nn.Linear(dim, head_dim, bias=False)
+        self.v_proj = nn.Linear(dim, head_dim, bias=False)
+        self.beta = beta
+
+    def forward(self, x):
+        # x: [B, L, dim] -> rho: [B, L]
+        k = F.normalize(self.k_proj(x), dim=-1)  # 归一化 k，保证 β‖k‖² 落稳定区间（β<2 收敛）
+        v = self.v_proj(x)
+        B, L, D = k.shape
+        M = x.new_zeros(B, D, D)           # 记忆矩阵 [B, D, D]
+        rho = x.new_zeros(B, L)
+        for t in range(L):
+            kt = k[:, t]                   # [B, D]
+            vt = v[:, t]
+            yt = torch.einsum("bij,bj->bi", M, kt)   # 旧记忆读取 [B, D]
+            rho[:, t] = (vt - yt).pow(2).sum(-1)
+            delta = (vt - yt).unsqueeze(-1) * kt.unsqueeze(1)  # [B, D, D] 外积
+            M = M + self.beta * delta
+        return rho
+
+
+class RhoCompressor(nn.Module):
+    """token 层 ρ 残差压缩（§2.6）：按冗余度 ρ 丢冗余、mask 填充保 L。
+
+    keep_t = (ρ_t > ε_ρ) ∨ sink(t) ∨ force(t)：
+      - ρ>ε_ρ：不可预测，必须留；
+      - sink(t)：位置 0 硬编码不丢（softmax 泄洪口）；
+      - force(t)：ε 强制采样，随机保留一小部分低 ρ token 防自我强化退化。
+    被丢位置用 mask_token 填充，序列长度不变（保 L），硬对齐不破。
+
+    每个模态一个实例（私有 M）；多模态接入即新增一个实例，接口天然扩展。
+    """
+
+    def __init__(self, dim, head_dim=64, beta=0.1, eps_rho=0.1, eps_keep=0.02):
+        super().__init__()
+        self.memory = LinearMemory(dim, head_dim, beta)
+        self.eps_rho = eps_rho
+        self.eps_keep = eps_keep
+
+    def forward(self, x, mask_token):
+        # x: [B, L, dim]; mask_token: [1, 1, dim] 或 [1, dim]
+        # 返回 (x_tilde, keep [B,L] bool, rho [B,L])
+        rho = self.memory(x)               # [B, L]
+        keep = rho > self.eps_rho          # 冗余度大 = 不可预测 = 保留
+        keep[:, 0] = True                  # sink 保护：位置 0 不丢
+        if self.training and self.eps_keep > 0:
+            # ε 强制采样：随机保留一小部分被丢的低 ρ token（§2.6 补丁 2）
+            drop = ~keep
+            force = drop & (torch.rand_like(rho) < self.eps_keep)
+            keep = keep | force
+        x_tilde = torch.where(keep.unsqueeze(-1), x, mask_token)
+        return x_tilde, keep, rho
+
+
+class SigLIP2Frontend(nn.Module):
+    """LLaDA-V 视觉前端：冻结的 SigLIP-2 视觉编码器 + 可训练 MLP 投影（§2.2.7）。
+
+    LLaDA-V 用 SigLIP-2 提取连续 patch 特征（不量化），MLP 连接器投影到语言嵌入空间。
+    这里把投影目标设为本框架的主干宽度 d_hidden，输出 [B, n_patches, d_hidden]，
+    满足 §2.6「Z 全程连续、有损只在 token 层」的契约。
+
+    运行依赖（仅 siglip2 前端需要，放 hf extra）：transformers（已有）+ 首次加载需
+    联网下载 SigLIP-2 权重；图像预处理用 F.interpolate + SigLIP 归一化，无需 pillow。
+    """
+
+    def __init__(self, model_name, hidden_dim, image_size, freeze=True):
+        super().__init__()
+        from transformers import Siglip2VisionModel
+
+        self.vision = Siglip2VisionModel.from_pretrained(model_name)
+        self.freeze = freeze
+        if freeze:
+            self.vision.eval()
+            for p in self.vision.parameters():
+                p.requires_grad_(False)
+        vision_dim = self.vision.config.hidden_size
+        self.image_size = image_size
+        self.proj = nn.Sequential(
+            nn.Linear(vision_dim, vision_dim * 4),
+            nn.GELU(),
+            nn.Linear(vision_dim * 4, hidden_dim),
+        )
+
+    def forward(self, x):
+        # x: [B, C, H, W]，值域 [0,1]；resize 到 image_size 并按 SigLIP 归一化 ((x-0.5)/0.5)。
+        x = F.interpolate(x, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
+        x = (x - 0.5) / 0.5
+        if self.freeze:
+            with torch.no_grad():
+                feat = self.vision(pixel_values=x).last_hidden_state  # [B, n_patches, vision_dim]
+        else:
+            feat = self.vision(pixel_values=x).last_hidden_state
+        return self.proj(feat)  # [B, n_patches, hidden_dim]
+
+
 class ImageEncoder(nn.Module):
     """E^I：把图像 [B,C,H,W] 编译成 patch token 序列 + [CLS]。
 
@@ -129,23 +238,44 @@ class ImageEncoder(nn.Module):
     """
 
     def __init__(self, image_size, patch_size, channels, dim, heads, depth,
-                 mlp_ratio=4.0, hidden_dim=0, backbone="hybrid", attn_layers=2):
+                 mlp_ratio=4.0, hidden_dim=0, backbone="hybrid", attn_layers=2,
+                 image_frontend="patch", siglip2_model="google/siglip2-base-patch16-224",
+                 freeze_vision=True, rho_compress=False, rho_head_dim=64,
+                 rho_beta=0.1, rho_eps=0.1, rho_eps_keep=0.02):
         super().__init__()
         hidden_dim = hidden_dim or dim
-        self.n_patches = (image_size // patch_size) ** 2
-        self.patch_embed = nn.Conv2d(channels, hidden_dim, kernel_size=patch_size, stride=patch_size)
+        self.frontend = image_frontend
+        if image_frontend == "siglip2":
+            # LLaDA-V 前端：冻结 SigLIP-2 + MLP 投影 → [B, n_patches, d_hidden]。
+            self.patch_embed = SigLIP2Frontend(siglip2_model, hidden_dim, image_size, freeze_vision)
+            self.n_patches = (image_size // 16) ** 2
+        else:
+            self.patch_embed = nn.Conv2d(channels, hidden_dim, kernel_size=patch_size, stride=patch_size)
+            self.n_patches = (image_size // patch_size) ** 2
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches + 1, hidden_dim))
         self.mask_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.encoder = build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers)
         self.head = nn.Linear(hidden_dim, dim) if hidden_dim != dim else nn.Identity()
+        # token 层 ρ 压缩（§2.6）：私有记忆 M，图像模态一份。
+        self.rho_compressor = (
+            RhoCompressor(hidden_dim, rho_head_dim, rho_beta, rho_eps, rho_eps_keep)
+            if rho_compress else None
+        )
+        self.last_keep = None  # 供测试/可视化读取最近一次的 ρ 判据
+        self.last_rho = None
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.mask_token, std=0.02)
 
     def forward(self, x, mask=None):
         batch = x.size(0)
-        tokens = self.patch_embed(x).flatten(2).transpose(1, 2)  # [B,N,d_hidden]
+        if self.frontend == "siglip2":
+            tokens = self.patch_embed(x)  # [B,N,d_hidden]
+        else:
+            tokens = self.patch_embed(x).flatten(2).transpose(1, 2)  # [B,N,d_hidden]
+        if self.rho_compressor is not None:  # 先写后压：干净 tokens 上算 ρ 丢冗余，mask 填充保 L
+            tokens, self.last_keep, self.last_rho = self.rho_compressor(tokens, self.mask_token)
         if mask is not None:  # mask: [B,N] bool，True 处替换为 mask_token。
             tokens = torch.where(mask.unsqueeze(-1), self.mask_token, tokens)
         cls = self.cls_token.expand(batch, -1, -1)
@@ -162,20 +292,33 @@ class TextEncoder(nn.Module):
     """
 
     def __init__(self, vocab_size, max_len, dim, heads, depth,
-                 mlp_ratio=4.0, hidden_dim=0, backbone="hybrid", attn_layers=2):
+                 mlp_ratio=4.0, hidden_dim=0, backbone="hybrid", attn_layers=2,
+                 rho_compress=False, rho_head_dim=64, rho_beta=0.1,
+                 rho_eps=0.1, rho_eps_keep=0.02):
         super().__init__()
         hidden_dim = hidden_dim or dim
         self.embedding = nn.Embedding(vocab_size, hidden_dim)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, max_len + 1, hidden_dim))
+        self.mask_embed = nn.Parameter(torch.zeros(1, 1, hidden_dim))  # ρ 压缩的 mask 填充
         self.encoder = build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers)
         self.head = nn.Linear(hidden_dim, dim) if hidden_dim != dim else nn.Identity()
+        # token 层 ρ 压缩（§2.6）：私有记忆 M，文本模态一份。
+        self.rho_compressor = (
+            RhoCompressor(hidden_dim, rho_head_dim, rho_beta, rho_eps, rho_eps_keep)
+            if rho_compress else None
+        )
+        self.last_keep = None
+        self.last_rho = None
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.mask_embed, std=0.02)
 
     def forward(self, ids):
         batch = ids.size(0)
         x = self.embedding(ids)
+        if self.rho_compressor is not None:  # 先写后压：embedding 上算 ρ 丢冗余，mask 填充保 L
+            x, self.last_keep, self.last_rho = self.rho_compressor(x, self.mask_embed)
         cls = self.cls_token.expand(batch, -1, -1)
         h = torch.cat([cls, x], dim=1) + self.pos_embed[:, : x.size(1) + 1]
         h = self.head(self.encoder(h))

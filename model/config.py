@@ -20,6 +20,17 @@ class MJEPAConfig:
     hidden_dim: int = 0        # 主干宽度 d_hidden；0 表示与 d 绑定（冒烟档，§2.2.7）。
     backbone: str = "hybrid"   # 主干选型：transformer / mamba / hybrid（§2.2.5）。
     attn_layers: int = 2       # hybrid 下前 attn_layers 层为注意力，其余为 SSM。
+    # 图像前端：patch（单层卷积，冒烟）/ siglip2（LLaDA-V 前端：SigLIP-2 + MLP 投影 → 连续 Z）
+    image_frontend: str = "patch"
+    siglip2_model: str = "google/siglip2-base-patch16-224"
+    freeze_vision: bool = True  # 冻结 SigLIP-2 视觉编码器（LLaDA-V 默认冻结，只训 MLP 投影 + 主干）。
+    # token 层 ρ 残差压缩（§2.6 创新编码）：按冗余度 ρ=‖v−Mᵀk‖² 丢冗余、mask 填充保 L。
+    # 每个模态一个私有记忆 M（接口预留多模态），冒烟默认关闭。
+    rho_compress: bool = False  # 是否启用 token 层 ρ 压缩。
+    rho_head_dim: int = 64      # 记忆 M 的 k/v 维度。
+    rho_beta: float = 0.1       # delta rule 写入率。
+    rho_eps: float = 0.1        # ρ 阈值：ρ>eps 判为不可预测、保留。
+    rho_eps_keep: float = 0.02  # ε 强制采样比例（防「丢弃→学不到」自我强化退化）。
     ema_decay: float = 0.99    # 目标编码器的 EMA 系数 μ。
     mask_ratio: float = 0.5    # JEPA 掩码比例。
     temperature: float = 0.07  # InfoNCE 温度。
@@ -31,8 +42,13 @@ class MJEPAConfig:
     var_weight: float = 0.1     # VICReg 方差正则（防塌缩）。
 
     @property
+    def vision_patch(self) -> int:
+        """图像前端的 patch 边长：siglip2 用 16（SigLIP-2），patch 前端用 patch_size。"""
+        return 16 if self.image_frontend == "siglip2" else self.patch_size
+
+    @property
     def n_patches(self) -> int:
-        return (self.image_size // self.patch_size) ** 2
+        return (self.image_size // self.vision_patch) ** 2
 
     @property
     def width(self) -> int:

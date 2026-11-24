@@ -31,10 +31,16 @@ class MultimodalJEPA(nn.Module):
             cfg.image_size, cfg.patch_size, cfg.image_channels, cfg.dim,
             cfg.heads, cfg.depth, cfg.mlp_ratio,
             hidden_dim=cfg.hidden_dim, backbone=cfg.backbone, attn_layers=cfg.attn_layers,
+            image_frontend=cfg.image_frontend, siglip2_model=cfg.siglip2_model,
+            freeze_vision=cfg.freeze_vision, rho_compress=cfg.rho_compress,
+            rho_head_dim=cfg.rho_head_dim, rho_beta=cfg.rho_beta,
+            rho_eps=cfg.rho_eps, rho_eps_keep=cfg.rho_eps_keep,
         )
         self.text_online = TextEncoder(
             vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
             hidden_dim=cfg.hidden_dim, backbone=cfg.backbone, attn_layers=cfg.attn_layers,
+            rho_compress=cfg.rho_compress, rho_head_dim=cfg.rho_head_dim,
+            rho_beta=cfg.rho_beta, rho_eps=cfg.rho_eps, rho_eps_keep=cfg.rho_eps_keep,
         )
 
         # —— 编码（目标，EMA、stop-gradient）——
@@ -42,10 +48,16 @@ class MultimodalJEPA(nn.Module):
             cfg.image_size, cfg.patch_size, cfg.image_channels, cfg.dim,
             cfg.heads, cfg.depth, cfg.mlp_ratio,
             hidden_dim=cfg.hidden_dim, backbone=cfg.backbone, attn_layers=cfg.attn_layers,
+            image_frontend=cfg.image_frontend, siglip2_model=cfg.siglip2_model,
+            freeze_vision=cfg.freeze_vision, rho_compress=cfg.rho_compress,
+            rho_head_dim=cfg.rho_head_dim, rho_beta=cfg.rho_beta,
+            rho_eps=cfg.rho_eps, rho_eps_keep=cfg.rho_eps_keep,
         )
         self.text_target = TextEncoder(
             vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
             hidden_dim=cfg.hidden_dim, backbone=cfg.backbone, attn_layers=cfg.attn_layers,
+            rho_compress=cfg.rho_compress, rho_head_dim=cfg.rho_head_dim,
+            rho_beta=cfg.rho_beta, rho_eps=cfg.rho_eps, rho_eps_keep=cfg.rho_eps_keep,
         )
         self.image_target.load_state_dict(self.image_online.state_dict())
         self.text_target.load_state_dict(self.text_online.state_dict())
