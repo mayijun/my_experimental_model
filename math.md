@@ -14,6 +14,7 @@
 | $P_\phi$ | JEPA 潜变量预测器（图像/文本各一） | `model.image_predictor`/`model.text_predictor`，[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `LatentPredictor` |
 | $v_\psi$ | Flow Matching 速度场预测器 | 概念量（§4 为规划章节，旧 `flow_matching_jepa.py` 已废弃、当前未实现） |
 | $D_\eta$ | 潜变量→各模态解码器 | `model.image_decoder`/`model.text_decoder`，[decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `ImageDecoder`/`TextDecoder` |
+| $D$ | 通用解码器记号（$R_I/g/R_V/R_A$ 的并称，§3.9），把 $Z$ 渲染回模态，对重建/生成无差别 | 概念量（§3.9） |
 | $\mu$ | EMA 衰减系数 | `ema_decay=0.99`，[config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `MJEPAConfig` |
 | $L$ | 潜序列长度（硬对齐要求两模态同长） | `text_len = n_patches = (image_size/patch_size)^2`，随规模伸缩；冒烟 tiny/small 为 16 |
 | $d$ | 潜空间维度 | `dim`，随规模伸缩；冒烟 tiny=64/small=128，大规模按 §2.2.7 的 $r=8$ 解耦 |
@@ -29,6 +30,9 @@
 | $\phi, M$ | 马赛克算子与马赛克观测 $M=\phi(I)$ | 概念量（plan P2），下采样 + 分块平均，未实现 |
 | $\Psi_h, H$ | 状态依赖算子、隐含模式编码 $Z'=\Psi_h(Z),\ h=H(x)$ | 概念量（plan P5），未实现 |
 | $h$ | 隐含模式状态（由 $H$ 自推断，含描述/推理倾向） | 概念量（plan P5），未实现 |
+| $\mathrm{id}$ | 恒等算子（$Z\to Z$ 的单位元），重建 = $D(\mathrm{id}(Z))$（式 29） | 概念量（§3.9） |
+| $\Omega$ | 算子空间（$Z$ 上的自映射半群，$\mathrm{id}\in\Omega$、复合封闭，式 30） | 概念量（§3.5 / §3.9），未实现 |
+| $\omega$ | 算子参数 / 指令的变换分量（$\omega\in\Omega$，$Z'=\Psi(Z,\omega)$） | 概念量（plan P5），未实现 |
 | $E^I, E^V, E^A$；$R_I, R_V, R_A$ | 各模态编译器 / 解释器 | 概念量（plan P6/P7），未实现 |
 | $K, e_t$ | 观测器增益、创新序列 | 概念量（plan P8），未实现 |
 
@@ -152,7 +156,7 @@ $$\mathcal L_1=\mathcal L_{\text{JEPA}}+\mathcal L_{\text{recon}}+0.5\,\mathcal 
 
 1. 把生成文本 $T=g(\hat Z)$ 重新编码 $\tilde Z=E(T)$，得到可观测表征；
 2. 创新 $e=\hat Z-\tilde Z$，由命题 1 恒非零（文本有损）；
-3. 状态修正 $\hat Z^+=\hat Z-Ke$（承接 §3.6 观测器），参数修正把 $\|e\|^2$ 与一致性项 $\mathcal L_{\text{consist}}$（式 45）回灌 $\Psi,E,D_\eta$；
+3. 状态修正 $\hat Z^+=\hat Z-Ke$（承接 §3.6 观测器），参数修正把 $\|e\|^2$ 与一致性项 $\mathcal L_{\text{consist}}$（式 48）回灌 $\Psi,E,D_\eta$；
 4. 本脚本未实现这一闭环；$e$ 的统计量可由 `analyze.py` 的重编码失真（推论 2）间接观测。
 
 注意：$P_\phi$ 只在 JEPA 阶段使用；生成时由 $v_\psi$ 接替"条件 $\to$ 潜变量"的映射。$E_\theta$ 提供条件，$E_\xi$ 定义目标分布。
@@ -342,7 +346,7 @@ $$\mathcal{L}_{\text{recon}} = \mathrm{CE}\!\bigl(D_\eta(E_\theta(x)),\; x\bigr)
 
 $$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1-\sigma_j)\bigr],\qquad \sigma_j = \mathrm{std}\bigl(\mathrm{reshape}(z,\,[-1,d])_{:,j}\bigr),$$
 
-惩罚方差过小的潜空间维度、防止维度塌缩；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`。其「方向与率惩罚相反」的辨析见 §4.2(d)（编号式 (33) 亦在 §4.2(d)）。
+惩罚方差过小的潜空间维度、防止维度塌缩；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`。其「方向与率惩罚相反」的辨析见 §4.2(d)（编号式 (36) 亦在 §4.2(d)）。
 
 阶段一总目标（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`，图文双模态各取一组）：
 
@@ -693,12 +697,12 @@ $$H(I \mid M) > 0. \tag{16}$$
 
 纤维 $\phi^{-1}(M)=\{I:\phi(I)=M\}$ 内的变异不可见——马赛克只报告分块均值（低频），块内高频细节丢失。这与文本纤维 $\mathcal F_t=g^{-1}(t)$ 是同一结构（式 6–7）。
 
-**三层次同构**（对齐式 6–7、式 15、式 38）：
+**三层次同构**（对齐式 6–7、式 15、式 41）：
 
 | 层次 | 文本通道 | 马赛克通道 | 数学对象 |
 |---|---|---|---|
 | 映射 | $T=g(Z)$，$H(Z\mid T)>0$ | $M=\phi(I)$，$H(I\mid M)>0$ | 纤维 $\mathcal F_t$ / $\phi^{-1}(M)$ |
-| 逆问题 | $p_\phi(Z\mid T)$ | $p(I\mid M)$ | 后验 $\propto$ 先验 × 一致性（式 38） |
+| 逆问题 | $p_\phi(Z\mid T)$ | $p(I\mid M)$ | 后验 $\propto$ 先验 × 一致性（式 41） |
 | 信息 | 语义 $I(T;Y)$ vs 措辞 $H(T\mid Y)$ | 结构 vs 高频细节 | 式 15；还原恢复 $Y$，细节是幻觉 |
 
 **关键区别（不可混同）。**
@@ -896,7 +900,7 @@ p_m(t)=\tfrac{1-p_{\text{anchor}}(t)}{K-1}. \tag{21}$$
 **两条实现路线**（对应 $P_\phi$ 的确定性 vs Flow 的随机性）：
 
 - **路线 1 · $P_\phi$ 泛化（确定性）**：$Z'=P_\phi(Z,h)$，用"隐含模式–变换对"监督。$P_\phi$ 是 $\Psi$ 的无监督先验——掩码自监督已学出潜空间动力学，推理变换学习只是给这动力学贴语义标签。
-- **路线 2 · Flow 条件生成（随机）**：$h$ 作交叉注意力条件注入 $v_\psi(z_t,t,h)$，随机性来自噪声熵源（式 41–44）。等价于把式 38 的条件从 $T$ 换成 $h$。
+- **路线 2 · Flow 条件生成（随机）**：$h$ 作交叉注意力条件注入 $v_\psi(z_t,t,h)$，随机性来自噪声熵源（式 44–47）。等价于把式 41 的条件从 $T$ 换成 $h$。
 
 **关键结构。** 变换算子需**可组合结构**：模糊/变色/移动为生成元，复杂推理是它们的组合，对应变换半群 $\Psi(Z,\omega_2\circ\omega_1)=\Psi(\Psi(Z,\omega_1),\omega_2)$。这里 $\omega_1,\omega_2$ 是 $h$ 的变换分量；$h$ 另含控制/指令分量，§3.6 的时序控制 $\omega_t$ 即其表现。该算子与 §3.6 的状态转移 $\Psi(\hat Z_t,\omega_t)$ 共用。
 
@@ -1175,7 +1179,7 @@ PSCO 不替代 reflow，而是给 reflow 提供一个**有据可依、能自适�
 
 1. **谱夹层（spectral sandwich）** 逐维 $\delta<\tilde a_{h,i}<1-\gamma$（等价于 $\rho(\tilde A_h)<1-\gamma$ 且 $\min_i\tilde a_{h,i}>\delta$）：上界保收敛（§3.7.1 收缩条件），下界 $\delta$ 封死「$\tilde A_h\to0$ 一步塌成一点」这条最阴的路径——只给上界时模型会学 $\tilde A_h\to0$，一步把所有 $Z$ 拉到共享 $b_h$，轨迹不再区分输入。参数化取 $\tilde A_h=\operatorname{diag}\big(\delta+(1-\gamma-\delta)\,\sigma(h)\big)$，逐维钳进 $(\delta,1-\gamma)$。
 2. **不动点读出头锚定**：$Z^*$ 必须能预测任务目标 $\mathcal L_{\text{readout}}=\|r(Z^*)-\tilde Z_y\|^2$（$r$ 为读出头）。塌成常数就预测不了，梯度把 $Z^*$ 重新推开。对应 §3.8 的预测目标与 §3.7 的 $\mathcal L_{\text{consist}}$。
-3. **方差正则**：对 $Z^*$ 每维标准差设下限 $\mathcal L_{\text{var}}=\mathrm{relu}(1-\sigma_j)$（同 §2.2.4(b) 式 (33)），防维度塌缩。
+3. **方差正则**：对 $Z^*$ 每维标准差设下限 $\mathcal L_{\text{var}}=\mathrm{relu}(1-\sigma_j)$（同 §2.2.4(b) 式 (36)），防维度塌缩。
 4. **$h$ 的信息量约束**：$a_h,b_h$ 由 $h$ 自推断；若 $h$ 网络塌缩（所有输入同一 $h$），算子退化为常值。把 $h$ 接一个判别/预测任务（或 DIB 约束 §2.5）强制 $h$ 随输入变化。
 5. **轨迹非平凡性**：扫描物化整条轨迹，加「首步位移 / 轨迹长度」下限惩罚，防算子第一步就跳到不动点（瞬态段 $m$ 步被跳过）。对应 §2.6「ε 强制采样」防自我强化退化。
 
@@ -1291,6 +1295,48 @@ $$\mathcal L = \mathbb E_{(x_c,\ h,\ x_y)\sim \mathcal D}\Big[ d\big(P_\phi(c,h)
 
 一句话：**$\mathcal D$ 的设计 = "重建保底锚 + 掩码主体 + 未来/指令/反事实按难度与数据可得性递进引入"，每步按课程权重 $\alpha_k(t)$ 混合采样，重建权重永不归零以锚定表征、防塌缩。**
 
+### 3.9 算子谱系：重建到生成的统一
+
+§3.5 引入算子 $\Psi_h$ 与算子空间 $\Omega$，§3.7.3 把它落地为 PSCO，§3.8 把重建归入预测。本节把三者收束成一条**算子谱系**，并把「重建 / 生成」的区分形式化为「算子是否恒等」。
+
+**状态与算子统一在 $Z$ 内。** 算子 $\Psi$ 不是 $Z$ 之外的独立对象，而是 $Z\to Z$ 的自映射：描述文字是 $Z$ 里的**点**（单位元邻域），指令文字是 $Z$ 上的**变换**，二者同属算子空间 $\Omega$。解码器 $D\in\{R_I,g,R_V,R_A\}$ 只把 $Z$ 渲染回模态，不承载「生成与否」的语义——区分重建/生成的，是**解码前 $Z$ 是否被算子变换过**：
+
+$$\text{重建}\ =\ D\big(\mathrm{id}(Z)\big),\qquad
+\text{生成}\ =\ D\big(\Psi(Z,\omega)\big),\quad \Psi\neq\mathrm{id}. \tag{29}$$
+
+$\mathrm{id}$ 是恒等算子（$Z$ 不动，$D(Z)\approx$ 输入）；$\Psi(\cdot,\omega)$ 是非恒等算子（$Z\mapsto Z'$ 是新状态，$D(Z')$ 是输入之外的新东西）。于是「解码器做不做生成」是伪问题——**生成是算子赋予的，不是解码器赋予的**。废案里生成 = 离散码上的 Flow（须用量化器把 $Z$ 打成离散 token）；本框架生成 = 连续 $Z$ 上的算子，§3.7 的 $\Psi^{(N)}(Z)$ 全程不离开 $Z$，量化器的码空间角色被算子替代。
+
+**算子空间与半群。** 令表征空间 $Z\subset\mathbb R^{L\times d}$，算子空间是 $Z$ 上的一族自映射，在复合下封闭：
+
+$$\Omega\ =\ \big\{\,\Psi:Z\to Z\,\big\},\qquad
+\mathrm{id}\in\Omega,\qquad
+\Psi_2\circ\Psi_1\in\Omega\ \ (\text{半群}). \tag{30}$$
+
+$\mathrm{id}$ 是单位元；$\Psi_2\circ\Psi_1$ 是复合——复杂生成 = 生成元复合（§3.5 的 $\Psi(Z,\omega_2\circ\omega_1)=\Psi(\Psi(Z,\omega_1),\omega_2)$）。
+
+**算子谱系。** 按「偏离恒等的幅度」给 $\Omega$ 分层，得到一条从重建到生成的退化链：
+
+| 层级 | 算子 | 数学形式 | 源码 | 语义 |
+|---|---|---|---|---|
+| $L_0$ | 恒等 $\mathrm{id}$ | $\mathrm{id}(Z)=Z$ | 直通 $E\to D$（无算子层） | **重建** |
+| $L_1$ | 预测 $P_\phi$ | $Z_{\text{ctx}}\mapsto P_\phi(Z_{\text{ctx}})$ | [LatentPredictor](file:///home/simon-ma/JEPA/model/representation.py) | 掩码补全 / 未来预测 |
+| $L_2$ | 收缩 $\Psi_h$ | $\Psi_h(Z)=Z+\Delta_h(Z),\ \rho(J)<1$ | [psco.py](file:///home/simon-ma/JEPA/model/psco.py) | 迭代推理 → 不动点 |
+| $L_3$ | 一般算子 $\Psi(\cdot,\omega)$ | $\Psi:Z\times\Omega\to Z,\ \omega\in\Omega$ | plan P5 的 $E^{\text{cmd}}$（暂缓） | 任意变换 / 生成 |
+
+> **命题 11（重建是谱系的 $L_0$，生成是 $L_{\ge1}$）**：重建与生成落在同一算子谱系两端——$\Psi=\mathrm{id}$（$L_0$）即重建，$\Psi\neq\mathrm{id}$（$L_{\ge1}$）即生成。二者不是两个范式，而是同一 $\Omega$ 按变换幅度的退化链
+>
+> $$\mathrm{id}\ \subset\ P_\phi\ \subset\ \Psi_h\ \subset\ \Psi(\cdot,\omega).$$
+>
+> 每层是上层的特例：$L_0$ 是 $L_1$ 当「上下文 = 目标」时（§3.8 式 27 第一行）；$L_1$ 是 $L_2$ 当门控收缩到单步时（§3.7.3）；$L_2$ 是 $L_3$ 当 $\Omega$ 取「对角收缩仿射 + 残差」子族时（§3.7.3）。
+
+**幅度度量 $g_{\text{change}}$。** 「重建 vs 生成」的二分由连续量 $g_{\text{change}}=\sigma(W_{\text{ch}}h)\in(0,1)^d$（§3.7.3）度量：
+
+$$\Psi_h(Z)\ =\ Z + g_{\text{change}}\odot\big(A_h Z + b_h + r_h(Z)\big). \tag{31}$$
+
+$g_{\text{change}}\to0$ 时 $\Psi_h\to\mathrm{id}$（$L_0$，描述/重建端，$T_d=g(Z)$）；$g_{\text{change}}\to1$ 时 $\Psi_h$ 非平凡（$L_{\ge1}$，推理/生成端，$Z'=\Psi_h(Z)$）。**算子性 = $g_{\text{change}}$ 偏离 0 的程度**，与 §3.7 的停止条件 $h_{\text{change}}\to0\iff$ 变换完成 $\iff$ 读出结论天然对齐。
+
+**推论（量化器可省的算子学表述）。** 量化器的历史作用之一是把连续 $Z$ 打成离散 token 以支撑「离散码上的生成」。当生成被重定义为「连续 $Z$ 上的算子」后，这一作用被 $\Omega$ 的谱系结构整体替代——生成路径 $D\circ\Psi\circ E$ 全程不离开连续 $Z$，无需离散化；量化器剩余的唯一价值（commitment 防塌缩）由 §2.2.3 的 EMA、§2.2.4 的重建与方差、§3.7.3 的谱夹层接管。故在本框架下量化器非必要，AGENTS.md 的「$Z$ 保持连续、不引入语义量化瓶颈」两条硬约束在算子谱系下自然成立。
+
 ---
 
 ## 4. 阶段三 · 解码：表征空间 → 多模态输出
@@ -1361,11 +1407,11 @@ $$z_{k+1} = z_k + \Delta t \cdot v_\psi(z_k,\; k\Delta t,\; c), \qquad k = 0, 1,
 
 **把 Loop Transformer 的算子路径拉直：Rectified Flow 的 reflow。** §3.7.1 里 Loop Transformer 的循环 $Z^{(k+1)}=F_\theta(Z^{(k)};x)$ 定义了一条离散弯曲轨迹 $Z^{(0)}\to\cdots\to Z^{(L)}=Z^*$。把这条轨迹拉直正是 **Rectified Flow**（Liu et al., ICLR 2023）的 reflow 操作——取 (起点, 终点) 配对 $(Z^{(0)},Z^{(L)})$，训练速度场匹配 OT 直线的恒定速度：
 
-$$\mathcal L_{\text{reflow}} = \mathbb E\left[\int_0^1\Big\|v_\theta(z_t,t) - \big(Z^{(L)} - Z^{(0)}\big)\Big\|^2\,dt\right],\qquad z_t = (1-t)Z^{(0)} + t\,Z^{(L)}. \tag{29}$$
+$$\mathcal L_{\text{reflow}} = \mathbb E\left[\int_0^1\Big\|v_\theta(z_t,t) - \big(Z^{(L)} - Z^{(0)}\big)\Big\|^2\,dt\right],\qquad z_t = (1-t)Z^{(0)} + t\,Z^{(L)}. \tag{32}$$
 
 沿 $v_\theta$ 积分得到的新轨迹 $z^{(1)}_t$ 比原循环轨迹更直；**reflow 可迭代**——用新轨迹端点再配对、再拟合，第 $k$ 轮的运输代价单调不增：
 
-$$\mathbb E\int_0^1\big\|\dot z_t^{(k+1)}\big\|^2\,dt \;\le\; \mathbb E\int_0^1\big\|\dot z_t^{(k)}\big\|^2\,dt, \tag{30}$$
+$$\mathbb E\int_0^1\big\|\dot z_t^{(k+1)}\big\|^2\,dt \;\le\; \mathbb E\int_0^1\big\|\dot z_t^{(k)}\big\|^2\,dt, \tag{33}$$
 
 极限是 OT 直线（$\ddot z_t=0$、速度恒定），步数从 $L$ 折叠到 $O(1)$。这正是把 §3.7.1 的"循环 $L$ 步到不动点"折叠成"单步流到 $Z^*$"。但**代价**：直线把中间态推出文本纤维 $\mathcal{Z}_{\text{text}}$，$g(z_t)$ 是 argmax 硬凑出的无意义 token；曲线（CoT）贴着纤维走、每个 $g(Z^{(i)})$ 可表达。于是"拉直"是**曲率预算**旋钮——改分量主导 → 多轮 reflow → 零曲率、少步、不可解释（折叠）；读分量主导 → 保留曲率 + 纤维锚定正则 $\mathcal L_{\text{audit}}=\|Z^{(i)}-E(g(Z^{(i)}))\|^2$ 把中间态拉回纤维 → 多步、可解释（CoT）。reflow 次数是连续刻度，与本节的 $\mathcal L_{\text{straight}}$ 互补。
 
@@ -1382,7 +1428,7 @@ $$\mathbb E\int_0^1\big\|\dot z_t^{(k+1)}\big\|^2\,dt \;\le\; \mathbb E\int_0^1\
 BPTT 走 $L$ 步的梯度是 Neumann 级数 $I+J+J^2+\cdots$ 的**截断**，DEQ 的 $(I-J)^{-1}$ 是它的**收敛极限**（忽略转置细节，转置形式见式 25）：
 
 $$\nabla_\theta\mathcal L\Big|_{\text{BPTT},\,L} = \sum_{k=0}^{L-1} \frac{\partial\mathcal L}{\partial Z}\,J^k\,\frac{\partial F}{\partial\theta},\qquad
-\nabla_\theta\mathcal L\Big|_{\text{DEQ}} = \frac{\partial\mathcal L}{\partial Z}\,(I-J)^{-1}\,\frac{\partial F}{\partial\theta}. \tag{31}$$
+\nabla_\theta\mathcal L\Big|_{\text{DEQ}} = \frac{\partial\mathcal L}{\partial Z}\,(I-J)^{-1}\,\frac{\partial F}{\partial\theta}. \tag{34}$$
 
 当 $\rho(J)<1$ 时后者是前者的 $L\to\infty$ 极限。对应到本框架：**有限步 CoT（$N$ 步）= Loop Transformer = 截断 Neumann 级数（有偏但可解释）；"结论 = 不动点" + DEQ = 完整逆（无偏但折叠）**。二者在 §3.7.1 的式 25 统一——式 25 的 $(I-\partial\Psi_h/\partial Z)^{-1}$ 正是把 §3.7 的 $N$ 步 rollout 求和推广到收敛极限。注意这层类比只在 $h$ 固定（$h_{\text{change}}\to0$）时严格成立，跨步演化的 $\Psi_{h^{(i)}}$ 不满足单算子 Neumann 级数。
 
@@ -1419,7 +1465,7 @@ $$z_t = \exp_{z_0}\!\big(t\cdot\log_{z_0}(z_1)\big),\qquad v_\psi \in T\mathcal 
 解码器是「位置混合 Transformer + 线性读出头」（`Decoder`，`decoder_layers` 层 self-attention）：先对量化潜变量做位置间交互，再逐位置线性输出
 
 $$h = \mathrm{Norm}\bigl(\mathrm{Attn}(Q(Z) + \mathrm{pos})\bigr),\qquad
-T_j = \arg\max_{v \in \mathcal{V}} \bigl( w_v^{\top} h_j + b_v \bigr), \tag{32}$$
+T_j = \arg\max_{v \in \mathcal{V}} \bigl( w_v^{\top} h_j + b_v \bigr), \tag{35}$$
 
 其中 $w_v$ 是读出头的权重第 $v$ 行，$h_j$ 是位置混合后的特征（依赖全部位置的潜变量）。读出头仍是**由超平面划分的 Voronoi 型量化**，一般**不等于**最近邻量化 $\arg\min_v \|h_j - e(v)\|^2$；只有当 $w_v = 2e(v)$、$b_v = -\|e(v)\|^2 + \text{const}$ 时才退化为此形式，本模型没有绑定。因此：
 
@@ -1437,7 +1483,7 @@ T_j = \arg\max_{v \in \mathcal{V}} \bigl( w_v^{\top} h_j + b_v \bigr), \tag{32}$
 **(d) `variance_loss` 的方向与率惩罚相反。**
 
 $$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1 - \sigma_j)\bigr],\qquad
-\sigma_j = \mathrm{std}\bigl(\mathrm{reshape}(z,\,[-1, d])_{:,j}\bigr), \tag{33}$$
+\sigma_j = \mathrm{std}\bigl(\mathrm{reshape}(z,\,[-1, d])_{:,j}\bigr), \tag{36}$$
 
 即 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`（$\sigma_j$ 是 batch×位置维度上的边际标准差）。它在 $\sigma_j < 1$ 时受罚，作用是**抬高**潜空间各维的熵、防止维度塌缩，方向与"压低 $I(Z;T)$"的率惩罚相反。它与率无关，只是防塌缩正则。
 
@@ -1450,7 +1496,7 @@ Flow 阶段没有再调用 `update_target`，$E_\xi$ 在 Flow 阶段完全冻结
 
 1. **连续 Flow + 软化取整（本框架推荐）**。保持 §4.1 的连续 OT 路径与速度场 $v_\psi$ 全程在 $\mathbb{R}^{L\times d}$ 上不变，只在**最后读出一步**做离散化。按"硬度"递增的可选离散化算子：
 
-   - **argmax**（当前实现，式 32，最硬）：$T_j=\arg\max_v(w_v^\top h_j+b_v)$，确定性但不可微；
+   - **argmax**（当前实现，式 35，最硬）：$T_j=\arg\max_v(w_v^\top h_j+b_v)$，确定性但不可微；
    - **FSQ（Finite Scalar Quantization）**：把连续向量按固定网格舍入到有限索引，梯度用直通估计（STE）回传，训练/推理一致；
    - **Gumbel-softmax / 温度退火**：训练时软化采样可微，温度从高到低退火逼近 argmax，可在早期提供梯度信号；
    - **RVQ（残差 VQ，仅作序列化层）**：多级残差量化把连续 $Z$ 压成短码传输，读入即反量化回连续，**不参与训练梯度**（承接 §2.6 的接口契约）。
@@ -1515,26 +1561,26 @@ Flow 阶段没有再调用 `update_target`，$E_\xi$ 在 Flow 阶段完全冻结
 **FSQ**（无码本，最省显存）逐维取整并用直通估计梯度；$L_i$ 需为奇数，码字关于 0 对称：
 
 $$\hat z_i=\frac{\mathrm{round}\!\big(\tfrac{L_i-1}{2}\tanh(z_i)\big)}{(L_i-1)/2},\qquad
-\hat z_i\leftarrow \tanh(z_i)+\mathrm{sg}\big(\hat z_i-\tanh(z_i)\big). \tag{34}$$
+\hat z_i\leftarrow \tanh(z_i)+\mathrm{sg}\big(\hat z_i-\tanh(z_i)\big). \tag{37}$$
 
 码本大小为 $\prod_i L_i$，计算是纯逐元素，没有 $K$ 维距离矩阵。
 
 **VQ / RVQ**（固定码本，码率可控；码本经 EMA 更新，而非梯度）：
 
 $$k^{\star}=\arg\min_k\|z-e_k\|_2^2,\qquad
-\mathcal L_{\mathrm{VQ}}=\gamma\,\big\|z-\mathrm{sg}[e_{k^{\star}}]\big\|^2, \tag{35}$$
+\mathcal L_{\mathrm{VQ}}=\gamma\,\big\|z-\mathrm{sg}[e_{k^{\star}}]\big\|^2, \tag{38}$$
 
 其中距离矩阵可用 $d_{bk}=\|z_b\|^2+\|e_k\|^2-2z_be_k^\top$ 一次矩阵乘得到，码本向量用 EMA 追踪分配到该码字的编码器输出。RVQ 再把残差逐级量化：
 
 $$\hat z=\sum_{m=1}^{M}e^{(m)}_{k_m},\qquad
 r^{(m+1)}=r^{(m)}-e^{(m)}_{k_m},\qquad
-k_m=\arg\min_k\|r^{(m)}-e^{(m)}_k\|^2, \tag{36}$$
+k_m=\arg\min_k\|r^{(m)}-e^{(m)}_k\|^2, \tag{39}$$
 
 $M$ 级之间少量串行、级内全并行。
 
 **随机量化信道**（把"采样"写成概率）：
 
-$$p_\theta(k\mid z)=\mathrm{softmax}_k\!\left(-\frac{\|z-e_k\|^2}{2\tau^2}\right). \tag{37}$$
+$$p_\theta(k\mid z)=\mathrm{softmax}_k\!\left(-\frac{\|z-e_k\|^2}{2\tau^2}\right). \tag{40}$$
 
 $\tau$ 越小越接近确定性量化、率越高；$\tau$ 越大越模糊、率越低。它就是式 (10) 中"码率预算 ↔ 失真地板"的可调旋钮。
 
@@ -1542,18 +1588,18 @@ $\tau$ 越小越接近确定性量化、率越高；$\tau$ 越大越模糊、率
 
 把 §4.1 的 Flow Matching 条件从上下文 $c$ 换成文本 $T$，即得 $p_\phi(Z\mid T)$ 的摊销采样器：
 
-$$\mathcal L_{\mathrm{CFM}}=\mathbb E_{t,Z_0,Z_1,T}\Big\|v_\phi\big((1-t)Z_0+tZ_1,\,t\mid T\big)-(Z_1-Z_0)\Big\|^2, \tag{38}$$
+$$\mathcal L_{\mathrm{CFM}}=\mathbb E_{t,Z_0,Z_1,T}\Big\|v_\phi\big((1-t)Z_0+tZ_1,\,t\mid T\big)-(Z_1-Z_0)\Big\|^2, \tag{41}$$
 
 推理用 Euler 积分
 
-$$Z^{(k+1)}=Z^{(k)}+\tfrac{1}{N}\,v_\phi\big(Z^{(k)},\tfrac{k}{N}\mid T\big),\qquad k=0,\dots,N-1. \tag{39}$$
+$$Z^{(k+1)}=Z^{(k)}+\tfrac{1}{N}\,v_\phi\big(Z^{(k)},\tfrac{k}{N}\mid T\big),\qquad k=0,\dots,N-1. \tag{42}$$
 
 训练时 $t$ 逐样本独立采样，没有时间步展开；推理串行深度是 $N$，与 $L$ 无关。蒸馏（一致性模型 / LCM / DMD）可把 $N$ 压到 1–4。
 
 "模糊回溯"的度量：并行采 $M$ 条轨迹，用后验离散度作为 $H(Z\mid T)$ 的经验代理，
 
 $$\widehat{\mathrm{Var}}(Z\mid T)=\frac{1}{M}\sum_{m=1}^{M}\big\|Z^{(m)}-\bar Z\big\|^2,\qquad
-\bar Z=\frac{1}{M}\sum_{m=1}^{M}Z^{(m)}. \tag{40}$$
+\bar Z=\frac{1}{M}\sum_{m=1}^{M}Z^{(m)}. \tag{43}$$
 
 $M$ 个样本落在同一 batch，GPU 并行；$\widehat{\mathrm{Var}}$ 越大，说明该文本对应的潜变量越模糊。
 
@@ -1570,7 +1616,7 @@ $M$ 个样本落在同一 batch，GPU 并行；$\widehat{\mathrm{Var}}$ 越大�
 
 ### 4.4 噪声作为熵源：为什么后验采样必须从噪声出发
 
-式 (38)–(39) 的采样器把 $z_0\sim\mathcal N(0,I)$ "去噪"成潜变量，但噪声的真实角色不是"被去除的脏东西"，而是**熵源**——它为条件后验 $p(Z\mid T)$ 提供宽度。下面把这一点写成与源码对齐的数学事实。
+式 (41)–(42) 的采样器把 $z_0\sim\mathcal N(0,I)$ "去噪"成潜变量，但噪声的真实角色不是"被去除的脏东西"，而是**熵源**——它为条件后验 $p(Z\mid T)$ 提供宽度。下面把这一点写成与源码对齐的数学事实。
 
 **(a) 点回归的熵坍缩。** 命题 1 断言 $H(Z\mid T)>0$，即给定 $T$ 后 $Z$ 仍是连续分布。若把采样器退化为确定性点回归 $\hat Z=\mathbb E[Z\mid T]$（式 (7) 的 MMSE 最优），它诱导的是点质量 $q(Z\mid T)=\delta(Z-\mathbb E[Z\mid T])$，微分熵为
 
@@ -1580,19 +1626,19 @@ $$h(q)=-\infty .$$
 
 **(b) 噪声是采样器随机性的唯一来源。** 推理起点是 `torch.randn`，即 $z_0\sim\mathcal N(0,I)$；训练端同样以 `torch.randn_like(target)` 注入噪声。采样器 $\Phi_1$ 是 Flow ODE 在 $t\in[0,1]$ 上的积分映射，给定 $T$ 后 $\hat Z=\Phi_1(z_0)$ 的全部随机性来自 $z_0$。连续流可逆，由微分熵的变量替换公式
 
-$$h(\hat Z\mid T)=h(z_0)+\mathbb E_{z_0}\Big[\log\Big|\det\tfrac{\partial\Phi_1(z_0)}{\partial z_0}\Big|\Big]. \tag{41}$$
+$$h(\hat Z\mid T)=h(z_0)+\mathbb E_{z_0}\Big[\log\Big|\det\tfrac{\partial\Phi_1(z_0)}{\partial z_0}\Big|\Big]. \tag{44}$$
 
 噪声熵 $h(z_0)$ 是底数，雅可比行列式是流对体积收缩/膨胀的修正。标准高斯每维微分熵 $\tfrac12\log_2(2\pi e)\approx 2.047$ bit，故
 
-$$h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{42}$$
+$$h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{45}$$
 
-**(c) 噪声熵在收缩流下是输出熵的上界。** 严格成立的是式 (41)；"上界"成立与否完全取决于流 $\Phi_1$ 的雅可比行列式 $\det J$ 的符号。本节把它作为一个**假设（收缩流假设）**：$\Phi_1$ 在数据支撑上体积不膨胀，即 $\mathbb E[\log|\det J|]\le 0$。⚠️ 该假设**不能**由 variance_loss（式 (33)，[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`）推出——后者约束的是**编码器输出分布各维的边际标准差** $\sigma_j\gtrsim 1$，而 $\det J$ 是**采样器** $\Phi_1$ 的体积变化率，二者是不同对象的性质、无蕴含关系。收缩流假设是「数据支撑上近似体积守恒」的经验性前提，需实测或另加正则保证，而非自动成立。在该假设下代入式 (41) 得
+**(c) 噪声熵在收缩流下是输出熵的上界。** 严格成立的是式 (44)；"上界"成立与否完全取决于流 $\Phi_1$ 的雅可比行列式 $\det J$ 的符号。本节把它作为一个**假设（收缩流假设）**：$\Phi_1$ 在数据支撑上体积不膨胀，即 $\mathbb E[\log|\det J|]\le 0$。⚠️ 该假设**不能**由 variance_loss（式 (36)，[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`）推出——后者约束的是**编码器输出分布各维的边际标准差** $\sigma_j\gtrsim 1$，而 $\det J$ 是**采样器** $\Phi_1$ 的体积变化率，二者是不同对象的性质、无蕴含关系。收缩流假设是「数据支撑上近似体积守恒」的经验性前提，需实测或另加正则保证，而非自动成立。在该假设下代入式 (44) 得
 
-$$h(\hat Z\mid T)\;\le\; h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{43}$$
+$$h(\hat Z\mid T)\;\le\; h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{46}$$
 
 这就是"噪声作为熵源"的精确含义：**在收缩流（$\mathbb E[\log|\det J|]\le0$，典型情形）下，采样器输出分布的熵不会超过注入噪声的熵（体积守恒时取等号）**。要覆盖后验宽度，噪声必须供给足够熵：
 
-$$h(z_0)\;\gtrsim\; h(Z\mid T). \tag{44}$$
+$$h(z_0)\;\gtrsim\; h(Z\mid T). \tag{47}$$
 
 以冒烟尺度 tiny（$L=16$、$d=64$）计，$h(z_0)\approx 16\times 64\times 2.047\approx 2096$ bit，比文本码率上界 $H(T)\le L\log_2|\mathcal V|$（式 (2)）高出约一个数量级以上——噪声端的熵预算远大于文本端，与"文字高压缩、潜空间高冗余"的直觉一致。该比例 $\approx d\cdot 2.047/\log_2|\mathcal V|$ 与 $L$ 无关，各规模下的完整演算见 §2.8。
 
@@ -1600,9 +1646,9 @@ $$h(z_0)\;\gtrsim\; h(Z\mid T). \tag{44}$$
 
 $$H(Z_\delta\mid T)\approx h(Z\mid T)+Ld\,\log_2\tfrac{1}{\delta},$$
 
-固定分辨率 $\delta$ 后只差一个与 $T$ 无关的常数。注意式 (40) 的经验离散度 $\widehat{\mathrm{Var}}(Z\mid T)=\tfrac1M\sum_m\|Z^{(m)}-\bar Z\|^2$ 度量的是**同一文本 $T$ 采样 $M$ 条生成轨迹的跨样本方差**，即连续条件宽度 $h(Z\mid T)$；它**不是** [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`（后者是 `z.reshape(-1,d).std(dim=0)`，度量 batch×位置维度上各维的**边际**标准差、防维度塌缩，对应 $h(Z)$ 的各维宽度）。二者对象不同：式 (40) 测"这段文字背后潜变量有多散"（需对同一 $T$ 重复采样），`variance_loss` 测"不同样本的潜变量各维是否塌缩"，与"文字本身多少 bit"是两回事。
+固定分辨率 $\delta$ 后只差一个与 $T$ 无关的常数。注意式 (43) 的经验离散度 $\widehat{\mathrm{Var}}(Z\mid T)=\tfrac1M\sum_m\|Z^{(m)}-\bar Z\|^2$ 度量的是**同一文本 $T$ 采样 $M$ 条生成轨迹的跨样本方差**，即连续条件宽度 $h(Z\mid T)$；它**不是** [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`（后者是 `z.reshape(-1,d).std(dim=0)`，度量 batch×位置维度上各维的**边际**标准差、防维度塌缩，对应 $h(Z)$ 的各维宽度）。二者对象不同：式 (43) 测"这段文字背后潜变量有多散"（需对同一 $T$ 重复采样），`variance_loss` 测"不同样本的潜变量各维是否塌缩"，与"文字本身多少 bit"是两回事。
 
-**(e) 熵源 ≠ 被去噪的噪声。** 式 (41)–(44) 表明 $\mathcal N(0,I)$ 的熵最终转化为后验 $\hat Z$ 的宽度，代表"文字说不清的那部分"（$h(Z\mid T)$）。它**不是**压缩时注入、等着被去噪还原的细节：压缩端 $g$ 是确定性的（$H(T\mid Z)=0$，式 A2，argmax 解码见 [decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `TextDecoder`），随机性全部来自生成端 $z_0$。这与 §4.2(c) 的"确定性编码器下 ELBO 不成立"是同一类辨析——不能把采样器的随机性误读成编码端的噪声。
+**(e) 熵源 ≠ 被去噪的噪声。** 式 (44)–(47) 表明 $\mathcal N(0,I)$ 的熵最终转化为后验 $\hat Z$ 的宽度，代表"文字说不清的那部分"（$h(Z\mid T)$）。它**不是**压缩时注入、等着被去噪还原的细节：压缩端 $g$ 是确定性的（$H(T\mid Z)=0$，式 A2，argmax 解码见 [decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `TextDecoder`），随机性全部来自生成端 $z_0$。这与 §4.2(c) 的"确定性编码器下 ELBO 不成立"是同一类辨析——不能把采样器的随机性误读成编码端的噪声。
 
 综合：
 
@@ -1612,7 +1658,7 @@ $$H(Z_\delta\mid T)\approx h(Z\mid T)+Ld\,\log_2\tfrac{1}{\delta},$$
 
 把「通路映射」与「数据内部关系」分开是有意的：二者在复杂度与并行度上完全不同，混在一起会妨碍各自优化。
 
-**通路映射是逐位置独立的 $O(L)$ 操作。** FSQ（式 34 逐维量化）、马赛克 $\phi$（§2.7 逐块平均）都只看单个位置/块，位置间无耦合，是 $L$ 个独立运算，串行深度 $O(1)$，天然 GPU 并行。注意解码器 $g$ 的读出头虽是逐位置线性打分，但其前有 self-attention 做位置混合，属于下面的关系类 $O(L^2)$，不再是纯通路投影。
+**通路映射是逐位置独立的 $O(L)$ 操作。** FSQ（式 37 逐维量化）、马赛克 $\phi$（§2.7 逐块平均）都只看单个位置/块，位置间无耦合，是 $L$ 个独立运算，串行深度 $O(1)$，天然 GPU 并行。注意解码器 $g$ 的读出头虽是逐位置线性打分，但其前有 self-attention 做位置混合，属于下面的关系类 $O(L^2)$，不再是纯通路投影。
 
 **数据内部关系由 self-attention 承载，是 $O(L^2)$ 的成对交互。** 编码器 $E_\theta$ 用 attention 让 $z_i$ 聚合整条序列上下文，token $i$ 与 $j$ 的关系被折叠进 $z_i,z_j$ 的坐标值（分布式表征），而非一条显式边。$Z=(z_1,\dots,z_L)$ 的联合结构 $p(Z)$ 承载关系；JEPA 掩码预测 $\hat z=P_\phi(c)$ 显式学习 $p(z_{\text{masked}}\mid z_{\text{visible}})$，即位置间依赖。
 
@@ -1622,15 +1668,15 @@ $$H(Z_\delta\mid T)\approx h(Z\mid T)+Ld\,\log_2\tfrac{1}{\delta},$$
 
 ### 4.6 一致性约束：后验采样不漂出纤维（plan P1）
 
-§4.3(c) 式 38 的 $p_\phi(Z\mid T)$ 只做了 CFM 回归，未约束"采样出的 $\hat Z$ 重新量化回去等于 $T$"。数学上，$p_\phi(Z\mid T)$ 应支撑在纤维 $\mathcal F_T=g^{-1}(T)$ 上，否则回溯会漂出 $T$ 对应的潜空间区域。
+§4.3(c) 式 41 的 $p_\phi(Z\mid T)$ 只做了 CFM 回归，未约束"采样出的 $\hat Z$ 重新量化回去等于 $T$"。数学上，$p_\phi(Z\mid T)$ 应支撑在纤维 $\mathcal F_T=g^{-1}(T)$ 上，否则回溯会漂出 $T$ 对应的潜空间区域。
 
 **一致性项。** 给后验采样加约束
 
-$$\mathcal L_{\text{consist}} = \mathbb E_{Z_0,T}\Big[\mathrm{CE}\big(g(\Phi_1(Z_0)),\, T\big)\Big], \tag{45}$$
+$$\mathcal L_{\text{consist}} = \mathbb E_{Z_0,T}\Big[\mathrm{CE}\big(g(\Phi_1(Z_0)),\, T\big)\Big], \tag{48}$$
 
-其中 $\Phi_1$ 是 Flow ODE 的积分映射（式 39），$Z_0\sim\mathcal N(0,I)$。它强制 $\hat Z=\Phi_1(Z_0)$ 经 $g$ 量化回去等于 $T$，即 $\hat Z\in\mathcal F_T$；soft 版本可用 $-\log p_\theta(T\mid\hat Z)$ 替代 $\mathrm{CE}$。
+其中 $\Phi_1$ 是 Flow ODE 的积分映射（式 42），$Z_0\sim\mathcal N(0,I)$。它强制 $\hat Z=\Phi_1(Z_0)$ 经 $g$ 量化回去等于 $T$，即 $\hat Z\in\mathcal F_T$；soft 版本可用 $-\log p_\theta(T\mid\hat Z)$ 替代 $\mathrm{CE}$。
 
-**数学依据。** 这是超分/还原领域最成熟的经验——下采样再上采样必须回到观测（consistency）。在本框架里它把式 38 的边际 CFM 收紧为**纤维条件**的 CFM：不是学任意 $p(Z\mid T)$，而是学支撑在 $\mathcal F_T$ 上的 $p(Z\mid T)$。缺一致性时，模型可能学会"平均掉纤维内变异"的 $p(Z\mid T)$，其样本 $\hat Z$ 量化后不等于 $T$，违背 $p(T\mid Z)$ 的确定性（A2）。
+**数学依据。** 这是超分/还原领域最成熟的经验——下采样再上采样必须回到观测（consistency）。在本框架里它把式 41 的边际 CFM 收紧为**纤维条件**的 CFM：不是学任意 $p(Z\mid T)$，而是学支撑在 $\mathcal F_T$ 上的 $p(Z\mid T)$。缺一致性时，模型可能学会"平均掉纤维内变异"的 $p(Z\mid T)$，其样本 $\hat Z$ 量化后不等于 $T$，违背 $p(T\mid Z)$ 的确定性（A2）。
 
 ---
 
@@ -1638,16 +1684,16 @@ $$\mathcal L_{\text{consist}} = \mathbb E_{Z_0,T}\Big[\mathrm{CE}\big(g(\Phi_1(Z
 
 前三个阶段（编码 §2 → 对齐与推理 §3 → 解码 §4）是一条**开环前向**链路：输入进、输出出，中间没有把产物回灌验证的环节。但解码产物是否可信、算子 $\Psi$ 是否真的模拟了世界，只有把输出重新读回表征空间、与推理预测比对才能发现。这就是第四阶段——**自反馈修正**。
 
-**观测与创新。** 生成端产出 $\hat Z = \Phi_1(Z_0)$（式 39）与 $T = g(\hat Z)$；自反馈把它重新压回表征空间得到观测
+**观测与创新。** 生成端产出 $\hat Z = \Phi_1(Z_0)$（式 42）与 $T = g(\hat Z)$；自反馈把它重新压回表征空间得到观测
 
-$$\tilde Z = E(T), \qquad e = \hat Z - \tilde Z . \tag{46}$$
+$$\tilde Z = E(T), \qquad e = \hat Z - \tilde Z . \tag{49}$$
 
 $e$ 是**创新**——推理表征与可观测表征之间的失配。由命题 1 的 $H(Z \mid T) > 0$，$\tilde Z$ 几乎处处不等于 $\hat Z$，故 $e$ 恒非零：**文本越有损，自反馈的校正空间越大**。
 
 **两类修正。** 同一创新驱动两个层次的校正：
 
 - **状态修正（在线）**：$\hat Z^+ = \hat Z - K e$，$K$ 为增益。这是 §3.6 闭环观测器 $\hat Z_{t+1} = \Psi(\hat Z_t,\omega_t) + K e_t$ 从「推理内部」提升到「系统级」——把解码产物当作一次观测，对预测做卡尔曼式校正。
-- **参数修正（训练）**：把 $\|e\|^2$ 与一致性项 $\mathcal L_{\text{consist}}$（式 45）回灌 $\Psi, E, D_\eta$。§4.6 的一致性约束由此从「解码阶段的训练损失」升级为「系统级自反馈信号」。
+- **参数修正（训练）**：把 $\|e\|^2$ 与一致性项 $\mathcal L_{\text{consist}}$（式 48）回灌 $\Psi, E, D_\eta$。§4.6 的一致性约束由此从「解码阶段的训练损失」升级为「系统级自反馈信号」。
 
 **与前后阶段的关系。** 编码（§2）定义 $Z$ 与 $E$，推理（§3）提供算子 $\Psi$ 与观测器 $K$，解码（§4）产出可回灌的观测 $T$；自反馈修正（本节）把这四者的误差闭环。它不新增模态通道、不引入新参数家族，只是复用 $E, \Psi, K$ 并把它们接成反馈回路。
 

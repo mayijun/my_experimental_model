@@ -81,8 +81,12 @@ class CharTokenizer:
         return "".join(self.itos[i] for i in ids if i not in (self.pad_id, self.mask_id))
 
 
-def build_dataset(n, image_size, text_len, seed=0):
-    """生成 n 个 (图像, 文字) 配对的合成数据集，返回 (images, caption_ids, captions, tokenizer)。"""
+def build_dataset(n, image_size, text_len, seed=0, tokenizer=None):
+    """生成 n 个 (图像, 文字) 配对的合成数据集，返回 (images, caption_ids, captions, tokenizer)。
+
+    tokenizer 缺省为字符级 CharTokenizer；可注入任意实现 `pad_id/mask_id/vocab_size/
+    encode/decode` 接口的词表（如 LLaDATokenizer）以切换文本编码。
+    """
     rng = random.Random(seed)
     images, ids_list, captions = [], [], []
     color_names = [c for c, _ in COLORS]
@@ -94,8 +98,9 @@ def build_dataset(n, image_size, text_len, seed=0):
         pos = rng.choice(pos_names)
         images.append(draw_image(color, shape, pos, image_size))
         captions.append(make_caption(color, shape, pos, text_len))
-    # 词表从全部文字构建。
-    tokenizer = CharTokenizer("".join(captions))
+    # 词表从全部文字构建；注入的 tokenizer（如 LLaDA）则直接复用。
+    if tokenizer is None:
+        tokenizer = CharTokenizer("".join(captions))
     ids_list = [tokenizer.encode(s, text_len) for s in captions]
     images = torch.stack(images)
     caption_ids = torch.tensor(ids_list, dtype=torch.long)

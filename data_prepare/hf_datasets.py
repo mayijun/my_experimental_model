@@ -29,8 +29,45 @@ def ensure_special_tokens(tokenizer):
     return tokenizer.pad_token_id, tokenizer.mask_token_id, len(tokenizer)
 
 
+class LLaDATokenizer:
+    """LLaDA 现成 tokenizer（Qwen2 扩展词表，内置专用 mask token `<|md|>`）。
+
+    对接 CharTokenizer 接口（`pad_id/mask_id/vocab_size/encode/decode`），使 `train.py`
+    的 tokenizer 消费路径无需改动即可替换字符级词表（math.md §2.2.7）。词表约 12.6 万，
+    复用 LLaDA 的 masked diffusion 词表，避免自建 BPE。
+    """
+
+    def __init__(self, model="GSAI-ML/LLaDA-8B-Instruct"):
+        from transformers import AutoTokenizer
+
+        self.model = model
+        self.tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        if self.tok.pad_token is None:            # Qwen2 系兜底：用 eos 作 pad
+            self.tok.pad_token = self.tok.eos_token
+        if self.tok.mask_token is None:           # LLaDA 词表内置 <|md|>，此处仅兜底
+            self.tok.add_special_tokens({"mask_token": "<|md|>"})
+        self.pad_id = self.tok.pad_token_id
+        self.mask_id = self.tok.mask_token_id     # = 126336
+        self.vocab_size = len(self.tok)
+
+    def encode(self, text, length):
+        ids = self.tok.encode(text, add_special_tokens=False)[:length]
+        return ids + [self.pad_id] * (length - len(ids))
+
+    def decode(self, ids, skip_special_tokens=True):
+        # 兼容 CharTokenizer.decode(ids) 与 HF tokenizer.decode(ids, skip_special_tokens=...) 两种调用。
+        keep = [i for i in ids if i not in (self.pad_id, self.mask_id)]
+        return self.tok.decode(keep, skip_special_tokens=skip_special_tokens)
+
+
 def encode_text(tokenizer, text, length, pad_id):
-    """把一段文本 tokenize 成固定 length 的 id 序列（截断 + pad）。"""
+    """把一段文本 tokenize 成固定 length 的 id 序列（截断 + pad）。
+
+    兼容两类接口：CharTokenizer / LLaDATokenizer（`encode(text, length)` 已含截断与 pad），
+    以及 HF tokenizer（`encode(text, add_special_tokens=False)` 需手动 pad）。
+    """
+    if hasattr(tokenizer, "pad_id") and hasattr(tokenizer, "mask_id"):
+        return tokenizer.encode(text, length)
     ids = tokenizer.encode(text, add_special_tokens=False)[:length]
     return ids + [pad_id] * (length - len(ids))
 

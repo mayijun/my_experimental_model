@@ -9,6 +9,14 @@ from .encoder import ImageEncoder, TextEncoder
 from .representation import LatentPredictor
 
 
+def _decoder_heads(dim, head_dim=64):
+    """解码器在潜空间 d 内做注意力，返回能整除 d 的注意力头数。"""
+    heads = max(1, dim // head_dim)
+    while heads > 1 and dim % heads != 0:
+        heads -= 1
+    return heads
+
+
 class MultimodalJEPA(nn.Module):
     """图像 + 文本共享 Z 的完整模型：双在线/目标编码器 + 预测器 + 共享双解码器。"""
 
@@ -22,18 +30,22 @@ class MultimodalJEPA(nn.Module):
         self.image_online = ImageEncoder(
             cfg.image_size, cfg.patch_size, cfg.image_channels, cfg.dim,
             cfg.heads, cfg.depth, cfg.mlp_ratio,
+            hidden_dim=cfg.hidden_dim, backbone=cfg.backbone, attn_layers=cfg.attn_layers,
         )
         self.text_online = TextEncoder(
             vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
+            hidden_dim=cfg.hidden_dim, backbone=cfg.backbone, attn_layers=cfg.attn_layers,
         )
 
         # —— 编码（目标，EMA、stop-gradient）——
         self.image_target = ImageEncoder(
             cfg.image_size, cfg.patch_size, cfg.image_channels, cfg.dim,
             cfg.heads, cfg.depth, cfg.mlp_ratio,
+            hidden_dim=cfg.hidden_dim, backbone=cfg.backbone, attn_layers=cfg.attn_layers,
         )
         self.text_target = TextEncoder(
             vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
+            hidden_dim=cfg.hidden_dim, backbone=cfg.backbone, attn_layers=cfg.attn_layers,
         )
         self.image_target.load_state_dict(self.image_online.state_dict())
         self.text_target.load_state_dict(self.text_online.state_dict())
@@ -46,12 +58,13 @@ class MultimodalJEPA(nn.Module):
         self.text_predictor = LatentPredictor(cfg.dim, cfg.mlp_ratio)
 
         # —— 解码（共享，双向可还原）——
+        dec_heads = _decoder_heads(cfg.dim)
         self.image_decoder = ImageDecoder(
             cfg.image_size, cfg.patch_size, cfg.image_channels, cfg.dim,
-            cfg.heads, cfg.depth, cfg.mlp_ratio,
+            dec_heads, cfg.depth, cfg.mlp_ratio,
         )
         self.text_decoder = TextDecoder(
-            vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
+            vocab_size, length, cfg.dim, dec_heads, cfg.depth, cfg.mlp_ratio,
         )
 
         # —— 软对齐投影头（InfoNCE 用）——

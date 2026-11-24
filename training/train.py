@@ -1,7 +1,9 @@
 """训练入口：数据源装配 + 训练循环 + 可选 checkpoint 落盘。
 
 用法（CPU 冒烟）：
-    .venv/bin/python -m training.train --preset tiny --steps 150
+    .venv/bin/python -m training.train --preset tiny --steps 150 --tokenizer char --backbone transformer
+用法（中型，默认）：
+    .venv/bin/python -m training.train --preset 0.3b --tokenizer llada --backbone hybrid
 用法（缩放）：
     .venv/bin/python -m training.train --preset base --dim 512 --depth 12 --steps 2000
 """
@@ -15,6 +17,7 @@ import numpy as np
 import torch
 
 from data_prepare.hf_datasets import (
+    LLaDATokenizer,
     ensure_special_tokens,
     load_hf_tokenizer,
     real_batch_fn,
@@ -46,15 +49,19 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr):
     return model
 
 
-def save_checkpoint(path, model, cfg, vocab_size, itos=None):
-    """落盘模型权重与重建模型/词表所需的最小元信息（供 inference 加载）。"""
+def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None):
+    """落盘模型权重与重建模型/词表所需的最小元信息（供 inference 加载）。
+
+    tokenizer_meta：字符级为 {"type": "char", "itos": [...]}，
+    LLaDA 为 {"type": "llada", "model": "GSAI-ML/LLaDA-8B-Instruct"}。
+    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     torch.save(
         {
             "model": model.state_dict(),
             "cfg": dataclasses.asdict(cfg),
             "vocab_size": vocab_size,
-            "vocab_itos": itos,
+            "tokenizer_meta": tokenizer_meta,
         },
         path,
     )
@@ -63,13 +70,17 @@ def save_checkpoint(path, model, cfg, vocab_size, itos=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preset", choices=list(PRESETS), default="small")
+    parser.add_argument("--preset", choices=list(PRESETS), default="0.3b")
     # 模型规模（覆盖 preset 默认值）
     parser.add_argument("--image-size", type=int, default=None)
     parser.add_argument("--patch-size", type=int, default=None)
     parser.add_argument("--dim", type=int, default=None)
+    parser.add_argument("--hidden-dim", type=int, default=None)
     parser.add_argument("--depth", type=int, default=None)
     parser.add_argument("--heads", type=int, default=None)
+    # 主干选型（§2.2.5）
+    parser.add_argument("--backbone", choices=["transformer", "mamba", "hybrid"], default=None)
+    parser.add_argument("--attn-layers", type=int, default=None)
     # 训练
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -80,6 +91,9 @@ def main():
     parser.add_argument("--save", type=str, default="")  # 例如 runs/mjepa.pt
     # 数据源：synthetic（内置合成图文对，离线） / real（HF datasets 真实图文对）
     parser.add_argument("--data", choices=["synthetic", "real"], default="synthetic")
+    # 文本 tokenizer：llada（现成词表，内置 mask id，见 math.md §2.2.7） / char（字符级，离线冒烟）
+    parser.add_argument("--tokenizer", choices=["char", "llada"], default="llada")
+    parser.add_argument("--llada-model", type=str, default="GSAI-ML/LLaDA-8B-Instruct")
     parser.add_argument("--dataset-name", type=str, default="lambdalabs/pokemon-blip-captions")
     parser.add_argument("--dataset-config", type=str, default="")
     parser.add_argument("--split", type=str, default="train")
@@ -99,34 +113,50 @@ def main():
         image_size=args.image_size,
         patch_size=args.patch_size,
         dim=args.dim,
+        hidden_dim=args.hidden_dim,
         depth=args.depth,
         heads=args.heads,
+        backbone=args.backbone,
+        attn_layers=args.attn_layers,
     )
-    assert cfg.dim % cfg.heads == 0, f"dim ({cfg.dim}) 必须能被 heads ({cfg.heads}) 整除"
+    assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.patch_size == 0, "image_size 必须能被 patch_size 整除"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device: {device} | preset: {args.preset} | dim={cfg.dim} depth={cfg.depth} "
-          f"heads={cfg.heads} image={cfg.image_size} patch={cfg.patch_size} "
-          f"latent_len={cfg.text_len}")
+    print(f"device: {device} | preset: {args.preset} | d={cfg.dim} d_hidden={cfg.width} "
+          f"depth={cfg.depth} heads={cfg.heads} backbone={cfg.backbone} "
+          f"image={cfg.image_size} patch={cfg.patch_size} latent_len={cfg.text_len}")
 
-    # —— 数据源 / 词表 ——
-    if args.data == "real":
+    # —— 词表（tokenizer）选择 ——
+    tokenizer_meta = None
+    if args.tokenizer == "llada":
+        tokenizer = LLaDATokenizer(args.llada_model)
+        pad_id, mask_id, vocab_size = tokenizer.pad_id, tokenizer.mask_id, tokenizer.vocab_size
+        tokenizer_meta = {"type": "llada", "model": args.llada_model}
+    elif args.data == "real":
         if args.hf_endpoint:
             os.environ["HF_ENDPOINT"] = args.hf_endpoint
         tokenizer = load_hf_tokenizer(args.tokenizer_name)
         pad_id, mask_id, vocab_size = ensure_special_tokens(tokenizer)
+    else:
+        tokenizer = None  # 由 build_dataset 内部构造 CharTokenizer
+
+    # —— 数据装配 ——
+    if args.data == "real":
         gen = real_batch_iterator(args, tokenizer, pad_id, cfg.text_len, cfg.image_size)
         batch_fn = real_batch_fn(gen, args.batch_size, device)
         source = args.data_dir or args.dataset_name
-        print(f"数据: 真实图文对（{source}） | tokenizer: {args.tokenizer_name} | "
+        tok_name = args.llada_model if args.tokenizer == "llada" else args.tokenizer_name
+        print(f"数据: 真实图文对（{source}） | tokenizer: {tok_name} | "
               f"vocab={vocab_size} pad={pad_id} mask={mask_id}")
     else:
         images, caption_ids, captions, tokenizer = build_dataset(
-            args.dataset_size, cfg.image_size, cfg.text_len, seed=args.seed
+            args.dataset_size, cfg.image_size, cfg.text_len, seed=args.seed, tokenizer=tokenizer
         )
         pad_id, mask_id = tokenizer.pad_id, tokenizer.mask_id
         vocab_size = tokenizer.vocab_size
+        if tokenizer_meta is None:
+            tokenizer_meta = {"type": "char", "itos": getattr(tokenizer, "itos", None)}
         batch_fn = synthetic_batch_fn(images, caption_ids, args.batch_size, device)
 
     model = MultimodalJEPA(cfg, vocab_size).to(device)
@@ -137,10 +167,7 @@ def main():
     train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr)
 
     if args.save:
-        save_checkpoint(
-            args.save, model, cfg, vocab_size,
-            itos=getattr(tokenizer, "itos", None),
-        )
+        save_checkpoint(args.save, model, cfg, vocab_size, tokenizer_meta=tokenizer_meta)
 
     if args.data == "real":
         evaluate_real(model, gen, tokenizer, pad_id, device, args.eval_samples)

@@ -47,9 +47,20 @@ def load_checkpoint(path, device):
     model = MultimodalJEPA(cfg, blob["vocab_size"]).to(device)
     model.load_state_dict(blob["model"])
     model.eval()
+    return model, cfg, _restore_tokenizer(blob)
+
+
+def _restore_tokenizer(blob):
+    """按 tokenizer_meta 重建词表；兼容旧 checkpoint 的 vocab_itos 字段。"""
+    meta = blob.get("tokenizer_meta")
+    if meta and meta.get("type") == "llada":
+        from data_prepare.hf_datasets import LLaDATokenizer
+
+        return LLaDATokenizer(meta["model"])
+    if meta and meta.get("type") == "char" and meta.get("itos"):
+        return CharTokenizer.from_itos(meta["itos"])
     itos = blob.get("vocab_itos")
-    tokenizer = CharTokenizer.from_itos(itos) if itos else None
-    return model, cfg, tokenizer
+    return CharTokenizer.from_itos(itos) if itos else None
 
 
 def main():
