@@ -858,6 +858,94 @@ $$\min_{\{t_i\},\gamma} \sum_i d(z_{t_i}, z_{t_{i+1}}) \;+\; \lambda\sum_i \big(
 
 其中 $\lambda$ 即 $h$ 的**读/改分量旋钮**：$\lambda\to\infty$ 强制每步贴纤维（可解释、绕路），$\lambda\to0$ 退化为自由测地线（短、出流形）。"最短测地流不一定可解释"在形式上即 $\lambda=0$ 的解落在纤维外，故必须 $\lambda>0$。现成单族算法都只覆盖一段：① 有离散骨架无连续流、② 简单但投影破坏流结构、③ 连续但需可微 $w$；合一封装暂无，最接近的是 Riemannian Flow Matching + confidence guidance。
 
+#### 3.7.3 并行扫描收缩算子（PSCO）：算子迭代的 GPU 加速（备选）
+
+§3.7.1 说 Loop Transformer 是「固定算子迭代到不动点」的特例、本框架是「状态依赖算子迭代到不动点」的一般化。但 §3.7.1 的 DEQ 只把**反传内存**降到 $O(1)$，前向仍要迭代 $O(N)$ 步到不动点；§4.1.5 的 reflow 能蒸馏到 $O(1)$ 步，却丢掉自适应深度与可解释性。本小节给出一个备选实现 PSCO（Parallel-Scan Contractive Operator）：把前向串行深度从 $O(N)$ 压到 $O(\log N)$，同时保留状态依赖算子与自适应深度。它复用 §2.6/§4.3 的「并行扫描」原语与 §3.7.1 的测地线性化，不引入新硬件假设。
+
+**算子拆分。** 把状态依赖算子写成不动点方向上的增量形式：
+
+$$\Psi_h(Z) = Z + \Delta_h(Z),\qquad \Delta_h(Z) = A_h Z + b_h + r_h(Z).$$
+
+- $A_h Z + b_h$ 是**线性骨架**，取 §3.7.1 不动点处的线性化 $J = I + \nabla v_h(Z^*)$，即 $A_h=\nabla v_h(Z^*)$、$b_h$ 吸收常数项——负责迭代收敛的「渐近段」；
+- $r_h(Z)$ 是**非线性残差**，负责「瞬态段」里线性化失效的大跳变。
+
+$h$ 仍由网络自推断（§3.5），故 $A_h,b_h$ 随输入变化，状态依赖性保留。
+
+**线性骨架 → 一阶线性递推。** 令 $\tilde A_h = I + A_h$。渐近段（$r_h\approx 0$）退化为线性递推
+
+$$Z^{(k+1)} = \tilde A_h Z^{(k)} + b_h,\qquad Z^{(k)}\in\mathbb R^d.$$
+
+闭式解：
+
+$$Z^{(k)} = \tilde A_h^k Z^{(0)} + \sum_{j=0}^{k-1}\tilde A_h^{\,k-1-j}\,b_h.$$
+
+**并行扫描（associative scan）。** 上式是「仿射变换幺半群」上的前缀和。定义二元结合算子
+
+$$(M_1,u_1)\circ(M_2,u_2)=\big(M_1 M_2,\ M_1 u_2 + u_1\big),$$
+
+初始元素取 $(\tilde A_h,\,b_h)$。对 $N$ 个相同元素做 Blelloch 前缀扫描，一次得到全部前缀 $Z^{(1)},\dots,Z^{(N)}$：工作量 $O(N)$、**串行深度 $O(\log N)$**——这就是 Mamba/S4 训练快的同一原语（对应 §4.3(a) 的串行深度判据）。
+
+**低秩/对角约束（保 $O(Nd)$ 工作量）。** 若 $\tilde A_h$ 是稠密 $d\times d$，幺半群乘法 $M_1M_2$ 是 $O(d^3)$。要保留线性工作量，取对角 $\tilde A_h=\operatorname{diag}(\tilde a_h)$（SSM 风格）或秩一 $\tilde A_h=I+u_h v_h^\top$（矩阵幂走 Woodbury 闭式）。二者都退化为 $O(Nd)$ 逐元素扫描。
+
+**收缩条件（数值稳定性）。** 扫描收敛要求 $\rho(\tilde A_h)<1$，正是 §3.7.1 的收缩条件（$\nabla v_h$ 特征值落在 $(-2,0)$）。训练加可微谱正则钳住：
+
+$$\mathcal L_{\text{spec}}=\operatorname{relu}\big(\|\tilde A_h\|_2-(1-\gamma)\big)^2,\qquad \gamma\in(0,1).$$
+
+**自适应深度（早停免费）。** 扫描同时物化整条轨迹 $Z^{(0..N)}$，停止索引只是一次并行 argmin：
+
+$$\text{stop}=\min\big\{k:\ \|Z^{(k+1)}-Z^{(k)}\|<\epsilon\big\}.$$
+
+$N$ 只是扫描上限：简单样本早停、难题跑满，二者 GPU 深度都是 $O(\log N_{\max})$，不因停得早而更慢（对比 Loop Transformer 固定 $L$ 步的浪费）。
+
+**训练（反传）。** 关联扫描的反向同样是 $O(\log N)$（Mamba 同款），训练串行深度 $O(\log N)$ 而非 BPTT 的 $O(N)$；只关心不动点时改用 DEQ 隐式微分（式 25/26），只存 $Z^*$、$O(1)$ 内存。两段式：瞬态段 $m$ 步显式反传 + 渐近段 DEQ 隐式微分。
+
+**伪代码。**
+
+```text
+# ---- 前向：状态依赖算子 + 并行扫描 ----
+def psi_h(Z, h):                     # 状态依赖算子 Ψ_h
+    Ah, bh = proj_A(h), proj_b(h)    # h -> 线性骨架参数（对角/低秩）
+    return Z + Ah @ Z + bh + r_h(Z)  # 线性骨架 + 非线性残差
+
+def scan_linear(Z0, Ah, bh, N):      # 仿射幺半群上的并行前缀扫描
+    # 元素 (M,u)；组合 (M1,u1)∘(M2,u2) = (M1 M2, M1 u2 + u1)
+    # Blelloch 上下两趟，深度 O(log N)，返回 Zs[k] = Z^(k), k=1..N
+    ...
+
+def forward(Z0, h, N, eps, m):
+    Z = Z0
+    for _ in range(m):               # 瞬态段：少量全非线性步
+        Z = psi_h(Z, h)
+    Zs = scan_linear(Z, Ah, bh, N)   # 渐近段：并行扫描物化全轨迹
+    resid = (Zs[1:] - Zs[:-1]).norm(dim=-1)     # 逐步残差
+    stop = int(resid.lt(eps).long().argmax()) if resid.lt(eps).any() else N
+    return Zs[stop], stop            # 不动点 + 自适应用到的深度
+
+# ---- 训练：两条反传路径 ----
+# 路径A：scan 反向（关联扫描 reverse），O(log N) 深度
+# 路径B：只存 Z*，解伴随线性不动点（式 25/26），O(1) 内存（DEQ）
+# 谱正则：L_spec = relu(||Ah_tilde||_2 - (1-gamma))^2  钳住收缩
+```
+
+**PyTorch 落地要点（适配当前 multimodal_jepa.py）。** 现有实现是 `TransformerBlock`（`nn.MultiheadAttention` + MLP，无 SSM/scan 依赖），PSCO 与它正交，作为**算子迭代层**接入：把 §3.5 的 $\Psi_h$ 实现为「线性骨架 + 残差」模块，替换/包裹 `LatentPredictor` 或作为推理专用头。并行扫描在 PyTorch 有三档实现，按序列长度递进：
+
+1. **纯 PyTorch log-depth 扫描**：用 reshape + 逐级组合手写 Blelloch 两趟，零新依赖；配合 `torch.compile` 融合逐元素 op。当前 `dim ≤ 256`、短序列下完全够用，先用它验证正确性。
+2. **chunked scan + `torch.compile`**：把 $N$ 切成 $N/C$ 块，块内串行、块间并行扫描，减少 kernel 启动、提升 occupancy——长序列下的工程折中。
+3. **Triton / `pscan` / `mamba-ssm` 内核**：$L\gtrsim 10^3$（对应 §4.2(g) 的 Mamba 收益区）才需要；对角 $\tilde A_h$ 直接复用 `causal-conv1d` 的关联扫描核。
+
+三个工程注意点：(i) **内存**——扫描物化 $O(N)$ 前缀激活，若只出不冻点走 DEQ 路径（$O(1)$），否则对扫描段用 `torch.utils.checkpoint` 重计算；(ii) **精度**——线性骨架 $A_h$ 与 §2.6 的数值精度量化正交，可单独降到 FP8 而不破坏 $Z$ 的连续语义（§2.6 契约）；(iii) **梯度**——对角 $\tilde A_h$ 的扫描是可微的逐元素乘加，`torch.compile` 能自动反向，无需手写 Triton 反传。
+
+**串行深度对比（收束）。**
+
+| 方案 | 前向 | 反传 | 内存 | 自适应深度 | 状态依赖算子 |
+|---|---|---|---|---|---|
+| Loop Transformer | $O(L)$ | $O(L)$ | $O(L)$ | ✗ | ✗ |
+| DEQ | $O(N)$ 解不动点 | 隐式解 | $O(1)$ | ✗ | ✗ |
+| Rectified Flow 蒸馏 | $O(1)$ | $O(1)$ | $O(1)$ | ✗ | ✓（折进 $v_\theta$） |
+| **PSCO（本方案）** | $O(\log N+m)$ | $O(\log N)$ 或 $O(1)$ | $O(1)$（DEQ 路径） | **✓ 免费** | **✓** |
+
+PSCO 不替代 reflow，而是给 reflow 提供一个**有据可依、能自适应深度的 teacher**；两者共用 $\nabla v_h(Z^*)$ 这一同一对象（§3.7.1）。
+
 ### 3.8 重建作为预测的特例：统一预测框架
 
 把 §3.7 的"潜空间 vs 表征空间"进一步统一：**重建不是预测的对立面，而是预测的退化特例**——二者是同一预测框架的两端，而非两个范式。
