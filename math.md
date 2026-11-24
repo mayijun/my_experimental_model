@@ -995,21 +995,27 @@ def text_to_operator(ids, H, W_ch, proj_a, proj_b, r):
 
 **与 Universal Transformer 自适应停机的区别与借鉴。** Universal Transformer（Dehghani et al. 2019）配 ACT 的自适应停机是**学习驱动、串行判定**：每步用小网络算 per-position 停机概率 $p_t$，累计超过阈值才停，并用 ponder cost 惩罚总步数。PSCO 的早停是**残差驱动、事后判定**：扫描已把整条轨迹 $Z^{(0..N)}$ 物化，停机只是对已算好的轨迹做一次并行 argmin（见上文「自适应深度」）。
 
-| 维度 | Universal Transformer / ACT | PSCO |
-|---|---|---|
-| 停机信号 | 学习的 halting 概率 $p_t$（需额外网络） | 固定残差阈值 $\|\Delta Z\|<\epsilon$（零参数） |
-| 判定时机 | 逐步串行（第 $k$ 步才知停不停） | 轨迹已物化，事后 argmin，零串行 |
-| 深度控制 | ponder cost 惩罚平均深度 | 扫描上限 $N_{\max}$ + 可选深度正则 |
-| 粒度 | per-position 独立停 | 全局一起停 |
-| 语义 | 停机 = 外挂 ponder 网络输出 | 停机 = 残差归零 = §3.7 改分量归零 |
+| 维度 | ACT | Universal Transformer | PonderNet | PSCO |
+|---|---|---|---|---|
+| 核心机制 | 累计停机概率 + 剩余质量加权 | 共享 block + per-position 停机 | 几何分布停 + KL 先验 | 收缩算子 + 并行扫描 |
+| 串行深度 | $O(N)$ | $O(N)$ | $O(N)$ | $O(\log N+m)$ |
+| 停机信号 | 学习 $p_t$（标量） | 学习 $p_t$（per-position） | 学习 $\lambda_n$ | 残差阈值（零参数） |
+| 停机语义 | 计算预算耗尽 | 计算预算耗尽 | 先验分布匹配 | 不动点收敛（有保证） |
+| 收敛保证 | ✗ | ✗ | ✗ | ✓（Banach 收缩） |
+| 算子性质 | 固定权重 | 固定权重 | 固定权重 | 输入依赖 $\Psi_h$ |
+| 早停成本 | 串行等 $p_t$ | 串行等 $p_t$ | 串行等 $\lambda_n$ | 免费（轨迹已物化） |
+| 训练/内存 | 有偏梯度，$O(N)$ | 有偏梯度，$O(N)$ | KL 正则，$O(N)$ | scan 反传 / DEQ，$O(1)$ |
+| 实现复杂度 | 低 | 中 | 中 | 高 |
 
-**可借鉴的三点**（把 UT 的长处嫁接到 PSCO）：
+**各取所长（三点嫁接）。**
 
-1. **ponder cost / 深度正则**：显式惩罚 stop 分布，防「永远跑满 $N$」或「永远一步停」。PSCO 可加 $\mathcal L_{\text{ponder}}=\mathbb E[\text{stop}]$ 的软版本，让模型学会在「恰当」深度停。
-2. **软停机掩码**：把硬 argmin 换成 sigmoid 化的停机概率作软掩码，训练端可微、推理端再退化为硬 argmin（与 §4.2 的 FSQ/温度退火同思路）。
-3. **per-position / per-dim 早停**：若 $Z$ 各维收敛速率不同，可按维分组收缩（partial scan / 分块收缩），不必全局同步停——这正是 PSCO 对角化 $a_h$ 的天然优势：每维独立 $a_h$、独立收敛速度。
+1. **ACT → ponder cost / 深度正则**：显式惩罚 stop 分布，防 PSCO 学成「永远跑满 $N$」或「永远一步停」的退化，加 $\mathcal L_{\text{ponder}}=\mathbb E[\text{stop}]$。
+2. **PonderNet → 概率加权 + KL 先验**：它的 $\hat Z=\sum_n p_n Z^{(n)}$（按停机概率加权）与「KL 到几何先验」给出**低方差、无偏**的深度正则，比 ACT 的有偏估计干净。PSCO 的软停机掩码应照这个做（$\hat Z=\sum_n\sigma_n Z^{(n)}$，$\sigma_n$ 为软停机概率），而非 ACT 的剩余质量 hack。
+3. **Universal Transformer → per-position/per-dim**：把「每位置独立停」向量化成 PSCO 的「每维独立收缩」——对角化 $a_h$ 天然支持，这是三者中唯一能和 PSCO 无缝对接的粒度。
 
-PSCO 相对 UT 独有、UT 学不来的：**早停免费**（扫描物化轨迹，无需串行等 $p_t$）与**停机语义统一**（残差归零 = 改分量归零，而非外挂 ponder 网络）。
+PSCO 相对三者独有、学不来的：**早停免费**（扫描物化轨迹，无需串行等停机概率）、**停机语义统一**（残差归零 = 改分量归零，而非外挂网络）、**$O(\log N)$ 深度**与**收敛保证**。代价是**实现复杂度最高**与**线性化假设**（渐近段需收缩）。
+
+**备选方案与实验判据。** 本小节把自适应深度的四条路线一并列为备选：ACT、Universal Transformer、PonderNet、PSCO。四者不是替代而是互补——**停机策略（借 ACT/PonderNet/UT）、收敛保证（PSCO）、$O(\log N)$ 深度（PSCO）可以合体**。但要诚实：目前所有结论都来自机制分析与 [`psco.py`](file:///home/simon-ma/JEPA/psco.py) 的线性骨架原型，**哪一个在真实多模态 JEPA 任务上更好，只能靠具体实验判定**，本小节不作先验取舍。
 
 ### 3.8 重建作为预测的特例：统一预测框架
 
