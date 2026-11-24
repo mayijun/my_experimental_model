@@ -963,6 +963,54 @@ PSCO 不替代 reflow，而是给 reflow 提供一个**有据可依、能自适�
 
 一句话：**塌缩本质是「算子失去输入依赖性」——$\tilde A_h\to0$ 强收缩抹信息，或 $b_h$ 退成常数共享吸引子。谱夹层管 $\tilde A_h$ 的健康区间，读出头锚定强制 $Z^*$ 携带输入信息，方差正则管维度分布，三者合起来保证不动点不塌成一点。**
 
+**文字 → 算子 vs 描述：与 PSCO 的对应。** §3.5 命题 7 说文字的两面性由自推断的 $h$ 决定，本节把这条接到 PSCO 的算子参数上。文字 $T$ 经 $H$ 提升为 $h=(h_{\text{read}},h_{\text{change}})$，改分量 $h_{\text{change}}$ 直接门控算子的非平凡部分：
+
+$$\Psi_h(Z) = Z + g_{\text{change}}\odot\big(A_h Z + b_h + r_h(Z)\big),\qquad g_{\text{change}}=\sigma(W_{\text{ch}}h)\in(0,1)^d.$$
+
+- 描述端（$h_{\text{change}}\to0$）：$g_{\text{change}}\to0$，$\Psi_h\approx\mathrm{id}$，文字是状态投影 $T_d=g(Z)$；
+- 算子端（$h_{\text{change}}\approx1$）：$g_{\text{change}}\approx1$，$\Psi_h$ 非平凡，文字是 $\Omega$ 里的一个变换 $Z'=\Psi_h(Z)$。
+
+于是「算子性 = $g_{\text{change}}$ 偏离 0 的程度」，与 §3.7 的停止条件 $h_{\text{change}}\to0$ 天然对齐：改分量归零 ⟺ 变换完成 ⟺ 读出结论。
+
+**算子空间 $\Omega$ 的具体定义。** 取 $Z\in\mathbb R^d$（$d$ 为表征维数），算子空间是「对角收缩仿射 + 非线性残差」这一族映射：
+
+$$\Omega = \Big\{\ \Psi_h:\ \Psi_h(Z)=Z+g_{\text{change}}\odot\big(\operatorname{diag}(a_h)\,Z + b_h + r_h(Z)\big)\ \Big|\ a_h\in(\delta,1-\gamma)^d,\ b_h\in\mathbb R^d,\ h\in\mathcal H\ \Big\}.$$
+
+- $a_h\in(\delta,1-\gamma)^d$ 是对角收缩（谱夹层，见上文），$\rho(\operatorname{diag}(a_h))<1$ 保证收敛；
+- **半群结构**：收缩映射的复合仍是收缩映射（Banach 不动点定理），故 $\Psi_{h_2}\circ\Psi_{h_1}\in\Omega$，复杂推理 = 生成元复合（§3.5 的 $\Psi(Z,\omega_2\circ\omega_1)=\Psi(\Psi(Z,\omega_1),\omega_2)$）；
+- 描述是 $\Omega$ 的**单位元邻域**：$g_{\text{change}}\to0$ 时 $\Psi_h\to\mathrm{id}\in\Omega$——「描述 ⊂ 算子」是同一套退化结构，与 §3.8「重建是预测的特例」同构：描述是算子的特例，算子是一般情形。
+
+**文字 → $\Omega$ 的伪代码。**
+
+```text
+def text_to_operator(ids, H, W_ch, proj_a, proj_b, r):
+    h = H(ids)                               # 隐含模式（自推断，无需标签）
+    g_change = sigmoid(W_ch @ h)             # 改分量门控 ∈ (0,1)^d
+    a = delta + (1 - gamma - delta) * sigmoid(proj_a(h))   # 对角收缩 ∈ (δ,1-γ)
+    b = proj_b(h)                            # 偏移
+    def psi(Z):
+        return Z + g_change * (a * Z + b + r(Z))   # 描述端 g_change→0 退化为 id
+    return psi, g_change                     # psi ∈ Ω；g_change 即「算子性」强度
+```
+
+**与 Universal Transformer 自适应停机的区别与借鉴。** Universal Transformer（Dehghani et al. 2019）配 ACT 的自适应停机是**学习驱动、串行判定**：每步用小网络算 per-position 停机概率 $p_t$，累计超过阈值才停，并用 ponder cost 惩罚总步数。PSCO 的早停是**残差驱动、事后判定**：扫描已把整条轨迹 $Z^{(0..N)}$ 物化，停机只是对已算好的轨迹做一次并行 argmin（见上文「自适应深度」）。
+
+| 维度 | Universal Transformer / ACT | PSCO |
+|---|---|---|
+| 停机信号 | 学习的 halting 概率 $p_t$（需额外网络） | 固定残差阈值 $\|\Delta Z\|<\epsilon$（零参数） |
+| 判定时机 | 逐步串行（第 $k$ 步才知停不停） | 轨迹已物化，事后 argmin，零串行 |
+| 深度控制 | ponder cost 惩罚平均深度 | 扫描上限 $N_{\max}$ + 可选深度正则 |
+| 粒度 | per-position 独立停 | 全局一起停 |
+| 语义 | 停机 = 外挂 ponder 网络输出 | 停机 = 残差归零 = §3.7 改分量归零 |
+
+**可借鉴的三点**（把 UT 的长处嫁接到 PSCO）：
+
+1. **ponder cost / 深度正则**：显式惩罚 stop 分布，防「永远跑满 $N$」或「永远一步停」。PSCO 可加 $\mathcal L_{\text{ponder}}=\mathbb E[\text{stop}]$ 的软版本，让模型学会在「恰当」深度停。
+2. **软停机掩码**：把硬 argmin 换成 sigmoid 化的停机概率作软掩码，训练端可微、推理端再退化为硬 argmin（与 §4.2 的 FSQ/温度退火同思路）。
+3. **per-position / per-dim 早停**：若 $Z$ 各维收敛速率不同，可按维分组收缩（partial scan / 分块收缩），不必全局同步停——这正是 PSCO 对角化 $a_h$ 的天然优势：每维独立 $a_h$、独立收敛速度。
+
+PSCO 相对 UT 独有、UT 学不来的：**早停免费**（扫描物化轨迹，无需串行等 $p_t$）与**停机语义统一**（残差归零 = 改分量归零，而非外挂 ponder 网络）。
+
 ### 3.8 重建作为预测的特例：统一预测框架
 
 把 §3.7 的"潜空间 vs 表征空间"进一步统一：**重建不是预测的对立面，而是预测的退化特例**——二者是同一预测框架的两端，而非两个范式。
