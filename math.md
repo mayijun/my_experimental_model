@@ -844,6 +844,20 @@ $$\nabla_\theta\ell \;=\; -\left(D_\theta\Psi_h(Z^*)\right)^{\dagger}\left(\nabl
 
 **一处关键差异（勿过度类比）**：Loop Transformer 权重固定、算子固定，程序写在权重里、只朝静态不动点走；本框架的 $\Psi_h$ 是输入依赖、可跨步演化（$h^{(i)}$ 自推断），不动点是"以算子 $h$ 为条件的"，更接近 Universal Transformer + 状态依赖算子。即 **Loop Transformer 是"固定算子迭代到不动点"的特例，本框架是"状态依赖算子迭代到不动点"的一般化**。
 
+#### 3.7.2 可解释最短流的算法族
+
+§3.7 末的"可解释 = 保持在可解码流形 $\mathcal M$ 上"给出一个可操作的问题：**给定端点 $z_0,z_1$，找一条路径，使其上的点尽量可解码（$c(z_t)=\max_v p_\theta(v\mid z_t)$ 高），且总流长尽量短**。这是带纤维约束的最短路径，不是自由测地线（自由测地线即 $\lambda=0$ 的解，落在纤维外、不可解释）。三族现成算法：
+
+1. **离散化 → 图最短路径（Dijkstra / A\* / beam search）**。把"可解释点"离散成 token 序列：节点 $=$ 文本 $t$（代表点 $z_t=E(t)$），边权 $=$ 相邻锚点间流长 $d(z_{t_i},z_{t_{i+1}})$。最短可解释路径 $=$ 该图最短路径。现成实现即 ToT / GoT / MCTS（AlphaProof 式）——C 类显式 CoT 的搜索视角，也是 §2.6 MDL（"最短描述 $=$ 最短路径"）的落地。
+2. **投影 / 锚定流（交替投影 + decode-reencode）**。流走一步、再投影回纤维 $z\leftarrow E(g(z))$，反复。即 §3.7 的 $\mathcal L_{\text{audit}}$ 在推理时落地，本质是 retraction（收缩到约束子流形）。现成工具：交替投影（Dykstra）、projected flow、confidence guidance（对低 $c(z_t)$ 施斥力）。
+3. **加权测地线 → Eikonal / Fast Marching Method**。把"不可解释区"编码进度量 $\tilde g(z)=w(z)\,g(z)$，$w(z)$ 在低置信区取大。$\tilde g$ 下的测地线自动贴可解释区走。现成算法即 Fast Marching（Sethian）：解 Eikonal 方程 $|\nabla u|_{\tilde g}=1$、沿 $\nabla u$ 回溯。
+
+**三者合一的推荐配方（两段式）**：先离散搜骨架（A\*/beam 得锚点序列 $t_0,\ldots,t_N$），再连续填流（相邻锚点间 Riemannian flow 或 decode-reencode 锚定流），目标
+
+$$\min_{\{t_i\},\gamma} \sum_i d(z_{t_i}, z_{t_{i+1}}) \;+\; \lambda\sum_i \big(\text{off-fiber penalty}\big).$$
+
+其中 $\lambda$ 即 $h$ 的**读/改分量旋钮**：$\lambda\to\infty$ 强制每步贴纤维（可解释、绕路），$\lambda\to0$ 退化为自由测地线（短、出流形）。"最短测地流不一定可解释"在形式上即 $\lambda=0$ 的解落在纤维外，故必须 $\lambda>0$。现成单族算法都只覆盖一段：① 有离散骨架无连续流、② 简单但投影破坏流结构、③ 连续但需可微 $w$；合一封装暂无，最接近的是 Riemannian Flow Matching + confidence guidance。
+
 ### 3.8 重建作为预测的特例：统一预测框架
 
 把 §3.7 的"潜空间 vs 表征空间"进一步统一：**重建不是预测的对立面，而是预测的退化特例**——二者是同一预测框架的两端，而非两个范式。
