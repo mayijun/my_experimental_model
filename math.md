@@ -300,7 +300,7 @@ $$\xi \leftarrow \mu\,\xi + (1-\mu)\,\theta, \qquad \mu = 0.99.$$
 
 #### 2.2.4 防塌缩的两道附加约束（源码中的关键设计）
 
-> ⚠️ 严谨说明：余弦损失 + EMA 本身**并不能完全排除塌缩**——若在线编码器把所有位置映到同一常向量 $a$，预测器输出 $a$，目标经 EMA 也趋于 $a$，仍有 $\cos(a,a)=1$、损失为 0。因此本模型真正的塌缩防线是下面两项。
+> ⚠️ 严谨说明：余弦损失 + EMA 本身**并不能完全排除塌缩**——若在线编码器把所有位置映到同一常向量 $a$，预测器输出 $a$，目标经 EMA 也趋于 $a$，仍有 $\cos(a,a)=1$、损失为 0。因此本模型真正的塌缩防线是下面两项。防塌缩在本框架分三层：本节为**表征层**，**模态层**见 §3.4（交叉掩码），**算子层**见 §3.7.3（谱夹层 + 读出头 + 方差），三层总表见 §3.7.3。
 
 **(a) 重建损失（主要防线）**
 
@@ -308,11 +308,7 @@ $$\mathcal{L}_{\text{recon}} = \mathrm{CE}\!\bigl(D_\eta(E_\theta(x)),\; x\bigr)
 
 对应 [L410-L413](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L410-L413)、[L458](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L458)。若 $E_\theta(x)$ 在不同位置退化为常数，解码器无法区分 token，交叉熵将爆炸。该项强制表示中保留**位置可辨别的 token 信息**，是抑制塌缩的主力。
 
-**(b) VICReg 风格方差约束（次要防线）**
-
-$$\mathcal{L}_{\text{var}} = \mathbb{E}_{j}\bigl[\mathrm{relu}(1 - \sigma_j)\bigr], \qquad \sigma_j = \mathrm{std}(z_{:,j}),$$
-
-即 [L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)。惩罚在 batch 与位置维度上方差过小的潜空间维度，防止维度塌缩。
+**(b) VICReg 风格方差约束（次要防线）**：$\mathcal{L}_{\text{var}}=\mathbb{E}_j[\mathrm{relu}(1-\sigma_j)]$（式 (33)），惩罚在 batch 与位置维度上方差过小的潜空间维度，防止维度塌缩；见 [L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)，其「方向与率惩罚相反」的辨析见 §4.2(d)。
 
 JEPA 阶段总目标（[L463](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L463)）：
 
@@ -492,7 +488,7 @@ token x ──► [写进记忆 M] ──► 残差 ρ = ‖v − Mᵀk‖² ─
 
 **先写后压。** token 先写进记忆，再算 $\rho$ 当失真，按 $\rho$ 决定留不留、留几比特：
 
-$$b_t=\mathrm{clamp}\big(a\log_1p(\rho_t)+c\,H(x_t\mid\text{rest}),\ b_{\min},b_{\max}\big),\qquad \mathrm{keep}_t=(\rho_t>\epsilon_\rho)\lor(H_{\text{cond},t}>\epsilon_H)\lor\mathrm{is\_sink}(t).$$
+$$b_t=\mathrm{clamp}\big(a\log\tfrac{1}{p(\rho_t)}+c\,H(x_t\mid\text{rest}),\ b_{\min},b_{\max}\big),\qquad \mathrm{keep}_t=(\rho_t>\epsilon_\rho)\lor(H_{\text{cond},t}>\epsilon_H)\lor\mathrm{is\_sink}(t).$$
 
 $\rho$ 是 delta rule 的中间量，零额外前向。**压缩率内生自平衡**：$M$ 有空位 → 全吸收 → $\rho\approx0$ → 激进压缩；$M$ 满 → 旧信息被 decay 挤出 → 新 token $\rho$ 上升 → 自动保留更多——压缩器和记忆互为溢出区，稳态自动收敛。
 
@@ -834,7 +830,7 @@ $$\nabla_\theta\ell \;=\; -\left(D_\theta\Psi_h(Z^*)\right)^{\dagger}\left(\nabl
 
 其中 $\nabla_{Z^*}^g\ell=g(Z^*)^{-1}\frac{\partial\ell}{\partial Z}\big|_{Z^*}$ 是**黎曼梯度**（用解码器拉回度量 $g=J_D^\top J_D$ 把环境梯度提升到切空间），$\dagger$ 是**度量伴随** $A^\dagger=g^{-1}A^\top g$（而非欧氏转置）。收缩条件 $\rho(J)<1$ 要求 $\nabla v_h(Z^*)$ 的特征值落在 $(-2,0)$：负定（收缩）且大于 $-2$（不过冲、不振荡）。
 
-**含义**：测地整流下，隐式微分的关键量从"算子雅可比的逆 $(I-J)^{-1}$"变成"速度场协变导数的逆 $(\nabla v_h)^{-1}$"——后者正是 flow matching 所学的 $v_\theta$ 在不动点处的切线性化。这把 Loop Transformer 的算子不动点与 §4.1.5 的整流流统一到同一对象：$v_\theta$ 的稳定零点。欧氏情形是 $\mathcal M$ 平坦（$g=I$、$\nabla=\partial$、$\dagger=\top$）时的退化，式 25 是其特例。
+**含义**：测地整流下，隐式微分的关键量从"算子雅可比的逆 $(I-J)^{-1}$"变成"速度场协变导数的逆 $(\nabla v_h)^{-1}$"——后者正是 flow matching 所学的 $v_\theta$ 在不动点处的切线性化。这把 Loop Transformer 的算子不动点与 §4.1.5 的整流流统一到同一对象：$v_\theta$ 的稳定零点。欧氏情形是 $\mathcal M$ 平坦（$g=I$、$\nabla=\partial$、$\dagger=\top$）时的退化，式 25 是其特例。⚠️ 待严格化：$(\nabla v_h)^{-1}$ 与 $\dagger$ 的精确次序（$(\nabla v_h)^{-1}$ 是否应作 $(\nabla v_h)^{-\top}$）需按平坦退化逐项核对；本节仅给出方向，不锁死转置细节。
 
 **可借用的三点结论。**
 
@@ -950,12 +946,13 @@ PSCO 不替代 reflow，而是给 reflow 提供一个**有据可依、能自适�
 
 | 塌缩类型 | 表现 | 根因 |
 |---|---|---|
-| 表征塌缩 | 所有输入收敛到同一不动点 $Z^*$ | 强收缩 $\tilde A_h\to0$ 把轨迹一步拉到共享的 $b_h$，输入信息被抹掉 |
+| 表征塌缩 | 所有输入收敛到同一不动点 $Z^*$ | 强收缩 $\tilde A_h\to0$ 把轨迹一步拉到共享的 $b_h$，输入信息被抹掉（防线见 §2.2.3–2.2.4） |
+| 模态坍缩 | 某模态被另一模态/共享表征吞并 | 对齐目标单侧收敛、交叉掩码缺位（防线见 §3.4） |
 | 算子塌缩 | $\Psi_h\to\mathrm{id}$（$\tilde A_h\to1$）或常值映射 | 模型学到「不做计算 / 恒等」的最省力解 |
 
 五道防线（前三道已在 [`psco.py`](file:///home/simon-ma/JEPA/psco.py) 验证，后两道留作扩展）：
 
-1. **谱夹层（spectral sandwich）** $\delta<\rho(\tilde A_h)<1-\gamma$：上界保收敛（§3.7.1 收缩条件），下界 $\delta$ 封死「$\tilde A_h\to0$ 一步塌成一点」这条最阴的路径——只给上界时模型会学 $\tilde A_h\to0$，一步把所有 $Z$ 拉到共享 $b_h$，轨迹不再区分输入。参数化取 $\tilde A_h=\operatorname{diag}\big(\delta+(1-\gamma-\delta)\,\sigma(h)\big)$，逐维钳进 $(\delta,1-\gamma)$。
+1. **谱夹层（spectral sandwich）** 逐维 $\delta<\tilde a_{h,i}<1-\gamma$（等价于 $\rho(\tilde A_h)<1-\gamma$ 且 $\min_i\tilde a_{h,i}>\delta$）：上界保收敛（§3.7.1 收缩条件），下界 $\delta$ 封死「$\tilde A_h\to0$ 一步塌成一点」这条最阴的路径——只给上界时模型会学 $\tilde A_h\to0$，一步把所有 $Z$ 拉到共享 $b_h$，轨迹不再区分输入。参数化取 $\tilde A_h=\operatorname{diag}\big(\delta+(1-\gamma-\delta)\,\sigma(h)\big)$，逐维钳进 $(\delta,1-\gamma)$。
 2. **不动点读出头锚定**：$Z^*$ 必须能预测任务目标 $\mathcal L_{\text{readout}}=\|r(Z^*)-\tilde Z_y\|^2$（$r$ 为读出头）。塌成常数就预测不了，梯度把 $Z^*$ 重新推开。对应 §3.8 的预测目标与 §3.7 的 $\mathcal L_{\text{consist}}$。
 3. **方差正则**：对 $Z^*$ 每维标准差设下限 $\mathcal L_{\text{var}}=\mathrm{relu}(1-\sigma_j)$（式 33 同款），防维度塌缩。
 4. **$h$ 的信息量约束**：$a_h,b_h$ 由 $h$ 自推断；若 $h$ 网络塌缩（所有输入同一 $h$），算子退化为常值。把 $h$ 接一个判别/预测任务（或 DIB 约束 §2.5）强制 $h$ 随输入变化。
@@ -974,10 +971,10 @@ $$\Psi_h(Z) = Z + g_{\text{change}}\odot\big(A_h Z + b_h + r_h(Z)\big),\qquad g_
 
 **算子空间 $\Omega$ 的具体定义。** 取 $Z\in\mathbb R^d$（$d$ 为表征维数），算子空间是「对角收缩仿射 + 非线性残差」这一族映射：
 
-$$\Omega = \Big\{\ \Psi_h:\ \Psi_h(Z)=Z+g_{\text{change}}\odot\big(\operatorname{diag}(a_h)\,Z + b_h + r_h(Z)\big)\ \Big|\ a_h\in(\delta,1-\gamma)^d,\ b_h\in\mathbb R^d,\ h\in\mathcal H\ \Big\}.$$
+$$\Omega = \Big\{\ \Psi_h:\ \Psi_h(Z)=Z+g_{\text{change}}\odot\big(\operatorname{diag}(a_h)\,Z + b_h + r_h(Z)\big)\ \Big|\ a_h\in(\delta-1,-\gamma)^d,\ b_h\in\mathbb R^d,\ h\in\mathcal H\ \Big\}.$$
 
-- $a_h\in(\delta,1-\gamma)^d$ 是对角收缩（谱夹层，见上文），$\rho(\operatorname{diag}(a_h))<1$ 保证收敛；
-- **半群结构**：收缩映射的复合仍是收缩映射（Banach 不动点定理），故 $\Psi_{h_2}\circ\Psi_{h_1}\in\Omega$，复杂推理 = 生成元复合（§3.5 的 $\Psi(Z,\omega_2\circ\omega_1)=\Psi(\Psi(Z,\omega_1),\omega_2)$）；
+- $a_h\in(\delta-1,-\gamma)^d$ 是对角收缩**增量**（对应谱夹层 $\tilde A_h=I+\operatorname{diag}(a_h)\in(\delta,1-\gamma)^d$，见上文），$\rho\big(I+\operatorname{diag}(a_h)\big)<1$ 保证收敛；
+- **半群结构**：收缩映射的复合仍是收缩映射（Banach 不动点定理），故 $\Psi_{h_2}\circ\Psi_{h_1}$ 仍收敛到不动点——复杂推理 = 生成元复合（§3.5 的 $\Psi(Z,\omega_2\circ\omega_1)=\Psi(\Psi(Z,\omega_1),\omega_2)$）。注意该复合一般不再具有 $\Omega$ 的对角仿射参数形式，PSCO 以「逐段扫描 + 换 $h$」实现复合，而非字面代入 $\Omega$ 的解析式；
 - 描述是 $\Omega$ 的**单位元邻域**：$g_{\text{change}}\to0$ 时 $\Psi_h\to\mathrm{id}\in\Omega$——「描述 ⊂ 算子」是同一套退化结构，与 §3.8「重建是预测的特例」同构：描述是算子的特例，算子是一般情形。
 
 **文字 → $\Omega$ 的伪代码。**
@@ -986,7 +983,8 @@ $$\Omega = \Big\{\ \Psi_h:\ \Psi_h(Z)=Z+g_{\text{change}}\odot\big(\operatorname
 def text_to_operator(ids, H, W_ch, proj_a, proj_b, r):
     h = H(ids)                               # 隐含模式（自推断，无需标签）
     g_change = sigmoid(W_ch @ h)             # 改分量门控 ∈ (0,1)^d
-    a = delta + (1 - gamma - delta) * sigmoid(proj_a(h))   # 对角收缩 ∈ (δ,1-γ)
+    a_tilde = delta + (1 - gamma - delta) * sigmoid(proj_a(h))  # 全线性图对角 ∈ (δ,1-γ)
+    a = a_tilde - 1                                          # 增量对角 ∈ (δ-1,-γ) ⊂ (-1,0)
     b = proj_b(h)                            # 偏移
     def psi(Z):
         return Z + g_change * (a * Z + b + r(Z))   # 描述端 g_change→0 退化为 id
@@ -1160,8 +1158,8 @@ $$\mathbb E\int_0^1\big\|\dot z_t^{(k+1)}\big\|^2\,dt \;\le\; \mathbb E\int_0^1\
 
 BPTT 走 $L$ 步的梯度是 Neumann 级数 $I+J+J^2+\cdots$ 的**截断**，DEQ 的 $(I-J)^{-1}$ 是它的**收敛极限**（忽略转置细节，转置形式见式 25）：
 
-$$\nabla_\theta\mathcal L\Big|_{\text{BPTT},\,L} = \sum_{k=0}^{L-1} J^k\,\frac{\partial\mathcal L}{\partial Z}\frac{\partial F}{\partial\theta},\qquad
-\nabla_\theta\mathcal L\Big|_{\text{DEQ}} = (I-J)^{-1}\,\frac{\partial\mathcal L}{\partial Z}\frac{\partial F}{\partial\theta}. \tag{31}$$
+$$\nabla_\theta\mathcal L\Big|_{\text{BPTT},\,L} = \sum_{k=0}^{L-1} \frac{\partial\mathcal L}{\partial Z}\,J^k\,\frac{\partial F}{\partial\theta},\qquad
+\nabla_\theta\mathcal L\Big|_{\text{DEQ}} = \frac{\partial\mathcal L}{\partial Z}\,(I-J)^{-1}\,\frac{\partial F}{\partial\theta}. \tag{31}$$
 
 当 $\rho(J)<1$ 时后者是前者的 $L\to\infty$ 极限。对应到本框架：**有限步 CoT（$N$ 步）= Loop Transformer = 截断 Neumann 级数（有偏但可解释）；"结论 = 不动点" + DEQ = 完整逆（无偏但折叠）**。二者在 §3.7.1 的式 25 统一——式 25 的 $(I-\partial\Psi_h/\partial Z)^{-1}$ 正是把 §3.7 的 $N$ 步 rollout 求和推广到收敛极限。注意这层类比只在 $h$ 固定（$h_{\text{change}}\to0$）时严格成立，跨步演化的 $\Psi_{h^{(i)}}$ 不满足单算子 Neumann 级数。
 
@@ -1340,11 +1338,11 @@ $$h(\hat Z\mid T)=h(z_0)+\mathbb E_{z_0}\Big[\log\Big|\det\tfrac{\partial\Phi_1(
 
 $$h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{42}$$
 
-**(c) 噪声熵为什么是输出熵的上界。** 严格成立的是式 (41)；"上界"来自流在数据支撑上**收缩**这一典型情形：variance_loss（式 (33)，[L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)）把潜空间各维尺度约束在 $\sigma_j\gtrsim 1$，与 $z_0$ 的单位方差同阶，于是 $\Phi_1$ 在数据支撑上近似体积守恒、雅可比行列式 $\det J\approx 1$，$\mathbb E[\log|\det J|]\le 0$，代入式 (41) 得
+**(c) 噪声熵在收缩流下是输出熵的上界。** 严格成立的是式 (41)；"上界"来自流在数据支撑上**收缩**这一典型情形：variance_loss（式 (33)，[L403-L407](file:///home/simon-ma/JEPA/flow_matching_jepa.py#L403-L407)）把潜空间各维尺度约束在 $\sigma_j\gtrsim 1$，与 $z_0$ 的单位方差同阶，于是 $\Phi_1$ 在数据支撑上近似体积守恒、雅可比行列式 $\det J\approx 1$，$\mathbb E[\log|\det J|]\le 0$，代入式 (41) 得
 
 $$h(\hat Z\mid T)\;\le\; h(z_0)=\frac{Ld}{2}\log_2(2\pi e). \tag{43}$$
 
-这就是"噪声作为熵源"的精确含义：**采样器输出分布的熵不会超过注入噪声的熵（收缩流取等号当且仅当体积守恒）**。要覆盖后验宽度，噪声必须供给足够熵：
+这就是"噪声作为熵源"的精确含义：**在收缩流（$\mathbb E[\log|\det J|]\le0$，典型情形）下，采样器输出分布的熵不会超过注入噪声的熵（体积守恒时取等号）**。要覆盖后验宽度，噪声必须供给足够熵：
 
 $$h(z_0)\;\gtrsim\; h(Z\mid T). \tag{44}$$
 
