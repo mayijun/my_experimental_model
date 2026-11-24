@@ -1,4 +1,4 @@
-"""下载并准备「中英混合」字符级预训练语料，输出 JSONL 供 pretrain.py 使用。
+"""下载并准备「中英混合」字符级语料，输出 JSONL（每行一个 {"text": ...}）。
 
 数据来源（走 HuggingFace 镜像 hf-mirror.com，需先 export HF_ENDPOINT）：
 - 英文：Salesforce/wikitext（默认 wikitext-103-raw-v1）；
