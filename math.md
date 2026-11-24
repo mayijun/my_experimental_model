@@ -665,6 +665,12 @@ p_m(t)=\tfrac{1-p_{\text{anchor}}(t)}{K-1}. \tag{21}$$
 
 §2.1–2.5 把文字统一视为状态的有损投影 $T=g(Z)$。但同一 $\mathcal V^L$ 里还有另一类文字——它不是单纯描述状态，而是**作用于**状态（推理/变换）。现实中无法在句法层把「描述」与「推理」切开，二者常混写在同一段文字里，故不设外部二值开关，而是让网络自推断一个隐含模式状态 $h$。
 
+**动机：为什么推理要在 $Z$ 内做，而不是在 token 空间做。** 文字（及任何离散模态）是 $Z$ 的**低码率有损离散化**，而非「低维线性投影」：$g:Z\to\mathcal V^L$ 量化到有限离散点集，作为流形其维数为 $0$，但每个纤维 $\mathcal F_t=g^{-1}(t)$ 是 $Z$ 里的高维区域——瓶颈在**码率** $H(T)\le L\log_2|\mathcal V|$（式 (1)–(2)），不在维度。
+
+在 token 空间推理 = 让算子迭代的每一步都「压缩 → 还原」一次（式 (6) 的 $H(Z^{(i)}\mid T^{(i)})>0$ 每步都亏，细节见 §3.7），且单步信息吞吐被 token 码率卡死（$\le L\log_2|\mathcal V|$）：表达一个 $Ld$ 维连续状态被迫拆成远多于 $N$ 步。这正是普通 LLM 的 CoT 浪费算力的机制，其长串行深度与 §1 解码端的自回归 $O(L)$ 同源，只是瓶颈从「解码」换到「算子迭代」。
+
+三条路径按长度递增：**环境欧氏直线**（离开可解码流形 $\mathcal M$ 的折叠捷径，最短但不可解释）< **$\mathcal M$ 上的测地线 / 收缩流**（$Z$ 内连续迭代，保持可解释的最短路径）< **token 阶梯**（每步量化重投影，最长）。本节与 §3.7 要落到的正是中间那条：推理 = $Z$ 上的算子复合 $\Psi^{(N)}(Z)$。注意「短」来自**去量化瓶颈 + 算子收缩结构**，而非「高维」本身——单纯加维有维度灾难，并不必然更好找路径。
+
 **数学区分。** 令隐含模式空间 $\mathcal H$（连续状态流形）、主干 $H:\mathcal V^L\to\mathcal H$、状态依赖变换 $\Psi:Z\times\mathcal H\to Z$，其中 $h=H(x_{\le t})$ 由网络从输入自推断，同时承载「描述/推理倾向」与「变换内容」：
 
 - 描述 $T_d = g(Z)$：状态的有损投影（命题 1–4），读状态——$h$ 落在「读状态」端，$\Psi_h\approx\mathrm{id}$；
@@ -826,11 +832,11 @@ $$J \;=\; D\Psi_h(Z^*) \;=\; I + \nabla v_h(Z^*),$$
 
 其中 $I$ 是 $T_{Z^*}\mathcal M$ 上的恒等，$\nabla v_h$ 是速度场的协变导数（因 $v_h(Z^*)=0$，Christoffel 项消失，$\nabla v_h=D v_h$）。于是 $I-J=-\nabla v_h(Z^*)$，式 25 的隐式微分重述为
 
-$$\nabla_\theta\ell \;=\; -\left(D_\theta\Psi_h(Z^*)\right)^{\dagger}\left(\nabla v_h(Z^*)\right)^{-1}\nabla_{Z^*}^g\ell,$$
+$$\nabla_\theta\ell \;=\; -\big(D_\theta\Psi_h(Z^*)\big)^{\dagger}\;\big((\nabla v_h(Z^*))^{\dagger}\big)^{-1}\;\nabla_{Z^*}^g\ell,$$
 
-其中 $\nabla_{Z^*}^g\ell=g(Z^*)^{-1}\frac{\partial\ell}{\partial Z}\big|_{Z^*}$ 是**黎曼梯度**（用解码器拉回度量 $g=J_D^\top J_D$ 把环境梯度提升到切空间），$\dagger$ 是**度量伴随** $A^\dagger=g^{-1}A^\top g$（而非欧氏转置）。收缩条件 $\rho(J)<1$ 要求 $\nabla v_h(Z^*)$ 的特征值落在 $(-2,0)$：负定（收缩）且大于 $-2$（不过冲、不振荡）。
+其中 $\nabla_{Z^*}^g\ell=g(Z^*)^{-1}\frac{\partial\ell}{\partial Z}\big|_{Z^*}$ 是**黎曼梯度**（用解码器拉回度量 $g=J_D^\top J_D$ 把环境梯度提升到切空间），$\dagger$ 是**度量伴随**（对自同态 $T\to T$：$A^\dagger=g^{-1}A^\top g$；对 $D_\theta\Psi_h:\mathbb R^p\to T$：$B^\dagger=B^\top g$；均非欧氏转置）。收缩条件 $\rho(J)<1$ 要求 $\nabla v_h(Z^*)$ 的特征值落在 $(-2,0)$：负定（收缩）且大于 $-2$（不过冲、不振荡）。
 
-**含义**：测地整流下，隐式微分的关键量从"算子雅可比的逆 $(I-J)^{-1}$"变成"速度场协变导数的逆 $(\nabla v_h)^{-1}$"——后者正是 flow matching 所学的 $v_\theta$ 在不动点处的切线性化。这把 Loop Transformer 的算子不动点与 §4.1.5 的整流流统一到同一对象：$v_\theta$ 的稳定零点。欧氏情形是 $\mathcal M$ 平坦（$g=I$、$\nabla=\partial$、$\dagger=\top$）时的退化，式 25 是其特例。⚠️ 待严格化：$(\nabla v_h)^{-1}$ 与 $\dagger$ 的精确次序（$(\nabla v_h)^{-1}$ 是否应作 $(\nabla v_h)^{-\top}$）需按平坦退化逐项核对；本节仅给出方向，不锁死转置细节。
+**含义**：测地整流下，隐式微分的关键量从"算子雅可比的逆 $(I-J)^{-1}$"变成"速度场协变导数的伴随逆 $\big((\nabla v_h)^{\dagger}\big)^{-1}$"——后者正是 flow matching 所学的 $v_\theta$ 在不动点处的切线性化。这把 Loop Transformer 的算子不动点与 §4.1.5 的整流流统一到同一对象：$v_\theta$ 的稳定零点。欧氏情形是 $\mathcal M$ 平坦（$g=I$、$\nabla=\partial$、$\dagger=\top$）时的退化，式 25 是其特例。⚠️ 关键：$(\nabla v_h)^{-1}$ 必须取**度量伴随**后再作逆，不可省略 $\dagger$。仅当 $v_h$ 是（局部）梯度场（$dv_h^\flat=0$，即 $\nabla v_h$ 自伴）时 $(\nabla v_h)^{\dagger}=\nabla v_h$，二者才相等；一般测地速度场非梯度，伴随不可省。欧氏退化时上式退化为式 25 的 $(\partial_\theta\Psi_h)^\top(I-J)^{-\top}\nabla_Z\ell$。
 
 **可借用的三点结论。**
 
