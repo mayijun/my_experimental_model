@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .psco import associative_scan
+from .psco import associative_scan, associative_scan_mat
 
 
 class TransformerBlock(nn.Module):
@@ -129,8 +129,12 @@ class LinearMemory(nn.Module):
     冗余度 ρ_t = ‖v_t − M_{t-1} k_t‖²（写入前用旧记忆 M_{t-1} 预测 v_t）。
     ρ≈0 表示该 token 已被记忆吸收、可丢；ρ 大表示不可预测、必须留。
 
-    冒烟阶段用 O(L) 顺序循环（tiny 档 L=16 完全够）；§2.6 第 671 行的并行扫描
-    （O(log L) 深度，复用 psco.associative_scan）留待中型档再落地。
+    D（head_dim）是冻结的单头记忆宽度，不随主干 hidden_dim 缩放（§2.6 GPU 并行）；
+    大型模型扩展靠加 head（多份独立 M），而非放大 D——放大 D 是 O(D²) 显存平方增长。
+
+    更新用矩阵仿射并行扫描（O(log L) 深度，精度优先路径）：M_t = M_{t-1} A_t + B_t，
+    复用 psco.associative_scan_mat。显存 O(B·L·D²)，D=64 冻结下可接受；
+    显存优先路径（DeltaNet chunked / WY 低秩，O(B·L·D)）仅记录不实现，D 需放大时再启用。
     """
 
     def __init__(self, dim, head_dim=64, beta=0.1):
@@ -144,15 +148,22 @@ class LinearMemory(nn.Module):
         k = F.normalize(self.k_proj(x), dim=-1)  # 归一化 k，保证 β‖k‖² 落稳定区间（β<2 收敛）
         v = self.v_proj(x)
         B, L, D = k.shape
-        M = x.new_zeros(B, D, D)           # 记忆矩阵 [B, D, D]
-        rho = x.new_zeros(B, L)
-        for t in range(L):
-            kt = k[:, t]                   # [B, D]
-            vt = v[:, t]
-            yt = torch.einsum("bij,bj->bi", M, kt)   # 旧记忆读取 [B, D]
-            rho[:, t] = (vt - yt).pow(2).sum(-1)
-            delta = (vt - yt).unsqueeze(-1) * kt.unsqueeze(1)  # [B, D, D] 外积
-            M = M + self.beta * delta
+
+        # delta rule 矩阵仿射：M_t = M_{t-1} A_t + B_t，
+        #   A_t = I − β k_t k_tᵀ（对称满秩、对所有行共享），B_t = β v_t k_tᵀ（秩 1）。
+        kk = k.unsqueeze(-1) @ k.unsqueeze(-2)                      # [B, L, D, D]
+        A = torch.eye(D, device=x.device, dtype=x.dtype) - self.beta * kk
+        Bm = self.beta * v.unsqueeze(-1) @ k.unsqueeze(-2)          # [B, L, D, D]
+
+        # 矩阵仿射并行扫描（O(log L) 深度）：M_prefix[t] = M_{t+1}（含第 t+1 步写入）。
+        A_seq = A.transpose(0, 1).contiguous()                      # [L, B, D, D]
+        B_seq = Bm.transpose(0, 1).contiguous()
+        _, M_prefix, _ = associative_scan_mat(A_seq, B_seq)
+
+        # ρ_t = ‖v_t − M_{t-1} k_t‖²，M_{t-1} = M_prefix 左移一位（首位补零 = M_0 = 0）。
+        M_prev = torch.cat([torch.zeros_like(M_prefix[:1]), M_prefix[:-1]], dim=0)
+        y = torch.einsum("lbij,lbj->lbi", M_prev, k.transpose(0, 1))  # M_{t-1} k_t, [L, B, D]
+        rho = (v.transpose(0, 1) - y).pow(2).sum(-1).transpose(0, 1)  # [B, L]
         return rho
 
 

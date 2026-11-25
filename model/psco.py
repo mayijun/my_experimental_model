@@ -74,6 +74,35 @@ def associative_scan(a: torch.Tensor, b: torch.Tensor):
     return a, b, depth
 
 
+def associative_scan_mat(a: torch.Tensor, b: torch.Tensor):
+    """矩阵仿射幺半群的 Hillis-Steele inclusive 前缀扫描，串行深度 O(log N)。
+
+    a, b: [N, B, D, D]——状态 z_t = A_t z_{t-1} + B_t 的系数（z、B 为 [B,D,D] 矩阵）。
+    幺半群组合（右乘，对应 M_t = M_{t-1} A_t + B_t）：(A_u,B_u)∘(A_v,B_v) = (A_u A_v, B_u A_v + B_v)，u 较早、v 较晚。
+    返回 (a_prefix, b_prefix, depth)：a_prefix[t] = Π_{s≤t} A_s，
+    b_prefix[t] = Σ_{s≤t}(Π_{u=s+1}^t A_u) B_s。
+
+    供 LinearMemory 的 delta rule（M_t = M_{t-1} A_t + B_t，A_t = I − β k_t k_tᵀ）并行化：
+    精度优先路径，直接矩阵连乘、无求逆；显存 O(B·N·D²)（D=64 冻结下可接受）。
+    """
+    a = a.clone()
+    b = b.clone()
+    N = a.shape[0]
+    offset = 1
+    depth = 0
+    while offset < N:
+        av, bv = a[offset:], b[offset:]              # 较晚（v）
+        au, bu = a[: N - offset], b[: N - offset]    # 较早（u）
+        a_new = a.clone()
+        b_new = b.clone()
+        a_new[offset:] = torch.einsum("nbij,nbjk->nbik", au, av)      # A_u A_v（右乘）
+        b_new[offset:] = torch.einsum("nbij,nbjk->nbik", bu, av) + bv  # B_u A_v + B_v
+        a, b = a_new, b_new
+        offset *= 2
+        depth += 1
+    return a, b, depth
+
+
 def sequential(a: torch.Tensor, b: torch.Tensor, Z0: torch.Tensor, N: int) -> torch.Tensor:
     """顺序迭代 N 步（地面真值），返回 [N, B, d] 的轨迹 Z^(1..N)。"""
     Zs = []
