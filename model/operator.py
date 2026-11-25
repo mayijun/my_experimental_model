@@ -51,7 +51,10 @@ class PsiLayer(nn.Module):
         self.proj_a = nn.Linear(dim, dim)          # 收缩系数（谱夹层内）
         self.proj_b = nn.Linear(dim, dim)          # 偏移
         self.proj_gate = nn.Linear(dim, dim)       # 门控 g_change ∈ (0,1)
-        # 非线性残差 r_h（瞬态段专用；"none" = 纯线性骨架，与 psco.py 现状一致）
+        # 非线性残差 r_h（瞬态段专用）。决策记录（后续改进）：
+        #   - 先用恒等（"none"，纯线性骨架）：不动点闭式 Z*=b/(1-a)，全程 O(log N) 扫描，
+        #     防塌缩由谱夹层+读出头+方差三道防线保证，与残差表达力无关，先验证机制；
+        #   - 再上 MLP：增益在跨维耦合，但只在瞬态段生效、把不动点变隐式，需路径 B（DEQ 式 25/26）。
         self.residual_mlp = None
         if residual == "mlp":
             self.residual_mlp = nn.Sequential(

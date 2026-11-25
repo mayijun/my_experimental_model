@@ -74,7 +74,7 @@ class MJEPAConfig:
     pac_z_lr_scale: float = 0.1      # S2 起 Z/共享层 lr 缩放
 
     # —— PSCO 状态依赖收缩算子（§3.7.3）：Z 空间自映射 Ψ_h，谱夹层防塌缩 ——
-    psi_enabled: bool = False        # 启用 PsiLayer（冒烟档默认关，先验证再开）
+    psi_enabled: bool = True         # 启用 PsiLayer（§3.7.3 算子层，防塌缩第三层，已接入默认训练）
     psi_transient_steps: int = 2     # 瞬态段串行步数 m（含门控 + 残差）
     psi_scan_steps: int = 16         # 渐近段并行扫描步数 N
     psi_delta: float = 0.05          # 谱夹层下界 δ
@@ -82,6 +82,15 @@ class MJEPAConfig:
     psi_residual: str = "none"       # 非线性残差 r_h：none（线性骨架）/ mlp
     psi_readout_weight: float = 0.1  # 读出头锚定损失权重（防线 2）
     psi_var_weight: float = 0.1      # 方差正则权重（防线 3）
+    psi_stop_weight: float = 0.1     # §3.7 L_stop 不动点/停止正则：Ψ_h(Z_clean)≈Z_clean（读端退化为恒等）
+    psi_consist_weight: float = 0.1  # §3.7 L_consist 路径无关一致性：Ψ_h(Z_ctx)≈Z_tgt（改端变换到目标）
+
+    # —— Flow Matching（§4.1）：潜空间速度场 v_ψ，欧氏 OT 直线基线（测地整流/RFM 后续阶段）——
+    flow_enabled: bool = True        # 启用速度场（§4.1.2 无条件生成，z_0=噪声 → z_1=冻结目标 Z）
+    flow_depth: int = 2              # v_ψ 主干层数（位置混合）
+    flow_heads: int = 4              # v_ψ 注意力头数（需整除 d）
+    flow_steps: int = 8              # Euler 采样步数（§4.1.4）
+    flow_weight: float = 0.1         # 流匹配损失权重（§4.1.2）
 
     @property
     def vision_patch(self) -> int:

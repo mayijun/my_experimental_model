@@ -9,6 +9,7 @@ from .encoder import ImageEncoder, TextEncoder
 from .alignment import build_alignment_head
 from .representation import CrossMaskPredictor, LatentPredictor
 from .operator import PsiLayer
+from .flow import VelocityField
 
 
 def _decoder_heads(dim, head_dim=64):
@@ -99,4 +100,10 @@ class MultimodalJEPA(nn.Module):
             PsiLayer(cfg.dim, cfg.psi_transient_steps, cfg.psi_scan_steps,
                      cfg.psi_delta, cfg.psi_gamma, cfg.psi_residual)
             if cfg.psi_enabled else None
+        )
+
+        # —— Flow Matching 速度场（§4.1）：潜空间 v_ψ，欧氏 OT 直线基线 ——
+        self.velocity = (
+            VelocityField(cfg.dim, cfg.flow_depth, cfg.flow_heads, cfg.mlp_ratio)
+            if cfg.flow_enabled else None
         )

@@ -9,6 +9,7 @@ from .config import MJEPAConfig, PRESETS, build_config
 from .decoder import ImageDecoder, TextDecoder
 from .encoder import ImageEncoder, TextEncoder, TransformerBlock, TransformerEncoder
 from .jepa import MultimodalJEPA
+from .flow import VelocityField
 from .representation import LatentPredictor, update_target
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "ImageDecoder",
     "TextDecoder",
     "MultimodalJEPA",
+    "VelocityField",
 ]

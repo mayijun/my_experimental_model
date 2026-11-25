@@ -5,6 +5,8 @@ from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
 
+from model.flow import flow_loss
+
 
 def mask_patches(batch, n_patches, ratio, device):
     """随机遮住一部分 patch，返回 [B,N] 的 bool 掩码。"""
@@ -94,11 +96,15 @@ def cross_mask_ratio(step, total_steps, start, end):
     return min(end, start + (end - start) * t)
 
 
-def psi_losses(model, img_z, txt_z):
-    """PSCO 算子（§3.7.3）反塌缩损失：读出头锚定（防线 2）+ 方差正则（防线 3）。
+def psi_losses(model, img_z, txt_z, img_ctx, txt_ctx, img_tgt, txt_tgt):
+    """PSCO 算子（§3.7.3 + §3.7）损失：防塌缩三道 + 推理两目标。
 
-    Ψ_h 把 Z 映射到不动点 Z*；读出头要求 Z* 能重建输入 Z（塌成常数则重建不了），
-    方差正则要求 Z* 每维标准差 ≥ 1（防维度塌缩）。返回 (readout, var)。
+    - readout（防线 2）：读出头锚定 Z* 重建输入 Z（塌成常数则重建不了）；
+    - var（防线 3）：方差正则，防维度塌缩；
+    - stop（§3.7 L_stop）：不动点/停止正则，Ψ_h(Z_clean)≈Z_clean，读端 g_change→0 退化为恒等；
+    - consist（§3.7 L_consist）：路径无关一致性，Ψ_h(Z_ctx)≈Z_tgt，改端把上下文变换到目标。
+
+    返回 (readout, var, stop, consist)。
     """
     img_star = model.psi_layer(img_z)
     txt_star = model.psi_layer(txt_z)
@@ -107,7 +113,13 @@ def psi_losses(model, img_z, txt_z):
         + (model.psi_layer.readout(txt_star) - txt_z).pow(2).mean()
     )
     var = variance_loss(img_star) + variance_loss(txt_star)
-    return readout, var
+    # §3.7 L_stop：干净 Z 已是不动点（读端恒等，改分量 g_change→0）
+    stop = (img_star - img_z).pow(2).mean() + (txt_star - txt_z).pow(2).mean()
+    # §3.7 L_consist：算子把掩码上下文变换到干净目标（改端，改分量 g_change→1）
+    img_ctx_star = model.psi_layer(img_ctx)
+    txt_ctx_star = model.psi_layer(txt_ctx)
+    consist = (img_ctx_star - img_tgt).pow(2).mean() + (txt_ctx_star - txt_tgt).pow(2).mean()
+    return readout, var, stop, consist
 
 
 def maybe_autocast(device):
@@ -183,11 +195,20 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         cm_pred_img, cm_pred_txt = model.cross_mask_predictor(cm_img_ctx, cm_txt_ctx)
         cross_pred = cosine_loss(cm_pred_img, img_tgt) + cosine_loss(cm_pred_txt, txt_tgt)
 
-    # —— PSCO 算子（§3.7.3）：读出头锚定 + 方差正则，防算子不动点塌缩 ——
+    # —— PSCO 算子（§3.7.3 + §3.7）：防塌缩三道 + 推理两目标（L_stop / L_consist）——
     psi_readout = torch.zeros((), device=device)
     psi_var = torch.zeros((), device=device)
+    psi_stop = torch.zeros((), device=device)
+    psi_consist = torch.zeros((), device=device)
     if cfg.psi_enabled and model.psi_layer is not None:
-        psi_readout, psi_var = psi_losses(model, img_tokens, txt_tokens)
+        psi_readout, psi_var, psi_stop, psi_consist = psi_losses(
+            model, img_tokens, txt_tokens, img_ctx, txt_ctx, img_tgt, txt_tgt
+        )
+
+    # —— Flow Matching（§4.1.2）：无条件欧氏 OT 直线，z_0=噪声，z_1=冻结目标 Z ——
+    flow = torch.zeros((), device=device)
+    if cfg.flow_enabled and model.velocity is not None:
+        flow = flow_loss(model.velocity, img_tgt) + flow_loss(model.velocity, txt_tgt)
 
     total = (
         cfg.jepa_weight * jepa
@@ -199,11 +220,16 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.cross_mask_weight * cross_pred
         + cfg.psi_readout_weight * psi_readout
         + cfg.psi_var_weight * psi_var
+        + cfg.psi_stop_weight * psi_stop
+        + cfg.psi_consist_weight * psi_consist
+        + cfg.flow_weight * flow
     )
     parts = {
         "jepa": jepa, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
         "align": align, "var": var, "rate": rate, "cross_pred": cross_pred,
         "psi_readout": psi_readout, "psi_var": psi_var,
+        "psi_stop": psi_stop, "psi_consist": psi_consist,
+        "flow": flow,
     }
     return total, parts
