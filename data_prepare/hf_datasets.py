@@ -60,16 +60,28 @@ class LLaDATokenizer:
         return self.tok.decode(keep, skip_special_tokens=skip_special_tokens)
 
 
-def encode_text(tokenizer, text, length, pad_id):
+def _raw_ids(tokenizer, text):
+    """返回文本的原始 token id 序列（不截断、不 pad）。
+
+    兼容三类：LLaDATokenizer（内部 .tok）、CharTokenizer（stoi 逐字符）、原生 HF tokenizer。
+    """
+    if hasattr(tokenizer, "tok"):                 # LLaDATokenizer
+        return tokenizer.tok.encode(text, add_special_tokens=False)
+    if hasattr(tokenizer, "pad_id"):              # CharTokenizer（real 路径通常不会用到）
+        return [tokenizer.stoi[c] for c in text if c in tokenizer.stoi]
+    return tokenizer.encode(text, add_special_tokens=False)  # 原生 HF tokenizer
+
+
+def encode_text(tokenizer, text, length, pad_id, max_tokens=None):
     """把一段文本 tokenize 成固定 length 的 id 序列（截断 + pad）。
 
-    兼容两类接口：CharTokenizer / LLaDATokenizer（`encode(text, length)` 已含截断与 pad），
-    以及 HF tokenizer（`encode(text, add_special_tokens=False)` 需手动 pad）。
+    max_tokens 非 None 时按「原始 token 数」过滤：超过则返回 None（由调用方剔除该样本），
+    避免超长 caption 被截断后图文语义错位。默认 None 即不做过滤（仅截断）。
     """
-    if hasattr(tokenizer, "pad_id") and hasattr(tokenizer, "mask_id"):
-        return tokenizer.encode(text, length)
-    ids = tokenizer.encode(text, add_special_tokens=False)[:length]
-    return ids + [pad_id] * (length - len(ids))
+    ids = _raw_ids(tokenizer, text)
+    if max_tokens is not None and len(ids) > max_tokens:
+        return None
+    return ids[:length] + [pad_id] * (length - len(ids))
 
 
 def image_transform(pil_img, size, train=True):
@@ -91,7 +103,7 @@ def _first_text(text):
 
 
 def real_batch_iterator(args, tokenizer, pad_id, text_len, image_size,
-                        shuffle_buffer=10000, seed=42):
+                        shuffle_buffer=10000, seed=42, max_text_tokens=None):
     """返回无限重复的 (image_tensor, text_ids) 生成器，来源是 HF datasets 流式。
 
     支持两类来源：
@@ -100,6 +112,7 @@ def real_batch_iterator(args, tokenizer, pad_id, text_len, image_size,
 
     shuffle_buffer>0 时对流做 buffer shuffle（HF `shuffle`），打乱连续同类样本，
     避免 VICReg 方差 / InfoNCE / BYOL 的 batch 统计偏差；buffer 越大越接近全局随机，越耗内存。
+    max_text_tokens>0 时剔除原始 token 数超阈值的样本（默认按 text_len 过滤超长 caption）。
     """
     from datasets import load_dataset
 
@@ -119,7 +132,10 @@ def real_batch_iterator(args, tokenizer, pad_id, text_len, image_size,
                 text = _first_text(ex.get(args.text_key))
                 if img is None or not text:
                     continue
-                yield image_transform(img, image_size), encode_text(tokenizer, text, text_len, pad_id)
+                ids = encode_text(tokenizer, text, text_len, pad_id, max_tokens=max_text_tokens)
+                if ids is None:          # 超长 caption：剔除，避免截断破坏图文对齐。
+                    continue
+                yield image_transform(img, image_size), ids
 
     return gen()
 
@@ -140,7 +156,8 @@ def real_batch_fn(gen, batch_size, device):
     return fn
 
 
-def _make_stream(ds, image_key, text_key, tokenizer, pad_id, text_len, image_size):
+def _make_stream(ds, image_key, text_key, tokenizer, pad_id, text_len, image_size,
+                 max_text_tokens=None):
     """单个数据集的无限流式生成器：顺序遍历完一轮后自动重头再来。"""
     def gen():
         while True:
@@ -149,19 +166,23 @@ def _make_stream(ds, image_key, text_key, tokenizer, pad_id, text_len, image_siz
                 text = _first_text(ex.get(text_key))
                 if img is None or not text:
                     continue
-                yield image_transform(img, image_size), encode_text(tokenizer, text, text_len, pad_id)
+                ids = encode_text(tokenizer, text, text_len, pad_id, max_tokens=max_text_tokens)
+                if ids is None:          # 超长 caption：剔除。
+                    continue
+                yield image_transform(img, image_size), ids
 
     return gen()
 
 
 def mixture_iterator(specs, tokenizer, pad_id, text_len, image_size, seed=42,
-                     shuffle_buffer=10000):
+                     shuffle_buffer=10000, max_text_tokens=None):
     """多个数据集的加权混合流：每步按 weight 抽样选数据集，再从该数据集取一个样本，无限循环。
 
     等价于「有放回地按比例混合多个无限数据集」，而非顺序遍历各数据集。每个数据集各自维护
     一个独立流式迭代器，权重决定其被采样的期望比例；同一数据集内部经 buffer shuffle 打乱
     （shuffle_buffer>0 时），跨数据集是随机的——两层随机共同保证 batch 内模态/领域多样性，
     避免对比损失（VICReg/InfoNCE/BYOL）的 batch 统计偏差。
+    max_text_tokens>0 时剔除原始 token 数超阈值的样本（默认按 text_len 过滤超长 caption）。
     """
     from datasets import load_dataset
 
@@ -175,7 +196,7 @@ def mixture_iterator(specs, tokenizer, pad_id, text_len, image_size, seed=42,
             ds = ds.shuffle(seed=seed, buffer_size=shuffle_buffer)
         streams.append(_make_stream(
             ds, spec.get("image_key", "image"), spec.get("text_key", "text"),
-            tokenizer, pad_id, text_len, image_size,
+            tokenizer, pad_id, text_len, image_size, max_text_tokens=max_text_tokens,
         ))
         weights.append(float(spec.get("weight", 1.0)))
 

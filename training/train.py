@@ -284,6 +284,7 @@ def main():
     parser.add_argument("--data-dir", type=str, default="")  # 本地 imagefolder，优先于 dataset-name。
     parser.add_argument("--data-config", type=str, default="")  # 中档 manifest（data_prepare.medium 生成）：多数据集加权混合 + 独立 eval 集。
     parser.add_argument("--shuffle-buffer", type=int, default=10000)  # 流式 buffer shuffle 大小（0=关闭；越大越接近全局随机，越耗内存）。
+    parser.add_argument("--max-text-tokens", type=int, default=None)  # caption 原始 token 数上限：默认 None=按 text_len 过滤；0/负=关闭过滤；正数=显式阈值。
     parser.add_argument("--hf-endpoint", type=str, default="https://hf-mirror.com")
     args = parser.parse_args()
 
@@ -378,6 +379,13 @@ def main():
         tokenizer = None  # 由 build_dataset 内部构造 CharTokenizer
 
     # —— 数据装配 ——
+    # caption 长度过滤（默认打开）：超 text_len 的样本剔除，避免截断破坏图文对齐。
+    max_text_tokens = args.max_text_tokens
+    if max_text_tokens is None:
+        max_text_tokens = cfg.text_len
+    elif max_text_tokens <= 0:
+        max_text_tokens = None  # 0/负 = 关闭过滤
+
     eval_gen = None
     if args.data == "real":
         tok_name = args.llada_model if args.tokenizer == "llada" else args.tokenizer_name
@@ -388,16 +396,19 @@ def main():
             gen = mixture_iterator(
                 train_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
                 seed=args.seed + rank, shuffle_buffer=args.shuffle_buffer,
+                max_text_tokens=max_text_tokens,
             )
             eval_gen = mixture_iterator(
                 eval_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
                 seed=args.seed + rank, shuffle_buffer=args.shuffle_buffer,
+                max_text_tokens=max_text_tokens,
             )
             source = f"{len(train_specs)} 个数据集（manifest）"
         else:
             gen = real_batch_iterator(
                 args, tokenizer, pad_id, cfg.text_len, cfg.image_size,
                 shuffle_buffer=args.shuffle_buffer, seed=args.seed + rank,
+                max_text_tokens=max_text_tokens,
             )
             eval_gen = gen
             source = args.data_dir or args.dataset_name
