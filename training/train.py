@@ -130,7 +130,26 @@ def build_optimizer(params, lr, optim):
     return torch.optim.AdamW(params, lr=lr)
 
 
-def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", rank=0):
+def make_writer(logdir, rank=0):
+    """rank0 且 logdir 非空时创建 TensorBoard SummaryWriter；未安装 tensorboard 时返回 None。
+
+    训练默认开启事件记录（`--logdir` 指定目录，空字符串关闭）；AutoDL 默认写入
+    `/root/tf-logs`，AutoPanel 内置的 TensorBoard 会直接读取该目录。
+    """
+    if rank != 0 or not logdir:
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError:
+        print("[warn] 未安装 tensorboard，跳过事件记录。装：uv sync --extra train")
+        return None
+    writer = SummaryWriter(log_dir=logdir)
+    print(f"TensorBoard: {logdir}（tensorboard --logdir {logdir}）")
+    return writer
+
+
+def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", rank=0,
+          writer=None):
     """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。"""
     model.train()
     raw = _unwrap(model)
@@ -148,6 +167,16 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
         apply_pac_schedule(optimizer, step, steps, cfg)
         update_target(raw, cfg.ema_decay)
 
+        if writer is not None:
+            writer.add_scalar("train/loss", loss.item(), step)
+            for k, v in parts.items():
+                writer.add_scalar(f"train/{k}", v.item(), step)
+            cur_lr = optimizer.param_groups[0].get("lr")
+            if cur_lr is not None:
+                writer.add_scalar("train/lr", cur_lr, step)
+            if cfg.pac_enabled:
+                writer.add_scalar("train/p_anchor", pac_anchor_prob(step, steps, cfg), step)
+
         if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
             detail = " ".join(f"{k}={v.item():.3f}" for k, v in parts.items())
             extra = f" | p_anchor={pac_anchor_prob(step, steps, cfg):.3f}" if cfg.pac_enabled else ""
@@ -155,7 +184,7 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
     return model
 
 
-def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0):
+def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, writer=None):
     """Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ 与解码器，只训速度场 v_ψ，不 update_target。
 
     p_1（冻结目标 latent 分布）静止是 Flow Matching 运输映射 well-posed 的前提；
@@ -178,29 +207,43 @@ def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        if writer is not None:
+            writer.add_scalar("flow/loss", loss.item(), step)
+            for k, v in parts.items():
+                writer.add_scalar(f"flow/{k}", v.item(), step)
         if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
             print(f"flow-stage {step:4d} | flow {parts['flow'].item():.4f} "
                   f"| flow_cond {parts['flow_cond'].item():.4f}")
     return model
 
 
-def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None):
+def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None, save_dtype="fp32"):
     """落盘模型权重与重建模型/词表所需的最小元信息（供 inference 加载）。
 
     tokenizer_meta：字符级为 {"type": "char", "itos": [...]}，
     LLaDA 为 {"type": "llada", "model": "GSAI-ML/LLaDA-8B-Instruct"}。
+    save_dtype="bf16" 时权重转 bf16 再落盘（3b 档约 13.7GB，fp32 约 27.4GB）；
+    inference 的 load_state_dict 会自动把 bf16 拷贝回 fp32 参数。
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    state = model.state_dict()
+    if save_dtype == "bf16":
+        # 逐张量转到 CPU 再降精度，避免在 GPU 上额外驻留一份 13.7GB 权重。
+        state = {
+            k: (v.detach().to("cpu", torch.bfloat16) if torch.is_floating_point(v)
+                else v.detach().cpu())
+            for k, v in state.items()
+        }
     torch.save(
         {
-            "model": model.state_dict(),
+            "model": state,
             "cfg": dataclasses.asdict(cfg),
             "vocab_size": vocab_size,
             "tokenizer_meta": tokenizer_meta,
         },
         path,
     )
-    print(f"checkpoint 已保存: {path}")
+    print(f"checkpoint 已保存: {path}（dtype={save_dtype}）")
 
 
 def main():
@@ -270,6 +313,9 @@ def main():
     parser.add_argument("--eval-samples", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save", type=str, default="")  # 例如 runs/mjepa.pt
+    parser.add_argument("--save-dtype", choices=["fp32", "bf16"], default="fp32")  # 落盘精度（bf16 省一半磁盘）
+    # TensorBoard：默认开启，事件写入 --logdir（空字符串关闭）；AutoDL 用 /root/tf-logs
+    parser.add_argument("--logdir", type=str, default="runs/tensorboard")
     # 数据源：synthetic（内置合成图文对，离线） / real（HF datasets 真实图文对）
     parser.add_argument("--data", choices=["synthetic", "real"], default="synthetic")
     # 文本 tokenizer：llada（现成词表，内置 mask id，见 math.md §2.2.7） / char（字符级，离线冒烟）
@@ -284,7 +330,6 @@ def main():
     parser.add_argument("--data-dir", type=str, default="")  # 本地 imagefolder，优先于 dataset-name。
     parser.add_argument("--data-config", type=str, default="")  # 中档 manifest（data_prepare.medium 生成）：多数据集加权混合 + 独立 eval 集。
     parser.add_argument("--shuffle-buffer", type=int, default=10000)  # 流式 buffer shuffle 大小（0=关闭；越大越接近全局随机，越耗内存）。
-    parser.add_argument("--max-text-tokens", type=int, default=None)  # caption 原始 token 数上限：默认 None=按 text_len 过滤；0/负=关闭过滤；正数=显式阈值。
     parser.add_argument("--hf-endpoint", type=str, default="https://hf-mirror.com")
     args = parser.parse_args()
 
@@ -379,13 +424,6 @@ def main():
         tokenizer = None  # 由 build_dataset 内部构造 CharTokenizer
 
     # —— 数据装配 ——
-    # caption 长度过滤（默认打开）：超 text_len 的样本剔除，避免截断破坏图文对齐。
-    max_text_tokens = args.max_text_tokens
-    if max_text_tokens is None:
-        max_text_tokens = cfg.text_len
-    elif max_text_tokens <= 0:
-        max_text_tokens = None  # 0/负 = 关闭过滤
-
     eval_gen = None
     if args.data == "real":
         tok_name = args.llada_model if args.tokenizer == "llada" else args.tokenizer_name
@@ -396,19 +434,16 @@ def main():
             gen = mixture_iterator(
                 train_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
                 seed=args.seed + rank, shuffle_buffer=args.shuffle_buffer,
-                max_text_tokens=max_text_tokens,
             )
             eval_gen = mixture_iterator(
                 eval_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
                 seed=args.seed + rank, shuffle_buffer=args.shuffle_buffer,
-                max_text_tokens=max_text_tokens,
             )
             source = f"{len(train_specs)} 个数据集（manifest）"
         else:
             gen = real_batch_iterator(
                 args, tokenizer, pad_id, cfg.text_len, cfg.image_size,
                 shuffle_buffer=args.shuffle_buffer, seed=args.seed + rank,
-                max_text_tokens=max_text_tokens,
             )
             eval_gen = gen
             source = args.data_dir or args.dataset_name
@@ -437,22 +472,34 @@ def main():
     if rank == 0:
         print(f"参数: {total/1e6:.2f}M 总 | {trainable/1e6:.2f}M 可训练 | vocab={vocab_size}")
 
-    train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr, optim=args.optim, rank=rank)
+    writer = make_writer(args.logdir, rank)
+    train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr, optim=args.optim,
+          rank=rank, writer=writer)
 
     if args.flow_stage_steps > 0:
         if rank == 0:
             print(f"\n=== Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ，只训 v_ψ，{args.flow_stage_steps} 步 ===")
-        train_flow_stage(model, batch_fn, device, args.flow_stage_steps, args.lr, optim=args.optim, rank=rank)
+        train_flow_stage(model, batch_fn, device, args.flow_stage_steps, args.lr, optim=args.optim,
+                         rank=rank, writer=writer)
 
     if rank == 0 and args.save:
         # DDP 下 state_dict 键带 "module." 前缀，落盘前解包回裸模型，供 inference 直接加载。
-        save_checkpoint(args.save, _unwrap(model), cfg, vocab_size, tokenizer_meta=tokenizer_meta)
+        save_checkpoint(args.save, _unwrap(model), cfg, vocab_size,
+                        tokenizer_meta=tokenizer_meta, save_dtype=args.save_dtype)
 
     if rank == 0:
         if args.data == "real":
-            evaluate_real(_unwrap(model), eval_gen, tokenizer, pad_id, device, args.eval_samples)
+            i2t, t2i = evaluate_real(_unwrap(model), eval_gen, tokenizer, pad_id, device,
+                                     args.eval_samples)
         else:
-            evaluate(_unwrap(model), images, caption_ids, captions, tokenizer, device, args.eval_samples)
+            i2t, t2i = evaluate(_unwrap(model), images, caption_ids, captions, tokenizer, device,
+                                args.eval_samples)
+        if writer is not None:
+            writer.add_scalar("eval/i2t_top1", i2t, args.steps)
+            writer.add_scalar("eval/t2i_top1", t2i, args.steps)
+
+    if writer is not None:
+        writer.close()
 
     if world_size > 1:
         dist.destroy_process_group()

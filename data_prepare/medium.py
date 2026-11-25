@@ -24,38 +24,42 @@ from model.config import PRESETS, build_config
 
 # 中档默认图文对清单。字段名（image_key / text_key）以各数据集实际 schema 为准；
 # 训练前可用 `datasets.load_dataset(name, split="train").features` 核对。caption 为 list 的
-# 数据集由 hf_datasets._first_text 自动取首条。
+# 数据集（flickr30k / coco）由 hf_datasets._first_text 自动取首条。
 #
-# 选型原则：只选「图片内嵌」的数据集——parquet 里直接存图片 bytes（Image(decode=True)），
-# 由 HF 自己托管，不存在第三方 URL 失效问题，URL 存活率等价 100%，开箱即用。
-# 实测（2026-11）：mlfoundations/datacomp_medium 是 url+text（需按 URL 另下载，存活率低）；
-# COYO-700M 实测 URL 存活率仅 ~36%；WIT / Recap-COCO 为内嵌 Image，稳定。
+# 关键：这里只选「图片内嵌」的数据集（parquet 里直接存 PIL 图，开箱即用）。Recap-DataComp-1B /
+# COYO-700M / WIT 在 HF 上是「URL + caption」形式，图片需用 img2dataset 按 URL 另下载，
+# 且全量是几十 TB（大档规模），不适合中档 3b/7b——大档再换它们。
 #
-#   wikimedia/wit_base            37.5M 图文（11.5M 唯一图），108 语言含中文，CC-BY-SA，
-#                                 内嵌图，实测 330 个 parquet / 308GB（~8.2KB/样本）
-#   UCSC-VLAA/Recap-COCO-30K      COCO 重标注 30K，内嵌图 1.58GB，留作 eval
-#
-# 需要更大规模时（几十 TB、图片需按 URL 下载）：img2folder.py + COYO-700M / Recap-DataComp-1B，
-# 属大档，不是中档默认。
+#   datacomp_medium   128M 对，图片内嵌（jpg/txt），~1-2TB，中档主训（3b/7b 合适）
+#   datacomp_small    12.8M 对，图片内嵌（jpg/txt），~100-200GB，中档起步/验证
+#   大档（图片需另下载，几十 TB）：Recap-DataComp-1B（LLaMA-3 重标注）/ DFN / COYO-700M / WIT
 MEDIUM_TRAIN = [
     {
-        "name": "wikimedia/wit_base",
+        "name": "mlfoundations/datacomp_medium",
         "config": "",
         "split": "train",
-        "image_key": "image",
-        "text_key": "caption_reference_description",
+        "image_key": "jpg",
+        "text_key": "txt",
         "weight": 1.0,
     },
 ]
 
-# 中档 eval 图文对：内嵌图片，避免 URL 失效与人头数（HF 上 flickr30k/COCO 旧脚本已不可用）。
+# 中档 eval 图文对：标准图文检索留出集，caption 为 list（代码自动取首条）。
 MEDIUM_EVAL = [
     {
-        "name": "UCSC-VLAA/Recap-COCO-30K",
+        "name": "nlphuji/flickr30k",
         "config": "",
-        "split": "train",
+        "split": "test",
         "image_key": "image",
         "text_key": "caption",
+        "weight": 1.0,
+    },
+    {
+        "name": "HuggingFaceM4/COCO",
+        "config": "",
+        "split": "validation",
+        "image_key": "image",
+        "text_key": "sentences_raw",
         "weight": 1.0,
     },
 ]

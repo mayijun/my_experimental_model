@@ -30,9 +30,10 @@ hf = [
     "transformers>=4.40",
     "pillow>=10.0",
 ]
-# 多卡 / bf16 / 断点续训
+# 多卡 / bf16 / 断点续训 / TensorBoard 事件记录
 train = [
     "accelerate>=0.30",
+    "tensorboard>=2.16",
 ]
 # CUDA-only 训练加速件（8-bit 优化器 bitsandbytes，仅 --optim adamw8bit 需要）
 train-gpu = [

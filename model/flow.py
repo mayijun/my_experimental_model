@@ -176,18 +176,45 @@ def make_projection(readout_weight, eps=1e-6):
 
 
 @torch.no_grad()
-def euler_sample(velocity, z_0, n_steps, projection=None):
-    """Euler 采样（§4.1.4），可选软投影 retraction（§4.1.7）：z_{t+Δt}=z_t+P_z v_ψ(z_t,t)Δt。"""
+def euler_sample(velocity, z_0, n_steps, projection=None, solver="euler"):
+    """潜空间采样（§4.1.4）：欧氏 OT 直线基线的 ODE 积分，可选软投影 retraction（§4.1.7）。
+
+    solver 控制数值积分器：
+      - "euler"：一阶显式 Euler，z_{t+dt} = z_t + v(z_t, t) dt（默认，§4.1.4）；
+      - "midpoint"：二阶中点法，z_{t+dt} = z_t + v(z_t + v·dt/2, t+dt/2) dt；
+      - "heun"：二阶 Heun（改进 Euler），z_{t+dt} = z_t + (k1 + k2)/2 · dt。
+    高阶求解器同一步数下截断误差更小，等价于间接减少所需步数；但每步要评估速度场两次，
+    单步成本约 ×2，仅在步数敏感（低步数）时更划算。
+    """
     device = z_0.device
     b = z_0.size(0)
     z = z_0
     dt = 1.0 / max(1, n_steps)
     for i in range(n_steps):
         t = torch.full((b,), i * dt, device=device)
-        v = velocity(z, t)
-        if projection is not None:
-            v = projection(v)
-        z = z + v * dt
+        if solver == "euler":
+            v = velocity(z, t)
+            if projection is not None:
+                v = projection(v)
+            z = z + v * dt
+        elif solver == "midpoint":
+            k1 = velocity(z, t)
+            if projection is not None:
+                k1 = projection(k1)
+            k2 = velocity(z + 0.5 * k1 * dt, t + 0.5 * dt)
+            if projection is not None:
+                k2 = projection(k2)
+            z = z + k2 * dt
+        elif solver == "heun":
+            k1 = velocity(z, t)
+            if projection is not None:
+                k1 = projection(k1)
+            k2 = velocity(z + k1 * dt, t + dt)
+            if projection is not None:
+                k2 = projection(k2)
+            z = z + 0.5 * (k1 + k2) * dt
+        else:
+            raise ValueError(f"未知 solver: {solver}（可选 euler / midpoint / heun）")
     return z
 
 

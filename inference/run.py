@@ -51,36 +51,46 @@ def sample_logits(logits, temperature=1.0):
 
 
 @torch.no_grad()
-def generate_text(model, n_samples, n_steps, temperature=1.0):
-    """无条件生成文本：噪声 →（软投影）Euler 采样 → 文本采样（§4.1.4 + §4.1.7 + §4.2(f)）。"""
+def generate_text(model, n_samples, n_steps, temperature=1.0, solver="euler"):
+    """无条件生成文本：噪声 →（软投影）采样 → 文本采样（§4.1.4 + §4.1.7 + §4.2(f)）。"""
     if model.velocity is None:
         raise ValueError("该模型未启用 Flow（flow_enabled=False），无法生成。")
     device = next(model.parameters()).device
     z_0 = torch.randn(n_samples, model.cfg.text_len, model.dim, device=device)
     proj = make_projection(model.text_decoder.head.weight)
-    z_1 = euler_sample(model.velocity, z_0, n_steps, projection=proj)
+    z_1 = euler_sample(model.velocity, z_0, n_steps, projection=proj, solver=solver)
     return sample_logits(model.text_decoder(z_1), temperature)  # [n, L]
 
 
 @torch.no_grad()
-def generate_image(model, n_samples, n_steps):
-    """无条件生成图像：噪声 →（软投影）Euler 采样 → 图像（§4.1.4 + §4.1.7）。"""
+def generate_image(model, n_samples, n_steps, solver="euler"):
+    """无条件生成图像：噪声 →（软投影）采样 → 图像（§4.1.4 + §4.1.7）。"""
     if model.velocity is None:
         raise ValueError("该模型未启用 Flow（flow_enabled=False），无法生成。")
     device = next(model.parameters()).device
     z_0 = torch.randn(n_samples, model.cfg.text_len, model.dim, device=device)
     proj = make_projection(model.image_decoder.head.weight)
-    z_1 = euler_sample(model.velocity, z_0, n_steps, projection=proj)
+    z_1 = euler_sample(model.velocity, z_0, n_steps, projection=proj, solver=solver)
     return model.image_decoder(z_1)  # [n, C, H, W]
 
 
 def load_checkpoint(path, device):
-    """从 training.train --save 落盘的 checkpoint 恢复 (model, cfg, tokenizer)。"""
+    """从 training.train --save 落盘的 checkpoint 恢复 (model, cfg, tokenizer)。
+
+    推理只走在线编码器 + 解码器 + 速度场，故加载后：
+      1. 删除 EMA 目标编码器（share_trunk 下 3.06B），释放约一半参数显存；
+      2. CUDA 下把权重转 bf16，进一步减半显存并利用 Tensor Core 提速。
+    """
     blob = torch.load(path, map_location=device)
     cfg = MJEPAConfig(**blob["cfg"])
     model = MultimodalJEPA(cfg, blob["vocab_size"]).to(device)
     model.load_state_dict(blob["model"])
     model.eval()
+    for attr in ("image_target", "text_target", "shared_target"):
+        if getattr(model, attr, None) is not None:
+            delattr(model, attr)
+    if device.type == "cuda":
+        model = model.to(torch.bfloat16)
     return model, cfg, _restore_tokenizer(blob)
 
 
@@ -97,6 +107,37 @@ def _restore_tokenizer(blob):
     return CharTokenizer.from_itos(itos) if itos else None
 
 
+def compile_for_inference(model, enabled):
+    """CUDA 下用 torch.compile 优化推理主干。
+
+    - velocity：Flow 采样循环里反复调用，用 mode="reduce-overhead"（内部走 CUDA Graph
+      缓存静态图）消除每步的 kernel launch 开销；
+    - 两个 decoder：单次调用，用默认 mode 做算子融合。
+    含 graph break 的模块（如 SSM 的并行扫描）自动回落 eager，不影响正确性。
+    """
+    if not (enabled and hasattr(torch, "compile")):
+        return
+    if model.velocity is not None:
+        model.velocity = torch.compile(model.velocity, mode="reduce-overhead")
+    model.image_decoder = torch.compile(model.image_decoder)
+    model.text_decoder = torch.compile(model.text_decoder)
+
+
+def solver_hint(n_steps, solver):
+    """按采样步数给 ODE 求解器建议（§4.1.4 的工程权衡）。
+
+    二阶方法（heun/midpoint）每步评估两次速度场、成本 ×2，仅在低步数下换来的
+    误差收益值得；步数一多，一阶 Euler 的截断误差已足够小，二阶只白耗算力。
+    """
+    if n_steps <= 8:
+        rec, why = "heun", "步数少时二阶方法同步数误差明显更小"
+    elif n_steps <= 20:
+        rec, why = "euler", "中等步数下一阶精度已够，二阶 ×2 成本不划算"
+    else:
+        rec, why = "euler", "步数足够多时一阶精度已充分，勿用二阶浪费算力"
+    return rec, why
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ckpt", type=str, required=True)
@@ -106,12 +147,23 @@ def main():
     parser.add_argument("--generate-text", type=int, default=0, metavar="N")    # 无条件生成 N 条文本
     parser.add_argument("--generate-image", type=int, default=0, metavar="N")   # 无条件生成 N 张图像
     parser.add_argument("--flow-steps", type=int, default=0)     # 采样步数；0 用 cfg.flow_steps
+    parser.add_argument("--solver", type=str, default="euler", choices=("euler", "midpoint", "heun"))  # ODE 积分器（§4.1.4）
     parser.add_argument("--temperature", type=float, default=1.0)  # 文本生成温度；<=0 退化 argmax
+    parser.add_argument("--compile", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)  # None=auto：CUDA 自动开 torch.compile
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, cfg, tokenizer = load_checkpoint(args.ckpt, device)
-    print(f"device: {device} | dim={cfg.dim} depth={cfg.depth} latent_len={cfg.text_len}")
+    use_compile = args.compile if args.compile is not None else (device.type == "cuda")
+    compile_for_inference(model, use_compile)
+    print(f"device: {device} | dim={cfg.dim} depth={cfg.depth} latent_len={cfg.text_len} "
+          f"| compile={use_compile}")
+
+    gen_steps = args.flow_steps or cfg.flow_steps
+    if args.generate_text or args.generate_image:
+        rec, why = solver_hint(gen_steps, args.solver)
+        if rec != args.solver:
+            print(f"[提示] flow_steps={gen_steps} → 推荐 --solver {rec}（{why}）；当前为 {args.solver}。")
 
     if args.text:
         if tokenizer is None:
@@ -135,14 +187,12 @@ def main():
     if args.generate_text:
         if tokenizer is None:
             raise ValueError("该 checkpoint 未保存字符词表，无法解码出文本。")
-        n_steps = args.flow_steps or cfg.flow_steps
-        ids = generate_text(model, args.generate_text, n_steps, args.temperature)
+        ids = generate_text(model, args.generate_text, gen_steps, args.temperature, solver=args.solver)
         for i, row in enumerate(ids):
             print(f"生成文本[{i}]: {tokenizer.decode(row.tolist())!r}")
 
     if args.generate_image:
-        n_steps = args.flow_steps or cfg.flow_steps
-        images = generate_image(model, args.generate_image, n_steps)
+        images = generate_image(model, args.generate_image, gen_steps, solver=args.solver)
         for i, img in enumerate(images):
             arr = img.cpu().numpy()
             print(f"生成图像[{i}]: shape {arr.shape}, range [{arr.min():.2f}, {arr.max():.2f}]")
