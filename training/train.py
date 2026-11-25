@@ -13,6 +13,7 @@ import dataclasses
 import json
 import os
 import random
+import time
 
 import numpy as np
 import torch
@@ -168,6 +169,44 @@ def _restore_tokenizer(blob):
     if meta.get("type") == "char":
         return CharTokenizer.from_itos(meta["itos"])
     return None
+
+
+def _spec_source(spec):
+    """从 manifest spec 推断 source_type 与 source_uri（台账溯源用）。"""
+    if spec.get("type") == "imagefolder":
+        return "imagefolder", spec.get("root")
+    if spec.get("data_files"):
+        return "parquet", str(spec.get("data_files"))
+    return "hf", spec.get("name")
+
+
+def register_datasets(ledger, args, data_cfg):
+    """训练前把本次要用的公开数据集登记进台账，返回 {dataset_id: spec} 供训练后更新进度。
+
+    来源优先 manifest（--data-config），其次单数据集（--dataset-name / --data-dir）；
+    synthetic 数据无公开来源，返回空。
+    """
+    if data_cfg and data_cfg.get("train"):
+        specs = data_cfg["train"]
+    elif args.data == "real":
+        if args.data_dir:
+            specs = [{"name": f"imagefolder:{args.data_dir}", "type": "imagefolder",
+                      "root": args.data_dir, "config": "", "split": args.split}]
+        else:
+            specs = [{"name": args.dataset_name, "config": args.dataset_config or "",
+                      "split": args.split, "type": "hf"}]
+    else:
+        return {}
+    out = {}
+    for spec in specs:
+        source_type, source_uri = _spec_source(spec)
+        dsid = ledger.mark_dataset(
+            name=spec.get("name") or "", config=spec.get("config", ""),
+            split=spec.get("split", "train"),
+            source_type=source_type, source_uri=source_uri,
+        )
+        out[dsid] = spec
+    return out
 
 
 def make_writer(logdir, rank=0):
@@ -364,6 +403,7 @@ def main():
     parser.add_argument("--save", type=str, default="")  # 例如 runs/mjepa.pt
     parser.add_argument("--save-dtype", choices=["fp32", "bf16"], default="fp32")  # 落盘精度（bf16 省一半磁盘）
     parser.add_argument("--resume", type=str, default="")  # 从 checkpoint 续训：恢复 cfg/权重/优化器/步数/rng
+    parser.add_argument("--ledger", type=str, default="")  # 数据台账 SQLite 路径（空=关闭；记录已训练数据集）
     # TensorBoard：默认开启，事件写入 --logdir（空字符串关闭）；AutoDL 用 /root/tf-logs
     parser.add_argument("--logdir", type=str, default="runs/tensorboard")
     # 数据源：synthetic（内置合成图文对，离线） / real（HF datasets 真实图文对）
@@ -490,6 +530,17 @@ def main():
     else:
         tokenizer = None  # 由 build_dataset 内部构造 CharTokenizer
 
+    # —— 数据台账（可选）：登记本次公开数据集，训练后记录进度/完成 ——
+    ledger = None
+    registered = {}
+    if args.ledger:
+        from data_prepare.ledger import Ledger
+
+        ledger = Ledger(args.ledger)
+        registered = register_datasets(ledger, args, data_cfg)
+        if rank == 0:
+            print(f"数据台账: {args.ledger}（登记 {len(registered)} 个数据集）")
+
     # —— 数据装配 ——
     eval_gen = None
     if args.data == "real":
@@ -501,6 +552,7 @@ def main():
             gen = mixture_iterator(
                 train_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
                 seed=args.seed + rank, shuffle_buffer=args.shuffle_buffer,
+                ledger=ledger,
             )
             eval_gen = mixture_iterator(
                 eval_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
@@ -565,6 +617,19 @@ def main():
                         tokenizer_meta=tokenizer_meta, save_dtype=args.save_dtype,
                         optimizer=optimizer, step=max(start_step, args.steps),
                         rng_state=_capture_rng())
+
+    # —— 数据台账收尾：记录本次训练会话 + 累加数据集进度（仅 rank0）——
+    if rank == 0 and ledger is not None:
+        trained_steps = max(0, args.steps - start_step)
+        ledger.record_run(
+            run_id=f"{args.preset}-{int(time.time())}", preset=args.preset,
+            ckpt_path=args.save, start_step=start_step,
+            end_step=max(start_step, args.steps), steps=args.steps,
+            config=dataclasses.asdict(cfg),
+        )
+        for dsid in registered:
+            ledger.update_dataset_progress(dsid, steps=trained_steps)
+        ledger.close()
 
     if rank == 0:
         if args.data == "real":

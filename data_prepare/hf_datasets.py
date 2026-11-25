@@ -227,7 +227,7 @@ def _imagefolder_items(root, split, holdout, seed):
     return items, classes
 
 
-def _imagefolder_stream(spec, tokenizer, pad_id, text_len, image_size, seed):
+def _imagefolder_stream(spec, tokenizer, pad_id, text_len, image_size, seed, ledger=None):
     """ImageFolder 目录（ImageNet-1K）的无限流式生成器：类名模板生成文本。
 
     每个 epoch 打乱全量 (图, 类) 对；训练时随机选 caption 模板增加文本多样性，
@@ -244,6 +244,13 @@ def _imagefolder_stream(spec, tokenizer, pad_id, text_len, image_size, seed):
     templates = spec.get("templates") or ["a photo of a {}."]
     rng = random.Random(seed)
 
+    # —— 数据台账（可选）：dataset_id 用于「一轮消费完」时标记 complete ——
+    dataset_id = None
+    if ledger is not None:
+        dataset_id = ledger.dataset_id(
+            spec.get("name") or f"imagefolder:{spec['root']}", spec.get("config", ""), split
+        )
+
     def gen():
         while True:
             order = list(range(len(items)))
@@ -258,6 +265,8 @@ def _imagefolder_stream(spec, tokenizer, pad_id, text_len, image_size, seed):
                     continue
                 caption = tmpl.format(names.get(cls, cls))
                 yield tensor, encode_text(tokenizer, caption, text_len, pad_id)
+            if ledger is not None:
+                ledger.mark_dataset_complete(dataset_id)  # 一轮消费完 → 标记该数据集训练完成
 
     return gen()
 
@@ -282,7 +291,7 @@ def _load_spec_dataset(spec, seed, shuffle_buffer):
 
 
 def mixture_iterator(specs, tokenizer, pad_id, text_len, image_size, seed=42,
-                     shuffle_buffer=10000):
+                     shuffle_buffer=10000, ledger=None):
     """多个数据集的加权混合流：每步按 weight 抽样选数据集，再从该数据集取一个样本，无限循环。
 
     等价于「有放回地按比例混合多个无限数据集」，而非顺序遍历各数据集。每个数据集各自维护
@@ -297,7 +306,8 @@ def mixture_iterator(specs, tokenizer, pad_id, text_len, image_size, seed=42,
     streams, weights = [], []
     for spec in specs:
         if spec.get("type") == "imagefolder":
-            stream = _imagefolder_stream(spec, tokenizer, pad_id, text_len, image_size, seed)
+            stream = _imagefolder_stream(spec, tokenizer, pad_id, text_len, image_size, seed,
+                                         ledger=ledger)
         else:
             ds = _load_spec_dataset(spec, seed, shuffle_buffer)
             stream = _make_stream(

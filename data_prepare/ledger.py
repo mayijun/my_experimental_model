@@ -199,6 +199,34 @@ class Ledger:
         self.conn.commit()
         return True
 
+    def mark_dataset_complete(self, dataset_id, sample_count=None):
+        """标记数据集训练完成（一轮充分消费），用于「哪些公开训练集已训练完」的溯源。"""
+        self.conn.execute(
+            "UPDATE datasets SET status='complete', last_trained_at=?, "
+            "sample_count=COALESCE(?, sample_count) WHERE dataset_id=?",
+            (now_iso(), sample_count, dataset_id),
+        )
+        self.conn.commit()
+
+    def update_dataset_progress(self, dataset_id, steps=0, samples=0):
+        """累加数据集的训练步数与消费样本数，并刷新 last_trained_at。"""
+        self.conn.execute(
+            "UPDATE datasets SET steps_trained=steps_trained+?, "
+            "consumed_samples=consumed_samples+?, last_trained_at=? WHERE dataset_id=?",
+            (steps, samples, now_iso(), dataset_id),
+        )
+        self.conn.commit()
+
+    def list_datasets(self):
+        """列出所有登记的数据集（名字/config/split/状态/进度），供查询「哪些训练集已训练」。"""
+        rows = self.conn.execute(
+            "SELECT name, config, split, version, source_type, status, consumed_samples, "
+            "steps_trained, first_seen_at, last_trained_at FROM datasets ORDER BY first_seen_at"
+        ).fetchall()
+        cols = ["name", "config", "split", "version", "source_type", "status",
+                "consumed_samples", "steps_trained", "first_seen_at", "last_trained_at"]
+        return [dict(zip(cols, r)) for r in rows]
+
     def record_run(self, *, run_id, preset=None, ckpt_path=None, start_step=0,
                    end_step=0, steps=0, config=None):
         """记录一次训练会话，cfg 快照写入 config_json 用于复现。"""
