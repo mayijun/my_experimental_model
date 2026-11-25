@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from .config import MJEPAConfig
 from .decoder import ImageDecoder, TextDecoder
-from .encoder import ImageEncoder, TextEncoder
+from .encoder import ImageEncoder, TextEncoder, build_backbone
 from .alignment import build_alignment_head
 from .representation import CrossMaskPredictor, LatentPredictor
 from .operator import PsiLayer
@@ -29,6 +29,18 @@ class MultimodalJEPA(nn.Module):
         self.dim = cfg.dim
         length = cfg.text_len
 
+        # —— 共享主干（§2.8 共享 E）：图文复用同一条 trunk，薄接口每模态一份 ——
+        if cfg.share_trunk:
+            trunk_kwargs = dict(
+                backbone=cfg.backbone, dim=(cfg.hidden_dim or cfg.dim), heads=cfg.heads,
+                depth=cfg.depth, mlp_ratio=cfg.mlp_ratio, attn_layers=cfg.attn_layers,
+            )
+            self.shared_online = build_backbone(**trunk_kwargs)
+            self.shared_target = build_backbone(**trunk_kwargs)
+        else:
+            self.shared_online = None
+            self.shared_target = None
+
         # —— 编码（在线，接收梯度）——
         self.image_online = ImageEncoder(
             cfg.image_size, cfg.patch_size, cfg.image_channels, cfg.dim,
@@ -39,6 +51,7 @@ class MultimodalJEPA(nn.Module):
             rho_head_dim=cfg.rho_head_dim, rho_beta=cfg.rho_beta,
             rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
+            shared_encoder=self.shared_online,
         )
         self.text_online = TextEncoder(
             vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
@@ -46,6 +59,7 @@ class MultimodalJEPA(nn.Module):
             rho_compress=cfg.rho_compress, rho_head_dim=cfg.rho_head_dim,
             rho_beta=cfg.rho_beta, rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
+            shared_encoder=self.shared_online,
         )
 
         # —— 编码（目标，EMA、stop-gradient）——
@@ -58,6 +72,7 @@ class MultimodalJEPA(nn.Module):
             rho_head_dim=cfg.rho_head_dim, rho_beta=cfg.rho_beta,
             rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
+            shared_encoder=self.shared_target,
         )
         self.text_target = TextEncoder(
             vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
@@ -65,6 +80,7 @@ class MultimodalJEPA(nn.Module):
             rho_compress=cfg.rho_compress, rho_head_dim=cfg.rho_head_dim,
             rho_beta=cfg.rho_beta, rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
+            shared_encoder=self.shared_target,
         )
         self.image_target.load_state_dict(self.image_online.state_dict())
         self.text_target.load_state_dict(self.text_online.state_dict())

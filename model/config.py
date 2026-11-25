@@ -20,6 +20,7 @@ class MJEPAConfig:
     hidden_dim: int = 0        # 主干宽度 d_hidden；0 表示与 d 绑定（冒烟档，§2.2.7）。
     backbone: str = "hybrid"   # 主干选型：transformer / mamba / hybrid（§2.2.5）。
     attn_layers: int = 2       # hybrid 下前 attn_layers 层为注意力，其余为 SSM。
+    share_trunk: bool = False   # 图文编码器共享同一条主干（§2.8 共享 E；省 ~44% 静态显存）
     # 图像前端：patch（单层卷积，冒烟）/ siglip2（LLaDA-V 前端：SigLIP-2 + MLP 投影 → 连续 Z）
     image_frontend: str = "patch"
     siglip2_model: str = "google/siglip2-base-patch16-224"
@@ -122,10 +123,10 @@ PRESETS = {
     "small": dict(image_size=32, patch_size=8, dim=128, depth=4, heads=8),
     "base": dict(image_size=64, patch_size=8, dim=256, depth=6, heads=8),
     # 中型：主干宽、潜空间窄，d = d_hidden / 8，词表用 LLaDA（§2.2.7 规模表）。
-    "0.3b": dict(image_size=256, patch_size=8, hidden_dim=1024, dim=128, depth=24, heads=16),
-    "1b": dict(image_size=256, patch_size=8, hidden_dim=2048, dim=256, depth=24, heads=16),
-    "3b": dict(image_size=512, patch_size=8, hidden_dim=3072, dim=384, depth=32, heads=32),
-    "7b": dict(image_size=512, patch_size=8, hidden_dim=4096, dim=512, depth=32, heads=32),
+    "0.3b": dict(image_size=256, patch_size=8, hidden_dim=1024, dim=128, depth=24, heads=16, share_trunk=True),
+    "1b": dict(image_size=256, patch_size=8, hidden_dim=2048, dim=256, depth=24, heads=16, share_trunk=True),
+    "3b": dict(image_size=512, patch_size=8, hidden_dim=3072, dim=384, depth=32, heads=32, share_trunk=True),
+    "7b": dict(image_size=512, patch_size=8, hidden_dim=4096, dim=512, depth=32, heads=32, share_trunk=True),
 }
 
 

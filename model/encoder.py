@@ -300,7 +300,8 @@ class ImageEncoder(nn.Module):
                  image_frontend="patch", siglip2_model="google/siglip2-base-patch16-224",
                  freeze_vision=True, rho_compress=False, rho_head_dim=64,
                  rho_beta=0.1, rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
-                 rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0):
+                 rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0,
+                 shared_encoder=None):
         super().__init__()
         hidden_dim = hidden_dim or dim
         self.frontend = image_frontend
@@ -314,7 +315,10 @@ class ImageEncoder(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches + 1, hidden_dim))
         self.mask_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
-        self.encoder = build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers)
+        self.encoder = (
+            shared_encoder if shared_encoder is not None
+            else build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers)
+        )
         self.head = nn.Linear(hidden_dim, dim) if hidden_dim != dim else nn.Identity()
         # token 层 ρ 压缩（§2.6）：私有记忆 M，图像模态一份。
         self.rho_compressor = (
@@ -356,14 +360,18 @@ class TextEncoder(nn.Module):
                  mlp_ratio=4.0, hidden_dim=0, backbone="hybrid", attn_layers=2,
                  rho_compress=False, rho_head_dim=64, rho_beta=0.1,
                  rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
-                 rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0):
+                 rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0,
+                 shared_encoder=None):
         super().__init__()
         hidden_dim = hidden_dim or dim
         self.embedding = nn.Embedding(vocab_size, hidden_dim)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, max_len + 1, hidden_dim))
         self.mask_embed = nn.Parameter(torch.zeros(1, 1, hidden_dim))  # ρ 压缩的 mask 填充
-        self.encoder = build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers)
+        self.encoder = (
+            shared_encoder if shared_encoder is not None
+            else build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers)
+        )
         self.head = nn.Linear(hidden_dim, dim) if hidden_dim != dim else nn.Identity()
         # token 层 ρ 压缩（§2.6）：私有记忆 M，文本模态一份。
         self.rho_compressor = (

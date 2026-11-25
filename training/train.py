@@ -41,8 +41,11 @@ def build_param_groups(model, lr):
     anchor_enc = model.image_online if cfg.anchor_modality == "image" else model.text_online
     new_enc = model.text_online if cfg.anchor_modality == "image" else model.image_online
     new_dec = model.text_decoder if cfg.anchor_modality == "image" else model.image_decoder
-    anchor_params = list(anchor_enc.parameters())
-    new_params = list(new_enc.parameters())
+    shared_ids = set()
+    if model.shared_online is not None:
+        shared_ids = {id(p) for p in model.shared_online.parameters()}
+    anchor_params = [p for p in anchor_enc.parameters() if id(p) not in shared_ids]
+    new_params = [p for p in new_enc.parameters() if id(p) not in shared_ids]
     new_dec_params = list(new_dec.parameters())
     anchor_ids = {id(p) for p in anchor_params}
     new_ids = {id(p) for p in new_params}
@@ -218,6 +221,7 @@ def main():
     parser.add_argument("--flow-cond", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--flow-cond-weight", type=float, default=None)
     parser.add_argument("--flow-adaln", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
+    parser.add_argument("--share-trunk", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--flow-stage-steps", type=int, default=0)  # >0 时主训练后进入 Flow 阶段（§4.2(e)）
     parser.add_argument("--dataset-size", type=int, default=2048)
     parser.add_argument("--eval-samples", type=int, default=16)
@@ -288,6 +292,7 @@ def main():
         flow_cond_enabled=args.flow_cond,
         flow_cond_weight=args.flow_cond_weight,
         flow_adaln=args.flow_adaln,
+        share_trunk=args.share_trunk,
     )
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"
