@@ -1,0 +1,14 @@
+name = "lean-math"
+version = "0.1.0"
+defaultTargets = ["LeanMath"]
+
+[leanOptions]
+pp.unicode.fun = true # pretty-prints `fun a ↦ b`
+
+[[require]]
+name = "mathlib"
+git = "https://mirror.sjtu.edu.cn/git/lean4-packages/mathlib4"
+rev = "v4.36.0"
+
+[[lean_lib]]
+name = "LeanMath"

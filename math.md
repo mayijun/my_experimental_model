@@ -38,6 +38,33 @@
 
 ---
 
+## 1.0 Lean 形式化对照（成熟结论，后续思考可略过）
+
+本节把文中核心命题 / 公式与 [`lean-math/LeanMath`](file:///home/simon-ma/JEPA/lean-math/LeanMath) 的形式化证明一一对照。凡在此表中的结论均已由 `lake build`（Lean 4.36.0 + mathlib）编译验证、无 `sorry`/`axiom`，视为**已成熟**：后续设计 / 推理直接引用这些结论，**不再重新推导**。完整推导与「发现的问题」见 [lean-math/README.md](file:///home/simon-ma/JEPA/lean-math/README.md)。
+
+| 命题 / 公式 | Lean 证明（文件 : 定理） | 状态 |
+|---|---|---|
+| 式 (1)–(2) 最大熵 $H(T)\le L\log_2\|\mathcal V\|$ | `Entropy.lean` : `entropy_le_log_card` | ✅ 已证 |
+| 式 (3) 确定性信道 $I(Z;T)=H(T)$ | `InfoTheory.lean` : `mutualInformation_eq_entropy_of_deterministic` | ✅ 已证 |
+| 式 (15) 链式法则 $H(T)=I(T;Y)+H(T\|Y)$ | `InfoTheory.lean` : `entropy_marginalX_eq_mutualInformation_add_condEntropyYX` | ✅ 已证 |
+| 命题 1（有损性，离散核心） | `Lossy.lean` : `exists_collision_of_card_lt` | ✅ 单向鸽笼；「任意分辨率」措辞已收紧（README 问题 5） |
+| 命题 2（失真地板，离散核心） | `Lossy.lean` : `decoder_cannot_invert` | ✅ 已证 |
+| 命题 10（软反馈创新恒非零） | `Lossy.lean` : `non_injective_implies_feedback_nonzero` | ✅ 已证 |
+| §3.7 结论 = 变换链不动点 | `FixedPoint.lean` : `stabilized_is_fixed_point` / `read_only_fixes_all` | ✅ 已证 |
+| §3.7.1 收缩复合 + Neumann 级数 | `Contractive.lean` : `contraction_comp` / `geom_sum_one_sub` | ✅ 已证 |
+| §3.7.3 仿射幺半群 + 线性递推闭式 | `Affine.lean` : `comp_assoc` / `iterate_eq_closedForm` | ✅ 已证 |
+| 命题 11（重建 $L_0$ vs 生成 $L_{\ge1}$） | `Semigroup.lean` : `generation_iff_not_reconstruction` / `generation_iff_moves_some_point` | ✅ 已证 |
+| 命题 7 / 8 / 9（设计 / 诊断断言） | — | ⚠️ 非可形式化定理，见 README 问题 7 |
+| §3.7.3 谱夹层 vs §3.7.1 $\rho<1$ | `Contractive.lean` / `Affine.lean` | ⚠️ 谱夹层**强于** $\rho<1$，见 README 问题 6 |
+
+**成熟要点（直接引用，不重证）**：
+
+- 命题 1 / 2 / 10 的连续版本依赖微分熵与率失真测度论（mathlib 暂缺），但其**可判定核心**是同一离散事实：确定性映射 $g$ 的码本严格小于源集 ⟹ 必非单射 ⟹ 解码 / 重编码无法唯一还原 ⟹ 创新恒非零（`card β < card α`，**单向**鸽笼，反向为假）。
+- §3.7 的「结论 = 变换链不动点」、§3.7.3 的 PSCO 仿射幺半群（结合律 + 表示同态 + 线性递推闭式）、§3.9 的「重建 = 恒等 / 生成 = 非恒等」二分均已形式化，是算子谱系 §3.9 与并行扫描正确性的根基。
+- §3.7.3 的谱夹层（逐维 $\delta>0$ 下界）**严于** §3.7.1 的收缩条件 $\rho<1$（额外排除负特征值振荡收敛），二者不可等价混用。
+
+---
+
 ## 1. 架构总览：端到端四阶段流水线
 
 先明确整篇文档论证的是什么：一个把「多模态输入 → 共享世界表征 → 表征内对齐与推理 → 多模态输出 → 自反馈修正」串成闭环的世界模型，本文当前只实现并验证其中的**文本通道**。
@@ -223,6 +250,8 @@ $$
 > **命题 3（摘要性）**：存在 $Y$ 使语义码率 $I(T;Y)$ 接近 $I(Z;Y)$，同时细节损失 $H(Z\mid T)$ 仍然很大。即文本是**关于 $Y$ 的摘要**，而非随机丢弃。
 >
 > **命题 4（模态不对称）**：连续通道的失真可随精度趋于 $0$，而文本通道在固定 $L, |\mathcal{V}|$ 下永远高于地板 $D^{\star}$。
+
+> *(Lean 已验证离散核心：命题 1/2/10 见 `Lossy.lean`，其连续版依赖率失真测度论未形式化；「任意精细分辨率」措辞过强，见 §1.0 对照表与 README 问题 5。)*
 
 **选择性有损压缩：编码器压缩与解码器解压缩的对称对。** 上述命题把"有损"当作观测结果；这里把它升格为**设计目标**。编码器与解码器是一对对称的压缩/解压缩对：
 
@@ -1358,6 +1387,8 @@ $\mathrm{id}$ 是单位元；$\Psi_2\circ\Psi_1$ 是复合——复杂生成 = �
 > $$\mathrm{id}\ \subset\ P_\phi\ \subset\ \Psi_h\ \subset\ \Psi(\cdot,\omega).$$
 >
 > 每层是上层的特例：$L_0$ 是 $L_1$ 当「上下文 = 目标」时（§3.8 式 27 第一行）；$L_1$ 是 $L_2$ 当门控收缩到单步时（§3.7.3）；$L_2$ 是 $L_3$ 当 $\Omega$ 取「对角收缩仿射 + 残差」子族时（§3.7.3）。
+
+> *(Lean 已验证：`Semigroup.lean` : `generation_iff_not_reconstruction`（重建 ⟺ 恒等）、`generation_iff_moves_some_point`（生成 ⟺ 非恒等 ⟺ 移动某点）；§3.7.3 仿射幺半群见 `Affine.lean`，见 §1.0 对照表。)*
 
 **幅度度量 $g_{\text{change}}$。** 「重建 vs 生成」的二分由连续量 $g_{\text{change}}=\sigma(W_{\text{ch}}h)\in(0,1)^d$（§3.7.3）度量：
 

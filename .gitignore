@@ -101,5 +101,7 @@ Thumbs.db
 .trae/
 
 # ===== Lean 4 / mathlib4 项目（体积大，独立于 ML 代码） =====
-lean-math/
+# 只忽略 lake 的构建产物（.lake，体积 ~7GB）；源码 .lean / lakefile.toml /
+# lean-toolchain / README.md 需纳入 git 追踪，是形式化验证的交付物。
+lean-math/.lake/
 .lake/
