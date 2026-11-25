@@ -31,18 +31,30 @@ from training.losses import forward_losses, maybe_autocast
 
 
 def build_param_groups(model, lr):
-    """PAC 分层 lr（§3.4）：锚模态低 lr、新模态高 lr（~3×）、Z/共享层基准 lr。"""
+    """PAC 分层 lr（§3.4「分层 lr（软锚定）」）：锚编码器低 lr、新编码器/新解码器高 lr（~3×）、Z/共享层基准 lr。
+
+    解码器是模态专属解释器（§4.2(a)），新模态接入时其解码器应与新编码器同档高 lr，
+    对应 §3.4 S1「训新前端+M+头」里的解码头；锚解码器仍归 shared（S2 起 ×0.1 防漂移）。
+    """
     cfg = model.cfg
     anchor_enc = model.image_online if cfg.anchor_modality == "image" else model.text_online
     new_enc = model.text_online if cfg.anchor_modality == "image" else model.image_online
+    new_dec = model.text_decoder if cfg.anchor_modality == "image" else model.image_decoder
     anchor_params = list(anchor_enc.parameters())
     new_params = list(new_enc.parameters())
+    new_dec_params = list(new_dec.parameters())
     anchor_ids = {id(p) for p in anchor_params}
     new_ids = {id(p) for p in new_params}
-    rest = [p for p in model.parameters() if id(p) not in anchor_ids and id(p) not in new_ids]
+    new_dec_ids = {id(p) for p in new_dec_params}
+    rest = [
+        p for p in model.parameters()
+        if id(p) not in anchor_ids and id(p) not in new_ids and id(p) not in new_dec_ids
+    ]
     return [
         {"name": "anchor", "params": anchor_params, "lr": lr, "base_lr": lr},
         {"name": "new", "params": new_params, "lr": lr * cfg.pac_new_lr_scale,
+         "base_lr": lr * cfg.pac_new_lr_scale},
+        {"name": "new_decoder", "params": new_dec_params, "lr": lr * cfg.pac_new_lr_scale,
          "base_lr": lr * cfg.pac_new_lr_scale},
         {"name": "shared", "params": rest, "lr": lr, "base_lr": lr},
     ]
