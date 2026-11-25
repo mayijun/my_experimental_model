@@ -10,6 +10,7 @@
 
 import argparse
 import dataclasses
+import json
 import os
 import random
 
@@ -20,6 +21,7 @@ from data_prepare.hf_datasets import (
     LLaDATokenizer,
     ensure_special_tokens,
     load_hf_tokenizer,
+    mixture_iterator,
     real_batch_fn,
     real_batch_iterator,
 )
@@ -261,16 +263,25 @@ def main():
     parser.add_argument("--image-key", type=str, default="image")
     parser.add_argument("--text-key", type=str, default="text")
     parser.add_argument("--data-dir", type=str, default="")  # 本地 imagefolder，优先于 dataset-name。
+    parser.add_argument("--data-config", type=str, default="")  # 中档 manifest（data_prepare.medium 生成）：多数据集加权混合 + 独立 eval 集。
+    parser.add_argument("--shuffle-buffer", type=int, default=10000)  # 流式 buffer shuffle 大小（0=关闭；越大越接近全局随机，越耗内存）。
     parser.add_argument("--hf-endpoint", type=str, default="https://hf-mirror.com")
     args = parser.parse_args()
+
+    # —— 中档 manifest：多数据集加权混合 + 独立 eval 集（data_prepare.medium 生成）——
+    data_cfg = None
+    if args.data_config:
+        with open(args.data_config, encoding="utf-8") as f:
+            data_cfg = json.load(f)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
 
+    image_size = args.image_size or (data_cfg or {}).get("image_size")
     cfg = build_config(
         args.preset,
-        image_size=args.image_size,
+        image_size=image_size,
         patch_size=args.patch_size,
         dim=args.dim,
         hidden_dim=args.hidden_dim,
@@ -344,11 +355,30 @@ def main():
         tokenizer = None  # 由 build_dataset 内部构造 CharTokenizer
 
     # —— 数据装配 ——
+    eval_gen = None
     if args.data == "real":
-        gen = real_batch_iterator(args, tokenizer, pad_id, cfg.text_len, cfg.image_size)
-        batch_fn = real_batch_fn(gen, args.batch_size, device)
-        source = args.data_dir or args.dataset_name
         tok_name = args.llada_model if args.tokenizer == "llada" else args.tokenizer_name
+        if data_cfg and data_cfg.get("train"):
+            # 中档 manifest：train 多数据集加权混合 + 独立 eval 集。
+            train_specs = data_cfg["train"]
+            eval_specs = data_cfg.get("eval") or train_specs
+            gen = mixture_iterator(
+                train_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
+                seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+            )
+            eval_gen = mixture_iterator(
+                eval_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
+                seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+            )
+            source = f"{len(train_specs)} 个数据集（manifest）"
+        else:
+            gen = real_batch_iterator(
+                args, tokenizer, pad_id, cfg.text_len, cfg.image_size,
+                shuffle_buffer=args.shuffle_buffer, seed=args.seed,
+            )
+            eval_gen = gen
+            source = args.data_dir or args.dataset_name
+        batch_fn = real_batch_fn(gen, args.batch_size, device)
         print(f"数据: 真实图文对（{source}） | tokenizer: {tok_name} | "
               f"vocab={vocab_size} pad={pad_id} mask={mask_id}")
     else:
@@ -376,7 +406,7 @@ def main():
         save_checkpoint(args.save, model, cfg, vocab_size, tokenizer_meta=tokenizer_meta)
 
     if args.data == "real":
-        evaluate_real(model, gen, tokenizer, pad_id, device, args.eval_samples)
+        evaluate_real(model, eval_gen, tokenizer, pad_id, device, args.eval_samples)
     else:
         evaluate(model, images, caption_ids, captions, tokenizer, device, args.eval_samples)
 

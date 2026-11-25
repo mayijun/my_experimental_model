@@ -83,12 +83,23 @@ def image_transform(pil_img, size, train=True):
     return torch.from_numpy(arr)
 
 
-def real_batch_iterator(args, tokenizer, pad_id, text_len, image_size):
+def _first_text(text):
+    """兼容 caption 字段为单值 str 或 list[str]（flickr30k / coco 的 caption 是 list）。"""
+    if isinstance(text, (list, tuple)):
+        return text[0] if text else ""
+    return text or ""
+
+
+def real_batch_iterator(args, tokenizer, pad_id, text_len, image_size,
+                        shuffle_buffer=10000, seed=42):
     """返回无限重复的 (image_tensor, text_ids) 生成器，来源是 HF datasets 流式。
 
     支持两类来源：
     - 远程 HF 数据集：--dataset-name / --dataset-config / --split；
     - 本地 imagefolder：--data-dir（含 metadata.jsonl 的图片目录），供离线快速验证。
+
+    shuffle_buffer>0 时对流做 buffer shuffle（HF `shuffle`），打乱连续同类样本，
+    避免 VICReg 方差 / InfoNCE / BYOL 的 batch 统计偏差；buffer 越大越接近全局随机，越耗内存。
     """
     from datasets import load_dataset
 
@@ -98,12 +109,14 @@ def real_batch_iterator(args, tokenizer, pad_id, text_len, image_size):
         ds = load_dataset(
             args.dataset_name, args.dataset_config or None, split=args.split, streaming=True
         )
+    if shuffle_buffer > 0:
+        ds = ds.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
     def gen():
         while True:
             for ex in ds:
                 img = ex.get(args.image_key)
-                text = ex.get(args.text_key)
+                text = _first_text(ex.get(args.text_key))
                 if img is None or not text:
                     continue
                 yield image_transform(img, image_size), encode_text(tokenizer, text, text_len, pad_id)
@@ -125,3 +138,50 @@ def real_batch_fn(gen, batch_size, device):
         return torch.stack(imgs).to(device), torch.tensor(ids, dtype=torch.long).to(device)
 
     return fn
+
+
+def _make_stream(ds, image_key, text_key, tokenizer, pad_id, text_len, image_size):
+    """单个数据集的无限流式生成器：顺序遍历完一轮后自动重头再来。"""
+    def gen():
+        while True:
+            for ex in ds:
+                img = ex.get(image_key)
+                text = _first_text(ex.get(text_key))
+                if img is None or not text:
+                    continue
+                yield image_transform(img, image_size), encode_text(tokenizer, text, text_len, pad_id)
+
+    return gen()
+
+
+def mixture_iterator(specs, tokenizer, pad_id, text_len, image_size, seed=42,
+                     shuffle_buffer=10000):
+    """多个数据集的加权混合流：每步按 weight 抽样选数据集，再从该数据集取一个样本，无限循环。
+
+    等价于「有放回地按比例混合多个无限数据集」，而非顺序遍历各数据集。每个数据集各自维护
+    一个独立流式迭代器，权重决定其被采样的期望比例；同一数据集内部经 buffer shuffle 打乱
+    （shuffle_buffer>0 时），跨数据集是随机的——两层随机共同保证 batch 内模态/领域多样性，
+    避免对比损失（VICReg/InfoNCE/BYOL）的 batch 统计偏差。
+    """
+    from datasets import load_dataset
+
+    rng = random.Random(seed)
+    streams, weights = [], []
+    for spec in specs:
+        ds = load_dataset(
+            spec["name"], spec.get("config") or None, split=spec.get("split", "train"), streaming=True
+        )
+        if shuffle_buffer > 0:
+            ds = ds.shuffle(seed=seed, buffer_size=shuffle_buffer)
+        streams.append(_make_stream(
+            ds, spec.get("image_key", "image"), spec.get("text_key", "text"),
+            tokenizer, pad_id, text_len, image_size,
+        ))
+        weights.append(float(spec.get("weight", 1.0)))
+
+    def gen():
+        while True:
+            i = rng.choices(range(len(streams)), weights=weights, k=1)[0]
+            yield next(streams[i])
+
+    return gen()
