@@ -81,7 +81,7 @@ def load_checkpoint(path, device):
       1. 删除 EMA 目标编码器（share_trunk 下 3.06B），释放约一半参数显存；
       2. CUDA 下把权重转 bf16，进一步减半显存并利用 Tensor Core 提速。
     """
-    blob = torch.load(path, map_location=device)
+    blob = torch.load(path, map_location=device, weights_only=False)
     cfg = MJEPAConfig(**blob["cfg"])
     model = MultimodalJEPA(cfg, blob["vocab_size"]).to(device)
     model.load_state_dict(blob["model"])

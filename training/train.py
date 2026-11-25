@@ -27,9 +27,9 @@ from data_prepare.hf_datasets import (
     real_batch_fn,
     real_batch_iterator,
 )
-from data_prepare.synthetic import build_dataset, synthetic_batch_fn
+from data_prepare.synthetic import CharTokenizer, build_dataset, synthetic_batch_fn
 from evaluation.metrics import evaluate, evaluate_real
-from model import PRESETS, MultimodalJEPA, build_config
+from model import MJEPAConfig, PRESETS, MultimodalJEPA, build_config
 from model.representation import update_target
 from training.losses import maybe_autocast
 
@@ -130,6 +130,46 @@ def build_optimizer(params, lr, optim):
     return torch.optim.AdamW(params, lr=lr)
 
 
+def make_optimizer(model, lr, optim):
+    """重建优化器（含 PAC 参数分组），供 resume 恢复 optimizer 状态与 train() 复用。"""
+    raw = _unwrap(model)
+    params = build_param_groups(raw, lr) if raw.cfg.pac_enabled else raw.parameters()
+    return build_optimizer(params, lr, optim)
+
+
+def _capture_rng():
+    """捕获 python/torch/numpy 三套随机状态，供 resume 精确续训。
+
+    注意：HF datasets 的流式 shuffle buffer 内部状态无法序列化，故数据游标不能靠 rng 恢复，
+    只能做到「同一 seed 下从头 shuffle」；真正的「不重复」由数据台账去重保证（见 data_prepare/ledger.py）。
+    """
+    return {
+        "torch": torch.get_rng_state(),
+        "numpy": np.random.get_state(),
+        "random": random.getstate(),
+    }
+
+
+def _restore_rng(state):
+    """恢复 _capture_rng 捕获的三套随机状态（缺 key 时跳过，兼容旧 checkpoint）。"""
+    if "torch" in state:
+        torch.set_rng_state(state["torch"])
+    if "numpy" in state:
+        np.random.set_state(state["numpy"])
+    if "random" in state:
+        random.setstate(state["random"])
+
+
+def _restore_tokenizer(blob):
+    """从 checkpoint 的 tokenizer_meta 重建词表（resume 用，兼容 llada / char 两种）。"""
+    meta = blob.get("tokenizer_meta") or {}
+    if meta.get("type") == "llada":
+        return LLaDATokenizer(meta["model"])
+    if meta.get("type") == "char":
+        return CharTokenizer.from_itos(meta["itos"])
+    return None
+
+
 def make_writer(logdir, rank=0):
     """rank0 且 logdir 非空时创建 TensorBoard SummaryWriter；未安装 tensorboard 时返回 None。
 
@@ -149,14 +189,18 @@ def make_writer(logdir, rank=0):
 
 
 def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", rank=0,
-          writer=None):
-    """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。"""
+          writer=None, optimizer=None, start_step=0):
+    """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。
+
+    resume 时传入已恢复状态的 optimizer 与 start_step，从 start_step+1 继续；
+    steps 为「绝对目标总步数」，resume 后应 > start_step，否则本函数跳过主训练。
+    """
     model.train()
     raw = _unwrap(model)
     cfg = raw.cfg
-    params = build_param_groups(raw, lr) if cfg.pac_enabled else raw.parameters()
-    optimizer = build_optimizer(params, lr, optim)
-    for step in range(1, steps + 1):
+    if optimizer is None:
+        optimizer = make_optimizer(model, lr, optim)
+    for step in range(start_step + 1, steps + 1):
         img, txt = batch_fn()
         with maybe_autocast(device):
             # 走 model(...)（而非直接调 forward_losses），使 DDP 能同步梯度。
@@ -217,13 +261,15 @@ def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, 
     return model
 
 
-def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None, save_dtype="fp32"):
-    """落盘模型权重与重建模型/词表所需的最小元信息（供 inference 加载）。
+def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None, save_dtype="fp32",
+                    optimizer=None, step=0, rng_state=None):
+    """落盘模型权重 + 续训所需完整状态（供 inference 加载与 training --resume 续训）。
 
     tokenizer_meta：字符级为 {"type": "char", "itos": [...]}，
     LLaDA 为 {"type": "llada", "model": "GSAI-ML/LLaDA-8B-Instruct"}。
     save_dtype="bf16" 时权重转 bf16 再落盘（3b 档约 13.7GB，fp32 约 27.4GB）；
     inference 的 load_state_dict 会自动把 bf16 拷贝回 fp32 参数。
+    optimizer / step / rng_state 为续训状态（--resume 恢复）；inference 忽略这些键。
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     state = model.state_dict()
@@ -240,10 +286,13 @@ def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None, save_dtyp
             "cfg": dataclasses.asdict(cfg),
             "vocab_size": vocab_size,
             "tokenizer_meta": tokenizer_meta,
+            "step": step,
+            "optimizer": optimizer.state_dict() if optimizer is not None else None,
+            "rng_state": rng_state,
         },
         path,
     )
-    print(f"checkpoint 已保存: {path}（dtype={save_dtype}）")
+    print(f"checkpoint 已保存: {path}（dtype={save_dtype}，step={step}）")
 
 
 def main():
@@ -314,6 +363,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save", type=str, default="")  # 例如 runs/mjepa.pt
     parser.add_argument("--save-dtype", choices=["fp32", "bf16"], default="fp32")  # 落盘精度（bf16 省一半磁盘）
+    parser.add_argument("--resume", type=str, default="")  # 从 checkpoint 续训：恢复 cfg/权重/优化器/步数/rng
     # TensorBoard：默认开启，事件写入 --logdir（空字符串关闭）；AutoDL 用 /root/tf-logs
     parser.add_argument("--logdir", type=str, default="runs/tensorboard")
     # 数据源：synthetic（内置合成图文对，离线） / real（HF datasets 真实图文对）
@@ -339,12 +389,21 @@ def main():
         with open(args.data_config, encoding="utf-8") as f:
             data_cfg = json.load(f)
 
+    # —— resume：加载 checkpoint（cfg/词表/步数/优化器/rng 都从这里恢复）——
+    resume_blob = None
+    start_step = 0
+    if args.resume:
+        resume_blob = torch.load(args.resume, map_location="cpu", weights_only=False)
+        start_step = int(resume_blob.get("step", 0))
+
     # —— 分布式初始化（torchrun）：rank/world_size/device；未用 torchrun 时退回单进程 ——
     rank, world_size, device = setup_distributed()
 
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     random.seed(args.seed + rank)
+    if resume_blob is not None and resume_blob.get("rng_state"):
+        _restore_rng(resume_blob["rng_state"])
 
     image_size = args.image_size or (data_cfg or {}).get("image_size")
     cfg = build_config(
@@ -397,6 +456,9 @@ def main():
         embed_factor=args.embed_factor,
         grad_checkpoint=args.grad_checkpoint,
     )
+    if resume_blob is not None:
+        # resume：cfg 以 checkpoint 为准，忽略本次 CLI 覆盖项（保证权重形状一致）。
+        cfg = MJEPAConfig(**resume_blob["cfg"])
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"
 
@@ -411,7 +473,12 @@ def main():
 
     # —— 词表（tokenizer）选择 ——
     tokenizer_meta = None
-    if args.tokenizer == "llada":
+    if resume_blob is not None and resume_blob.get("tokenizer_meta"):
+        # resume：优先从 checkpoint 恢复词表，保证 vocab 一致；vocab_size 稍后统一用 checkpoint 值。
+        tokenizer_meta = resume_blob["tokenizer_meta"]
+        tokenizer = _restore_tokenizer(resume_blob)
+        pad_id, mask_id = tokenizer.pad_id, tokenizer.mask_id
+    elif args.tokenizer == "llada":
         tokenizer = LLaDATokenizer(args.llada_model)
         pad_id, mask_id, vocab_size = tokenizer.pad_id, tokenizer.mask_id, tokenizer.vocab_size
         tokenizer_meta = {"type": "llada", "model": args.llada_model}
@@ -460,7 +527,11 @@ def main():
             tokenizer_meta = {"type": "char", "itos": getattr(tokenizer, "itos", None)}
         batch_fn = synthetic_batch_fn(images, caption_ids, args.batch_size, device)
 
+    if resume_blob is not None:
+        vocab_size = resume_blob["vocab_size"]  # 词表大小以 checkpoint 为准
     model = MultimodalJEPA(cfg, vocab_size).to(device)
+    if resume_blob is not None:
+        _unwrap(model).load_state_dict(resume_blob["model"])
     if world_size > 1:
         # find_unused_parameters=True：默认 BYOL 下 proj 等分支本步不参与 loss，
         # 需遍历图跳过未用参数，否则 DDP 报「未参与反向」错。代价是一次图遍历。
@@ -473,8 +544,14 @@ def main():
         print(f"参数: {total/1e6:.2f}M 总 | {trainable/1e6:.2f}M 可训练 | vocab={vocab_size}")
 
     writer = make_writer(args.logdir, rank)
+
+    # —— 优化器：统一在 main 创建（PAC 参数分组）；resume 时恢复 optimizer 状态（moment 等）——
+    optimizer = make_optimizer(_unwrap(model), args.lr, args.optim)
+    if resume_blob is not None and resume_blob.get("optimizer") is not None:
+        optimizer.load_state_dict(resume_blob["optimizer"])
+
     train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr, optim=args.optim,
-          rank=rank, writer=writer)
+          rank=rank, writer=writer, optimizer=optimizer, start_step=start_step)
 
     if args.flow_stage_steps > 0:
         if rank == 0:
@@ -485,7 +562,9 @@ def main():
     if rank == 0 and args.save:
         # DDP 下 state_dict 键带 "module." 前缀，落盘前解包回裸模型，供 inference 直接加载。
         save_checkpoint(args.save, _unwrap(model), cfg, vocab_size,
-                        tokenizer_meta=tokenizer_meta, save_dtype=args.save_dtype)
+                        tokenizer_meta=tokenizer_meta, save_dtype=args.save_dtype,
+                        optimizer=optimizer, step=max(start_step, args.steps),
+                        rng_state=_capture_rng())
 
     if rank == 0:
         if args.data == "real":
