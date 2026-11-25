@@ -1406,7 +1406,7 @@ $g_{\text{change}}\to0$ 时 $\Psi_h\to\mathrm{id}$（$L_0$，描述/重建端，
 
 ## 4. 阶段三 · 解码：表征空间 → 多模态输出
 
-> **【规划方案 · 非强制约束】** 本节（§4）的 Flow Matching 数学与实现方案——§4.1 线性插值 OT 路径、速度场回归、Euler 采样、FlowBlock 交叉注意力、时间嵌入，以及 §4.2 的解码——尚未在当前实现中落地（当前仅保留 JEPA 核心 + PSCO 骨架）。本节作为备选参考，**不作为本架构的强制约束**；解码/生成路径可按需选型（自回归、MaskGIT、离散 diffusion 或 Flow），不受本节公式束缚。
+> **【实现状态】** §4.1 的 Flow Matching（线性插值 OT 路径、速度场回归、时间嵌入、Euler 采样、软投影 retraction §4.1.7、条件流 §4.1.8）与 §4.2 的解码已在当前实现落地并接入默认训练/采样（`cfg.flow_enabled` / `flow_cond_enabled` / `psi_enabled` 默认 `True`，见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) `forward_losses` 与 [inference/run.py](file:///home/simon-ma/JEPA/inference/run.py) `euler_sample + make_projection`）。**尚未落地的是 §3.9 式 29 的「生成 = D(Ψ(Z))」路径**：算子 Ψ 的不动点 $z^*=\Psi(Z)$ 目前只在潜空间损失（readout/var/stop/consist，§3.7）中使用，从不送入解码器——解码器只接收原始编码 $Z$（重建）与跨模态 $Z$（硬对齐），不接收 $\Psi(Z)$（生成）。故「算子 → 不动点 → 解码」的生成链路尚未接通；解码/生成路径的选型（自回归、MaskGIT、离散 diffusion 或 Flow）对「如何把 $z^*$ 渲染回 token」仍开放。
 
 ### 4.1 Flow Matching 潜空间生成
 

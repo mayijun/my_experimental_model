@@ -84,6 +84,7 @@ class MJEPAConfig:
     psi_var_weight: float = 0.1      # 方差正则权重（防线 3）
     psi_stop_weight: float = 0.1     # §3.7 L_stop 不动点/停止正则：Ψ_h(Z_clean)≈Z_clean（读端退化为恒等）
     psi_consist_weight: float = 0.1  # §3.7 L_consist 路径无关一致性：Ψ_h(Z_ctx)≈Z_tgt（改端变换到目标）
+    psi_gen_weight: float = 0.1      # §3.9 生成 = D(Ψ(Z))：解码算子不动点 Z*=Ψ(Z_ctx) 重建目标（接通「算子→不动点→解码→生成」）
 
     # —— Flow Matching（§4.1）：潜空间速度场 v_ψ，欧氏 OT 直线基线（测地整流/RFM 后续阶段）——
     flow_enabled: bool = True        # 启用速度场（§4.1.2 无条件生成，z_0=噪声 → z_1=冻结目标 Z）

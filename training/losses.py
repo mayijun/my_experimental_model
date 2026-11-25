@@ -104,7 +104,7 @@ def psi_losses(model, img_z, txt_z, img_ctx, txt_ctx, img_tgt, txt_tgt):
     - stop（§3.7 L_stop）：不动点/停止正则，Ψ_h(Z_clean)≈Z_clean，读端 g_change→0 退化为恒等；
     - consist（§3.7 L_consist）：路径无关一致性，Ψ_h(Z_ctx)≈Z_tgt，改端把上下文变换到目标。
 
-    返回 (readout, var, stop, consist)。
+    返回 (readout, var, stop, consist, img_ctx_star, txt_ctx_star)；后两者供 §3.9 生成 = D(Ψ(Z)) 解码。
     """
     img_star = model.psi_layer(img_z)
     txt_star = model.psi_layer(txt_z)
@@ -119,7 +119,7 @@ def psi_losses(model, img_z, txt_z, img_ctx, txt_ctx, img_tgt, txt_tgt):
     img_ctx_star = model.psi_layer(img_ctx)
     txt_ctx_star = model.psi_layer(txt_ctx)
     consist = (img_ctx_star - img_tgt).pow(2).mean() + (txt_ctx_star - txt_tgt).pow(2).mean()
-    return readout, var, stop, consist
+    return readout, var, stop, consist, img_ctx_star, txt_ctx_star
 
 
 def maybe_autocast(device):
@@ -200,9 +200,16 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     psi_var = torch.zeros((), device=device)
     psi_stop = torch.zeros((), device=device)
     psi_consist = torch.zeros((), device=device)
+    psi_gen = torch.zeros((), device=device)
     if cfg.psi_enabled and model.psi_layer is not None:
-        psi_readout, psi_var, psi_stop, psi_consist = psi_losses(
+        psi_readout, psi_var, psi_stop, psi_consist, img_ctx_star, txt_ctx_star = psi_losses(
             model, img_tokens, txt_tokens, img_ctx, txt_ctx, img_tgt, txt_tgt
+        )
+        # §3.9 生成 = D(Ψ(Z))：把算子不动点 Z*=Ψ(Z_ctx)（掩码上下文的完成）解码回目标，接通「算子→不动点→解码→生成」
+        img_gen = model.image_decoder(img_ctx_star)
+        txt_gen = model.text_decoder(txt_ctx_star)
+        psi_gen = F.mse_loss(img_gen, img) + F.cross_entropy(
+            txt_gen.reshape(-1, txt_gen.size(-1)), txt.reshape(-1), ignore_index=pad_id
         )
 
     # —— Flow Matching（§4.1.2 + §4.1.8）：无条件欧氏 OT + 条件流（跨模态）——
@@ -229,6 +236,7 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.psi_var_weight * psi_var
         + cfg.psi_stop_weight * psi_stop
         + cfg.psi_consist_weight * psi_consist
+        + cfg.psi_gen_weight * psi_gen
         + cfg.flow_weight * flow
         + cfg.flow_cond_weight * flow_cond
     )
@@ -237,7 +245,7 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
         "align": align, "var": var, "rate": rate, "cross_pred": cross_pred,
         "psi_readout": psi_readout, "psi_var": psi_var,
-        "psi_stop": psi_stop, "psi_consist": psi_consist,
+        "psi_stop": psi_stop, "psi_consist": psi_consist, "psi_gen": psi_gen,
         "flow": flow, "flow_cond": flow_cond,
     }
     return total, parts
