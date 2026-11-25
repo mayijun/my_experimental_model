@@ -85,6 +85,18 @@ def main():
     parser.add_argument("--image-frontend", choices=["patch", "siglip2"], default=None)
     parser.add_argument("--siglip2-model", type=str, default=None)
     parser.add_argument("--freeze-vision", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
+    # token 层 ρ 残差压缩 + 比特门控 b_t（§2.6，默认关闭，开启后按相对阈值丢冗余）
+    parser.add_argument("--rho-compress", action="store_true", default=None)
+    parser.add_argument("--rho-head-dim", type=int, default=None)
+    parser.add_argument("--rho-beta", type=float, default=None)
+    parser.add_argument("--rho-eps", type=float, default=None)       # 绝对阈值（0 禁用，改相对阈值 --rho-eps-z）
+    parser.add_argument("--rho-eps-z", type=float, default=None)     # 相对阈值 z-score：ε_ρ = 批内均值 + z·σ
+    parser.add_argument("--rho-eps-keep", type=float, default=None)  # ε 强制采样比例（防自我强化退化）
+    parser.add_argument("--rho-b-a", type=float, default=None)       # b_t surprisal 系数 a
+    parser.add_argument("--rho-b-c", type=float, default=None)       # b_t 条件熵代理系数 c
+    parser.add_argument("--rho-b-min", type=float, default=None)     # b_t clamp 下界
+    parser.add_argument("--rho-b-max", type=float, default=None)     # b_t clamp 上界
+    parser.add_argument("--rho-rate-weight", type=float, default=None)  # 码率正则权重 λ（R+λD）
     # 训练
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -125,6 +137,17 @@ def main():
         image_frontend=args.image_frontend,
         siglip2_model=args.siglip2_model,
         freeze_vision=args.freeze_vision,
+        rho_compress=args.rho_compress,
+        rho_head_dim=args.rho_head_dim,
+        rho_beta=args.rho_beta,
+        rho_eps=args.rho_eps,
+        rho_eps_z=args.rho_eps_z,
+        rho_eps_keep=args.rho_eps_keep,
+        rho_b_a=args.rho_b_a,
+        rho_b_c=args.rho_b_c,
+        rho_b_min=args.rho_b_min,
+        rho_b_max=args.rho_b_max,
+        rho_rate_weight=args.rho_rate_weight,
     )
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"
@@ -133,7 +156,7 @@ def main():
     print(f"device: {device} | preset: {args.preset} | d={cfg.dim} d_hidden={cfg.width} "
           f"depth={cfg.depth} heads={cfg.heads} backbone={cfg.backbone} "
           f"frontend={cfg.image_frontend} image={cfg.image_size} patch={cfg.patch_size} "
-          f"latent_len={cfg.text_len}")
+          f"latent_len={cfg.text_len} rho_compress={cfg.rho_compress}")
 
     # —— 词表（tokenizer）选择 ——
     tokenizer_meta = None

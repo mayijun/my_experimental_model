@@ -119,3 +119,8 @@ Entry 的语义必须来自模型对真实证据的理解。不得仅依据路�
 - 新增或修改任何结构时，必须同时说明它在三档下的参数量、显存与算力代价，以及如何通过配置切换。
 - 新增预设（如 `0.3b` / `1b` / `7b`）应与现有 `PRESETS` 同构，只调超参，不改调用约定。
 - 优先选择「能横向加宽 / 加深」的成熟实现；一次性原型代码不得直接当作大规模方案。
+
+## 模块选型与代码组织
+
+- **优先使用现成模块**：能由行业已验证、维护良好的成熟库（HuggingFace `transformers`、`torch.nn.functional.scaled_dot_product_attention`（GPU 上自动走 FlashAttention / Memory-Efficient Attention）、Mamba、LLaDA、`torch.compile` 等）完成的功能，不自己重写一次性原型。仅当现成模块无法满足 `math.md` 的数学契约（$Z$ 保持连续、反塌缩、对角线 SSM 谱夹层等）时才自研，并在代码注释中标明与 `math.md` 公式的对应关系。
+- **dev 冒烟代码与 GPU production 代码分开存放**：CPU 冒烟、正确性验证、一次性原型等 dev 代码放到独立目录（如 `dev/`，或沿用 `archive/`），不混入 `model/`、`training/`、`inference/` 等生产模块；生产路径只保留小 / 中 / 大三档共用的正式实现，GPU-only 组件按第 1 条规则放入 `pyproject.toml` 可选 extra。

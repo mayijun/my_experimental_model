@@ -29,6 +29,18 @@ def variance_loss(z):
     return F.relu(1.0 - std).mean()
 
 
+def rate_loss(b):
+    """码率正则（§2.6 式 665）：b_t 的均值 = 每 token 平均码率预算 R。
+
+    最小化 R 即「用更少比特装下同样信息」，与重建失真构成率失真权衡 R+λD；
+    梯度经 b_t → ρ → 记忆投影 (k_proj, v_proj) 回传，使记忆学得更会吸收冗余（ρ↓）。
+    b 为 None（未启用 ρ 压缩）时返回 None，由调用方置零。
+    """
+    if b is None:
+        return None
+    return b.mean()
+
+
 def info_nce(zi, zt, temperature):
     """对称 InfoNCE：图像 [CLS] 与文本 [CLS] 的软对齐。"""
     zi = F.normalize(zi, dim=-1)
@@ -53,6 +65,10 @@ def forward_losses(model, img, txt, pad_id, mask_id):
     # —— 编码（在线，干净 + 掩码）——
     img_cls, img_tokens = model.image_online(img)
     txt_cls, txt_tokens = model.text_online(txt)
+    # 码率信号 b_t（§2.6 式 665）：取自在线编码器干净输入，表示编码完整输入所需码率。
+    # 必须在掩码 forward（下面）覆盖 last_b 之前捕获。
+    img_b = model.image_online.last_b
+    txt_b = model.text_online.last_b
 
     img_mask = mask_patches(batch, cfg.n_patches, cfg.mask_ratio, device)
     txt_masked = mask_text(txt, mask_id, cfg.mask_ratio, device)
@@ -91,6 +107,9 @@ def forward_losses(model, img, txt, pad_id, mask_id):
     )
     align = info_nce(zi, zt, cfg.temperature)
     var = variance_loss(img_tokens) + variance_loss(txt_tokens)
+    rate = torch.zeros((), device=device)
+    if cfg.rho_compress and img_b is not None and txt_b is not None:
+        rate = 0.5 * (img_b.mean() + txt_b.mean())
 
     total = (
         cfg.jepa_weight * jepa
@@ -98,10 +117,11 @@ def forward_losses(model, img, txt, pad_id, mask_id):
         + cfg.cross_weight * (recon_img_cross + recon_txt_cross)
         + cfg.align_weight * align
         + cfg.var_weight * var
+        + cfg.rho_rate_weight * rate
     )
     parts = {
         "jepa": jepa, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
-        "align": align, "var": var,
+        "align": align, "var": var, "rate": rate,
     }
     return total, parts

@@ -24,13 +24,20 @@ class MJEPAConfig:
     image_frontend: str = "patch"
     siglip2_model: str = "google/siglip2-base-patch16-224"
     freeze_vision: bool = True  # 冻结 SigLIP-2 视觉编码器（LLaDA-V 默认冻结，只训 MLP 投影 + 主干）。
-    # token 层 ρ 残差压缩（§2.6 创新编码）：按冗余度 ρ=‖v−Mᵀk‖² 丢冗余、mask 填充保 L。
+    # token 层 ρ 残差压缩（§2.6 创新编码）：按冗余度 ρ=‖v−Mk‖² 丢冗余、mask 填充保 L。
     # 每个模态一个私有记忆 M（接口预留多模态），冒烟默认关闭。
     rho_compress: bool = False  # 是否启用 token 层 ρ 压缩。
-    rho_head_dim: int = 64      # 记忆 M 的 k/v 维度。
+    rho_head_dim: int = 64      # 记忆 M 的 k/v 维度（冻结，不随 hidden_dim 缩放，§2.6）。
     rho_beta: float = 0.1       # delta rule 写入率。
-    rho_eps: float = 0.1        # ρ 阈值：ρ>eps 判为不可预测、保留。
+    rho_eps: float = 0.0        # 绝对阈值（默认 0 禁用，改相对阈值 rho_eps_z）。
+    rho_eps_z: float = 0.0      # 相对阈值 z-score：ε_ρ = 批内均值 + z·σ（ρ 绝对量级随初始化/head_dim 变，须相对标定）。
     rho_eps_keep: float = 0.02  # ε 强制采样比例（防「丢弃→学不到」自我强化退化）。
+    # 比特门控 b_t = clamp(a·log(1/p(ρ)) + c·H(x|rest), b_min, b_max)（§2.6 式 665）
+    rho_b_a: float = 1.0        # surprisal 系数（ρ 的分布罕见度）。
+    rho_b_c: float = 0.5        # 条件熵代理系数（ρ 作 H 上界代理，§2.6「测差值别估熵」）。
+    rho_b_min: float = 0.0      # b_t clamp 下界。
+    rho_b_max: float = 4.0      # b_t clamp 上界。
+    rho_rate_weight: float = 0.0  # 码率正则权重（§2.6 式 665）：R=mean(b_t)，与重建失真构成 R+λD。
     ema_decay: float = 0.99    # 目标编码器的 EMA 系数 μ。
     mask_ratio: float = 0.5    # JEPA 掩码比例。
     temperature: float = 0.07  # InfoNCE 温度。

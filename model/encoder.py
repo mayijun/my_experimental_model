@@ -11,20 +11,47 @@ import torch.nn.functional as F
 from .psco import associative_scan, associative_scan_mat
 
 
+class SelfAttention(nn.Module):
+    """多头自注意力（§2.2.5 成熟模块）：QKV 一次投影 + F.scaled_dot_product_attention。
+
+    数学上与 nn.MultiheadAttention 等价（同为 softmax(QKᵀ/√d_h)V），仅换内核：
+    GPU 上自动分派 FlashAttention / Memory-Efficient Attention，CPU 回退到原生实现，
+    不改变注意力公式、输出形状或参数量级。满足 §2.2.5「中型优先接入 FlashAttention」。
+    """
+
+    def __init__(self, dim, heads):
+        super().__init__()
+        assert dim % heads == 0, f"dim({dim}) 必须能被 heads({heads}) 整除"
+        self.dim = dim
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.qkv = nn.Linear(dim, 3 * dim, bias=True)
+        self.out = nn.Linear(dim, dim, bias=True)
+
+    def forward(self, x):
+        B, L, _ = x.shape
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = q.view(B, L, self.heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, L, self.heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, L, self.heads, self.head_dim).transpose(1, 2)
+        y = F.scaled_dot_product_attention(q, k, v)  # [B, heads, L, head_dim]
+        y = y.transpose(1, 2).contiguous().view(B, L, self.dim)
+        return self.out(y)
+
+
 class TransformerBlock(nn.Module):
     """Pre-LN 自注意力块：残差 + 多头注意力 + 残差 + MLP。"""
 
     def __init__(self, dim, heads, mlp_ratio=4.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.attn = SelfAttention(dim, heads)
         self.norm2 = nn.LayerNorm(dim)
         hidden = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
 
     def forward(self, x):
-        h = self.norm1(x)
-        x = x + self.attn(h, h, h, need_weights=False)[0]
+        x = x + self.attn(self.norm1(x))
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -168,36 +195,56 @@ class LinearMemory(nn.Module):
 
 
 class RhoCompressor(nn.Module):
-    """token 层 ρ 残差压缩（§2.6）：按冗余度 ρ 丢冗余、mask 填充保 L。
+    """token 层 ρ 残差压缩（§2.6）：按冗余度 ρ 丢冗余、mask 填充保 L，附带比特门控 b_t。
 
-    keep_t = (ρ_t > ε_ρ) ∨ sink(t) ∨ force(t)：
-      - ρ>ε_ρ：不可预测，必须留；
-      - sink(t)：位置 0 硬编码不丢（softmax 泄洪口）；
-      - force(t)：ε 强制采样，随机保留一小部分低 ρ token 防自我强化退化。
-    被丢位置用 mask_token 填充，序列长度不变（保 L），硬对齐不破。
+    keep_t = (ρ_t > ε_ρ) ∨ sink(t) ∨ force(t)，ε_ρ 用**相对阈值**（批内均值 + z·σ）：
+    ρ 的绝对量级随初始化/head_dim/beta 变化，绝对阈值无法先验标定。
+
+    b_t = clamp(a·(ρ−μ)/σ + c·ρ/μ, b_min, b_max)（§2.6 式 665）：
+      - surprisal (ρ−μ)/σ 代理 log(1/p(ρ))（ρ 偏离批内典型的标准化程度）；
+      - H(x|rest) 用 ρ/μ 代理（预测误差 ≥ 条件熵，§2.6「测差值、别估熵」，无 next-token LM）。
 
     每个模态一个实例（私有 M）；多模态接入即新增一个实例，接口天然扩展。
     """
 
-    def __init__(self, dim, head_dim=64, beta=0.1, eps_rho=0.1, eps_keep=0.02):
+    def __init__(self, dim, head_dim=64, beta=0.1, eps_rho=0.0, eps_z=0.0,
+                 eps_keep=0.02, b_a=1.0, b_c=0.5, b_min=0.0, b_max=4.0):
         super().__init__()
         self.memory = LinearMemory(dim, head_dim, beta)
-        self.eps_rho = eps_rho
-        self.eps_keep = eps_keep
+        self.eps_rho = eps_rho    # 绝对阈值（0 禁用）
+        self.eps_z = eps_z        # 相对阈值 z-score
+        self.eps_keep = eps_keep  # ε 强制采样比例
+        self.b_a = b_a
+        self.b_c = b_c
+        self.b_min = b_min
+        self.b_max = b_max
 
     def forward(self, x, mask_token):
         # x: [B, L, dim]; mask_token: [1, 1, dim] 或 [1, dim]
-        # 返回 (x_tilde, keep [B,L] bool, rho [B,L])
+        # 返回 (x_tilde, keep [B,L] bool, rho [B,L], b_t [B,L])
         rho = self.memory(x)               # [B, L]
-        keep = rho > self.eps_rho          # 冗余度大 = 不可预测 = 保留
-        keep[:, 0] = True                  # sink 保护：位置 0 不丢
+
+        # —— 批内统计：ρ 经验分布的代理（无 next-token LM，用 ρ 自身做熵代理）——
+        mu = rho.mean()
+        sigma = rho.std().clamp_min(1e-6)
+
+        # —— 比特门控 b_t（§2.6 式 665）：码率信号「留几比特」——
+        surprisal = (rho - mu) / sigma       # 代理 log 1/p(ρ)
+        h_proxy = rho / (mu + 1e-6)          # 代理 H(x|rest)：ρ 相对背景倍数
+        b_t = torch.clamp(self.b_a * surprisal + self.b_c * h_proxy, self.b_min, self.b_max)
+
+        # —— keep_t：相对阈值（ρ 绝对量级不可先验，须用批内相对阈值）——
+        eps_rho = mu + self.eps_z * sigma
+        if self.eps_rho > 0:                 # 绝对阈值作为下限
+            eps_rho = torch.clamp_min(eps_rho, self.eps_rho)
+        keep = rho > eps_rho                # 冗余度大 = 不可预测 = 保留
+        keep[:, 0] = True                   # sink 保护：位置 0 不丢
         if self.training and self.eps_keep > 0:
-            # ε 强制采样：随机保留一小部分被丢的低 ρ token（§2.6 补丁 2）
             drop = ~keep
             force = drop & (torch.rand_like(rho) < self.eps_keep)
             keep = keep | force
         x_tilde = torch.where(keep.unsqueeze(-1), x, mask_token)
-        return x_tilde, keep, rho
+        return x_tilde, keep, rho, b_t
 
 
 class SigLIP2Frontend(nn.Module):
@@ -252,7 +299,8 @@ class ImageEncoder(nn.Module):
                  mlp_ratio=4.0, hidden_dim=0, backbone="hybrid", attn_layers=2,
                  image_frontend="patch", siglip2_model="google/siglip2-base-patch16-224",
                  freeze_vision=True, rho_compress=False, rho_head_dim=64,
-                 rho_beta=0.1, rho_eps=0.1, rho_eps_keep=0.02):
+                 rho_beta=0.1, rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
+                 rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0):
         super().__init__()
         hidden_dim = hidden_dim or dim
         self.frontend = image_frontend
@@ -270,11 +318,13 @@ class ImageEncoder(nn.Module):
         self.head = nn.Linear(hidden_dim, dim) if hidden_dim != dim else nn.Identity()
         # token 层 ρ 压缩（§2.6）：私有记忆 M，图像模态一份。
         self.rho_compressor = (
-            RhoCompressor(hidden_dim, rho_head_dim, rho_beta, rho_eps, rho_eps_keep)
+            RhoCompressor(hidden_dim, rho_head_dim, rho_beta, rho_eps, rho_eps_z,
+                          rho_eps_keep, rho_b_a, rho_b_c, rho_b_min, rho_b_max)
             if rho_compress else None
         )
         self.last_keep = None  # 供测试/可视化读取最近一次的 ρ 判据
         self.last_rho = None
+        self.last_b = None     # 最近一次比特门控 b_t（码率信号）
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.mask_token, std=0.02)
@@ -286,7 +336,7 @@ class ImageEncoder(nn.Module):
         else:
             tokens = self.patch_embed(x).flatten(2).transpose(1, 2)  # [B,N,d_hidden]
         if self.rho_compressor is not None:  # 先写后压：干净 tokens 上算 ρ 丢冗余，mask 填充保 L
-            tokens, self.last_keep, self.last_rho = self.rho_compressor(tokens, self.mask_token)
+            tokens, self.last_keep, self.last_rho, self.last_b = self.rho_compressor(tokens, self.mask_token)
         if mask is not None:  # mask: [B,N] bool，True 处替换为 mask_token。
             tokens = torch.where(mask.unsqueeze(-1), self.mask_token, tokens)
         cls = self.cls_token.expand(batch, -1, -1)
@@ -305,7 +355,8 @@ class TextEncoder(nn.Module):
     def __init__(self, vocab_size, max_len, dim, heads, depth,
                  mlp_ratio=4.0, hidden_dim=0, backbone="hybrid", attn_layers=2,
                  rho_compress=False, rho_head_dim=64, rho_beta=0.1,
-                 rho_eps=0.1, rho_eps_keep=0.02):
+                 rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
+                 rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0):
         super().__init__()
         hidden_dim = hidden_dim or dim
         self.embedding = nn.Embedding(vocab_size, hidden_dim)
@@ -316,11 +367,13 @@ class TextEncoder(nn.Module):
         self.head = nn.Linear(hidden_dim, dim) if hidden_dim != dim else nn.Identity()
         # token 层 ρ 压缩（§2.6）：私有记忆 M，文本模态一份。
         self.rho_compressor = (
-            RhoCompressor(hidden_dim, rho_head_dim, rho_beta, rho_eps, rho_eps_keep)
+            RhoCompressor(hidden_dim, rho_head_dim, rho_beta, rho_eps, rho_eps_z,
+                          rho_eps_keep, rho_b_a, rho_b_c, rho_b_min, rho_b_max)
             if rho_compress else None
         )
         self.last_keep = None
         self.last_rho = None
+        self.last_b = None
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.mask_embed, std=0.02)
@@ -329,7 +382,7 @@ class TextEncoder(nn.Module):
         batch = ids.size(0)
         x = self.embedding(ids)
         if self.rho_compressor is not None:  # 先写后压：embedding 上算 ρ 丢冗余，mask 填充保 L
-            x, self.last_keep, self.last_rho = self.rho_compressor(x, self.mask_embed)
+            x, self.last_keep, self.last_rho, self.last_b = self.rho_compressor(x, self.mask_embed)
         cls = self.cls_token.expand(batch, -1, -1)
         h = torch.cat([cls, x], dim=1) + self.pos_embed[:, : x.size(1) + 1]
         h = self.head(self.encoder(h))
