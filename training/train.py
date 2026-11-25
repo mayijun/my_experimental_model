@@ -16,6 +16,8 @@ import random
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from data_prepare.hf_datasets import (
     LLaDATokenizer,
@@ -28,9 +30,34 @@ from data_prepare.hf_datasets import (
 from data_prepare.synthetic import build_dataset, synthetic_batch_fn
 from evaluation.metrics import evaluate, evaluate_real
 from model import PRESETS, MultimodalJEPA, build_config
-from model.flow import conditional_flow_loss, flow_loss
 from model.representation import update_target
-from training.losses import forward_losses, maybe_autocast
+from training.losses import maybe_autocast
+
+
+def setup_distributed():
+    """按 torchrun 环境变量初始化分布式；未提供时退回单进程（rank=0, world_size=1）。
+
+    返回 (rank, world_size, device)。多卡时按 LOCAL_RANK 绑定 CUDA 设备，
+    `torchrun --nproc_per_node=N -m training.train ...` 即可启动。
+    """
+    if "RANK" not in os.environ:
+        return 0, 1, torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+    dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+    return rank, world_size, device
+
+
+def _unwrap(model):
+    """DDP 包装下取回裸模型。访问 cfg / 子模块 / state_dict / update_target 时用，
+    只有前向（model(...)）必须走 DDP 包装以同步梯度。"""
+    return model.module if isinstance(model, DDP) else model
 
 
 def build_param_groups(model, lr):
@@ -103,65 +130,57 @@ def build_optimizer(params, lr, optim):
     return torch.optim.AdamW(params, lr=lr)
 
 
-def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw"):
+def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", rank=0):
     """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。"""
     model.train()
-    cfg = model.cfg
-    params = build_param_groups(model, lr) if cfg.pac_enabled else model.parameters()
+    raw = _unwrap(model)
+    cfg = raw.cfg
+    params = build_param_groups(raw, lr) if cfg.pac_enabled else raw.parameters()
     optimizer = build_optimizer(params, lr, optim)
     for step in range(1, steps + 1):
         img, txt = batch_fn()
         with maybe_autocast(device):
-            loss, parts = forward_losses(
-                model, img, txt, pad_id, mask_id, step=step, total_steps=steps
-            )
+            # 走 model(...)（而非直接调 forward_losses），使 DDP 能同步梯度。
+            loss, parts = model(img, txt, pad_id, mask_id, step=step, total_steps=steps)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         apply_pac_schedule(optimizer, step, steps, cfg)
-        update_target(model, cfg.ema_decay)
+        update_target(raw, cfg.ema_decay)
 
-        if step == 1 or step % 25 == 0 or step == steps:
+        if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
             detail = " ".join(f"{k}={v.item():.3f}" for k, v in parts.items())
             extra = f" | p_anchor={pac_anchor_prob(step, steps, cfg):.3f}" if cfg.pac_enabled else ""
             print(f"step {step:4d} | loss {loss.item():.4f} | {detail}{extra}")
     return model
 
 
-def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw"):
+def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0):
     """Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ 与解码器，只训速度场 v_ψ，不 update_target。
 
     p_1（冻结目标 latent 分布）静止是 Flow Matching 运输映射 well-posed 的前提；
     与 V-JEPA 2「冻结世界模型、单独训视觉解码器」同构。主训练完成后调用。
+    多卡下走 model(..., mode="flow")：encoder/decoder 参数不参与本前向，靠 DDP 的
+    find_unused_parameters=True 跳过，只同步 velocity 梯度（该参数会强制 use_orig_params）。
     """
-    cfg = model.cfg
-    if model.velocity is None:
+    raw = _unwrap(model)
+    cfg = raw.cfg
+    if raw.velocity is None:
         raise ValueError("Flow 阶段需要 flow_enabled=True（模型未启用速度场 v_ψ）。")
     model.train()
-    for name, p in model.named_parameters():
-        p.requires_grad_(name.startswith("velocity."))
     optimizer = build_optimizer(
-        [p for p in model.velocity.parameters() if p.requires_grad], lr, optim
+        [p for p in raw.velocity.parameters() if p.requires_grad], lr, optim
     )
     for step in range(1, steps + 1):
         img, txt = batch_fn()
         with maybe_autocast(device):
-            with torch.no_grad():
-                _, img_tgt = model.image_target(img)
-                _, txt_tgt = model.text_target(txt)
-            flow = flow_loss(model.velocity, img_tgt) + flow_loss(model.velocity, txt_tgt)
-            flow_cond = torch.zeros((), device=device)
-            if cfg.flow_cond_enabled:
-                flow_cond = (
-                    conditional_flow_loss(model.velocity, txt_tgt, img_tgt)
-                    + conditional_flow_loss(model.velocity, img_tgt, txt_tgt)
-                )
-            loss = cfg.flow_weight * flow + cfg.flow_cond_weight * flow_cond
+            loss, parts = model(img, txt, mode="flow")
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        if step == 1 or step % 25 == 0 or step == steps:
-            print(f"flow-stage {step:4d} | flow {flow.item():.4f} | flow_cond {flow_cond.item():.4f}")
+        if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
+            print(f"flow-stage {step:4d} | flow {parts['flow'].item():.4f} "
+                  f"| flow_cond {parts['flow_cond'].item():.4f}")
     return model
 
 
@@ -274,9 +293,12 @@ def main():
         with open(args.data_config, encoding="utf-8") as f:
             data_cfg = json.load(f)
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
+    # —— 分布式初始化（torchrun）：rank/world_size/device；未用 torchrun 时退回单进程 ——
+    rank, world_size, device = setup_distributed()
+
+    torch.manual_seed(args.seed + rank)
+    np.random.seed(args.seed + rank)
+    random.seed(args.seed + rank)
 
     image_size = args.image_size or (data_cfg or {}).get("image_size")
     cfg = build_config(
@@ -332,8 +354,9 @@ def main():
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device: {device} | preset: {args.preset} | d={cfg.dim} d_hidden={cfg.width} "
+    if rank == 0:
+        print(f"device: {device} | world_size: {world_size} | preset: {args.preset} "
+              f"| d={cfg.dim} d_hidden={cfg.width} "
           f"depth={cfg.depth} heads={cfg.heads} backbone={cfg.backbone} "
           f"frontend={cfg.image_frontend} image={cfg.image_size} patch={cfg.patch_size} "
           f"latent_len={cfg.text_len} rho_compress={cfg.rho_compress} "
@@ -364,17 +387,17 @@ def main():
             eval_specs = data_cfg.get("eval") or train_specs
             gen = mixture_iterator(
                 train_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
-                seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+                seed=args.seed + rank, shuffle_buffer=args.shuffle_buffer,
             )
             eval_gen = mixture_iterator(
                 eval_specs, tokenizer, pad_id, cfg.text_len, cfg.image_size,
-                seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+                seed=args.seed + rank, shuffle_buffer=args.shuffle_buffer,
             )
             source = f"{len(train_specs)} 个数据集（manifest）"
         else:
             gen = real_batch_iterator(
                 args, tokenizer, pad_id, cfg.text_len, cfg.image_size,
-                shuffle_buffer=args.shuffle_buffer, seed=args.seed,
+                shuffle_buffer=args.shuffle_buffer, seed=args.seed + rank,
             )
             eval_gen = gen
             source = args.data_dir or args.dataset_name
@@ -383,7 +406,7 @@ def main():
               f"vocab={vocab_size} pad={pad_id} mask={mask_id}")
     else:
         images, caption_ids, captions, tokenizer = build_dataset(
-            args.dataset_size, cfg.image_size, cfg.text_len, seed=args.seed, tokenizer=tokenizer
+            args.dataset_size, cfg.image_size, cfg.text_len, seed=args.seed + rank, tokenizer=tokenizer
         )
         pad_id, mask_id = tokenizer.pad_id, tokenizer.mask_id
         vocab_size = tokenizer.vocab_size
@@ -392,23 +415,36 @@ def main():
         batch_fn = synthetic_batch_fn(images, caption_ids, args.batch_size, device)
 
     model = MultimodalJEPA(cfg, vocab_size).to(device)
+    if world_size > 1:
+        # find_unused_parameters=True：默认 BYOL 下 proj 等分支本步不参与 loss，
+        # 需遍历图跳过未用参数，否则 DDP 报「未参与反向」错。代价是一次图遍历。
+        # CPU（gloo）下不传 device_ids；CUDA 下绑定本地卡。
+        ddp_kwargs = {"device_ids": [device]} if torch.cuda.is_available() else {}
+        model = DDP(model, find_unused_parameters=True, **ddp_kwargs)
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"参数: {total/1e6:.2f}M 总 | {trainable/1e6:.2f}M 可训练 | vocab={vocab_size}")
+    if rank == 0:
+        print(f"参数: {total/1e6:.2f}M 总 | {trainable/1e6:.2f}M 可训练 | vocab={vocab_size}")
 
-    train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr, optim=args.optim)
+    train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr, optim=args.optim, rank=rank)
 
     if args.flow_stage_steps > 0:
-        print(f"\n=== Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ，只训 v_ψ，{args.flow_stage_steps} 步 ===")
-        train_flow_stage(model, batch_fn, device, args.flow_stage_steps, args.lr, optim=args.optim)
+        if rank == 0:
+            print(f"\n=== Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ，只训 v_ψ，{args.flow_stage_steps} 步 ===")
+        train_flow_stage(model, batch_fn, device, args.flow_stage_steps, args.lr, optim=args.optim, rank=rank)
 
-    if args.save:
-        save_checkpoint(args.save, model, cfg, vocab_size, tokenizer_meta=tokenizer_meta)
+    if rank == 0 and args.save:
+        # DDP 下 state_dict 键带 "module." 前缀，落盘前解包回裸模型，供 inference 直接加载。
+        save_checkpoint(args.save, _unwrap(model), cfg, vocab_size, tokenizer_meta=tokenizer_meta)
 
-    if args.data == "real":
-        evaluate_real(model, eval_gen, tokenizer, pad_id, device, args.eval_samples)
-    else:
-        evaluate(model, images, caption_ids, captions, tokenizer, device, args.eval_samples)
+    if rank == 0:
+        if args.data == "real":
+            evaluate_real(_unwrap(model), eval_gen, tokenizer, pad_id, device, args.eval_samples)
+        else:
+            evaluate(_unwrap(model), images, caption_ids, captions, tokenizer, device, args.eval_samples)
+
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from .encoder import ImageEncoder, TextEncoder, build_backbone
 from .alignment import build_alignment_head
 from .representation import CrossMaskPredictor, LatentPredictor
 from .operator import PsiLayer
-from .flow import VelocityField
+from .flow import VelocityField, conditional_flow_loss, flow_loss
 
 
 def _decoder_heads(dim, head_dim=64):
@@ -87,7 +87,12 @@ class MultimodalJEPA(nn.Module):
         )
         self.image_target.load_state_dict(self.image_online.state_dict())
         self.text_target.load_state_dict(self.text_online.state_dict())
-        for module in (self.image_target, self.text_target):
+        # 目标编码器（含 share_trunk 时的共享目标主干）全部冻结：只被 EMA 更新、仅在
+        # no_grad 下前向。冻结 shared_target 还避免 DDP 因「requires_grad 但无梯度」报错。
+        target_modules = [self.image_target, self.text_target]
+        if self.shared_target is not None:
+            target_modules.append(self.shared_target)
+        for module in target_modules:
             for p in module.parameters():
                 p.requires_grad_(False)
 
@@ -129,3 +134,34 @@ class MultimodalJEPA(nn.Module):
                           use_adaln=cfg.flow_adaln, grad_checkpoint=cfg.grad_checkpoint)
             if cfg.flow_enabled else None
         )
+
+    def forward(self, img, txt, pad_id=None, mask_id=None, step=None, total_steps=None, mode="pretrain"):
+        """训练前向。mode="pretrain"：编码→对齐/推理→解码（§2-§5）；
+        mode="flow"：只训速度场 v_ψ（§4.2(e)），冻结 E_ξ/E_θ，仅 velocity 产生梯度。
+
+        包成 model(...) 使 loss 出自 model.forward，从而能被
+        torch.nn.parallel.DistributedDataParallel 正确包裹并同步梯度（直接调用
+        image_online/text_decoder 等子模块会绕过 DDP 梯度同步）。
+        """
+        if mode == "flow":
+            return self._forward_flow(img, txt)
+        from training.losses import forward_losses
+
+        return forward_losses(self, img, txt, pad_id, mask_id, step=step, total_steps=total_steps)
+
+    def _forward_flow(self, img, txt):
+        """Flow 阶段前向（§4.1.2/§4.2(e)）：冻结目标编码器采样 z_1，回归 v_ψ。"""
+        if self.velocity is None:
+            raise ValueError("Flow 阶段需要 flow_enabled=True（模型未启用速度场 v_ψ）。")
+        with torch.no_grad():
+            _, img_tgt = self.image_target(img)
+            _, txt_tgt = self.text_target(txt)
+        flow = flow_loss(self.velocity, img_tgt) + flow_loss(self.velocity, txt_tgt)
+        flow_cond = torch.zeros((), device=img_tgt.device)
+        if self.cfg.flow_cond_enabled:
+            flow_cond = (
+                conditional_flow_loss(self.velocity, txt_tgt, img_tgt)
+                + conditional_flow_loss(self.velocity, img_tgt, txt_tgt)
+            )
+        loss = self.cfg.flow_weight * flow + self.cfg.flow_cond_weight * flow_cond
+        return loss, {"flow": flow, "flow_cond": flow_cond}
