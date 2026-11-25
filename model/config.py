@@ -97,6 +97,7 @@ class MJEPAConfig:
     flow_cond_enabled: bool = True   # 条件流（§4.1.8）：text→image / image→text 跨模态，z_0=噪声、c=源模态 Z
     flow_cond_weight: float = 0.1    # 条件流损失权重
     flow_adaln: bool = False         # 速度场主干：True=DiT AdaLN-Zero 条件（规模化档），False=加法注入（冒烟档）
+    grad_checkpoint: bool = False    # 梯度检查点（显存优化）：重计算各层激活，省激活显存（规模档开）
 
     @property
     def vision_patch(self) -> int:
@@ -126,13 +127,13 @@ PRESETS = {
     # 中型：主干宽、潜空间窄，d = d_hidden / 4（冲生成，§2.2.7 允许 r∈[4,16]，d 翻倍给生成中间表示更多容量）。
     # Flow 速度场加深 + DiT AdaLN-Zero 冲生成质量（§4.1：flow_depth=12、flow_adaln=True、flow_steps=20）。
     "0.3b": dict(image_size=256, patch_size=8, hidden_dim=1024, dim=256, depth=24, heads=16, share_trunk=True,
-                flow_depth=12, flow_adaln=True, flow_steps=20),
+                flow_depth=12, flow_adaln=True, flow_steps=20, grad_checkpoint=True),
     "1b": dict(image_size=256, patch_size=8, hidden_dim=2048, dim=512, depth=24, heads=16, share_trunk=True,
-               flow_depth=12, flow_adaln=True, flow_steps=20),
+               flow_depth=12, flow_adaln=True, flow_steps=20, grad_checkpoint=True),
     "3b": dict(image_size=512, patch_size=8, hidden_dim=3072, dim=768, depth=32, heads=32, share_trunk=True,
-               flow_depth=12, flow_adaln=True, flow_steps=20),
+               flow_depth=12, flow_adaln=True, flow_steps=20, grad_checkpoint=True),
     "7b": dict(image_size=512, patch_size=8, hidden_dim=4096, dim=1024, depth=32, heads=32, share_trunk=True,
-               flow_depth=12, flow_adaln=True, flow_steps=20),
+               flow_depth=12, flow_adaln=True, flow_steps=20, grad_checkpoint=True),
 }
 
 

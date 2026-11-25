@@ -7,8 +7,20 @@ E^I 与 E^T 各自把模态编译进同一个连续潜空间 Z = [B, L, d]，并
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .psco import associative_scan, associative_scan_mat
+
+
+def _ckpt(fn, *args, enabled, training):
+    """梯度检查点（显存优化）：训练且开启时重计算该层，省激活显存；否则直接前向。
+
+    仅在线（grad enabled）路径做检查点；target 编码器在 no_grad 下（stop-gradient），
+    输入不 requires_grad，use_reentrant=False 会报错，故用 is_grad_enabled 跳过。
+    """
+    if enabled and training and torch.is_grad_enabled():
+        return checkpoint(fn, *args, use_reentrant=False)
+    return fn(*args)
 
 
 class SelfAttention(nn.Module):
@@ -59,16 +71,17 @@ class TransformerBlock(nn.Module):
 class TransformerEncoder(nn.Module):
     """堆叠若干 TransformerBlock，末尾 LayerNorm。"""
 
-    def __init__(self, dim, heads, depth, mlp_ratio=4.0):
+    def __init__(self, dim, heads, depth, mlp_ratio=4.0, grad_checkpoint=False):
         super().__init__()
         self.blocks = nn.ModuleList(
             [TransformerBlock(dim, heads, mlp_ratio) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(dim)
+        self.grad_checkpoint = grad_checkpoint
 
     def forward(self, x):
         for block in self.blocks:
-            x = block(x)
+            x = _ckpt(block, x, enabled=self.grad_checkpoint, training=self.training)
         return self.norm(x)
 
 
@@ -109,14 +122,15 @@ class SSMBlock(nn.Module):
 class MambaEncoder(nn.Module):
     """全 SSM 主干：堆叠若干 SSMBlock。"""
 
-    def __init__(self, dim, depth, mlp_ratio=4.0):
+    def __init__(self, dim, depth, mlp_ratio=4.0, grad_checkpoint=False):
         super().__init__()
         self.blocks = nn.ModuleList([SSMBlock(dim, mlp_ratio) for _ in range(depth)])
         self.norm = nn.LayerNorm(dim)
+        self.grad_checkpoint = grad_checkpoint
 
     def forward(self, x):
         for block in self.blocks:
-            x = block(x)
+            x = _ckpt(block, x, enabled=self.grad_checkpoint, training=self.training)
         return self.norm(x)
 
 
@@ -126,27 +140,28 @@ class HybridEncoder(nn.Module):
     前段注意力抓局部/位置敏感模式，后段 SSM 做长程压缩，兼顾表达力与线性复杂度。
     """
 
-    def __init__(self, dim, heads, depth, mlp_ratio=4.0, attn_layers=2):
+    def __init__(self, dim, heads, depth, mlp_ratio=4.0, attn_layers=2, grad_checkpoint=False):
         super().__init__()
         attn_layers = max(0, min(attn_layers, depth))
         blocks = [TransformerBlock(dim, heads, mlp_ratio) for _ in range(attn_layers)]
         blocks += [SSMBlock(dim, mlp_ratio) for _ in range(attn_layers, depth)]
         self.blocks = nn.ModuleList(blocks)
         self.norm = nn.LayerNorm(dim)
+        self.grad_checkpoint = grad_checkpoint
 
     def forward(self, x):
         for block in self.blocks:
-            x = block(x)
+            x = _ckpt(block, x, enabled=self.grad_checkpoint, training=self.training)
         return self.norm(x)
 
 
-def build_backbone(backbone, dim, heads, depth, mlp_ratio=4.0, attn_layers=2):
+def build_backbone(backbone, dim, heads, depth, mlp_ratio=4.0, attn_layers=2, grad_checkpoint=False):
     """按 §2.2.5 的主干选型返回序列编码器（transformer / mamba / hybrid）。"""
     if backbone == "mamba":
-        return MambaEncoder(dim, depth, mlp_ratio)
+        return MambaEncoder(dim, depth, mlp_ratio, grad_checkpoint)
     if backbone == "hybrid":
-        return HybridEncoder(dim, heads, depth, mlp_ratio, attn_layers)
-    return TransformerEncoder(dim, heads, depth, mlp_ratio)
+        return HybridEncoder(dim, heads, depth, mlp_ratio, attn_layers, grad_checkpoint)
+    return TransformerEncoder(dim, heads, depth, mlp_ratio, grad_checkpoint)
 
 
 class LinearMemory(nn.Module):
@@ -301,7 +316,7 @@ class ImageEncoder(nn.Module):
                  freeze_vision=True, rho_compress=False, rho_head_dim=64,
                  rho_beta=0.1, rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
                  rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0,
-                 shared_encoder=None):
+                 grad_checkpoint=False, shared_encoder=None):
         super().__init__()
         hidden_dim = hidden_dim or dim
         self.frontend = image_frontend
@@ -317,7 +332,7 @@ class ImageEncoder(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.encoder = (
             shared_encoder if shared_encoder is not None
-            else build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers)
+            else build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers, grad_checkpoint)
         )
         self.head = nn.Linear(hidden_dim, dim) if hidden_dim != dim else nn.Identity()
         # token 层 ρ 压缩（§2.6）：私有记忆 M，图像模态一份。
@@ -361,7 +376,7 @@ class TextEncoder(nn.Module):
                  rho_compress=False, rho_head_dim=64, rho_beta=0.1,
                  rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
                  rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0,
-                 embed_factor=0, shared_encoder=None):
+                 embed_factor=0, grad_checkpoint=False, shared_encoder=None):
         super().__init__()
         hidden_dim = hidden_dim or dim
         # 词嵌入低秩分解（§2.2.7，ALBERT factorized embedding）：V×H → V×F + F×H。
@@ -378,7 +393,7 @@ class TextEncoder(nn.Module):
         self.mask_embed = nn.Parameter(torch.zeros(1, 1, hidden_dim))  # ρ 压缩的 mask 填充
         self.encoder = (
             shared_encoder if shared_encoder is not None
-            else build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers)
+            else build_backbone(backbone, hidden_dim, heads, depth, mlp_ratio, attn_layers, grad_checkpoint)
         )
         self.head = nn.Linear(hidden_dim, dim) if hidden_dim != dim else nn.Identity()
         # token 层 ρ 压缩（§2.6）：私有记忆 M，文本模态一份。

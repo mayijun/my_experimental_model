@@ -34,6 +34,7 @@ class MultimodalJEPA(nn.Module):
             trunk_kwargs = dict(
                 backbone=cfg.backbone, dim=(cfg.hidden_dim or cfg.dim), heads=cfg.heads,
                 depth=cfg.depth, mlp_ratio=cfg.mlp_ratio, attn_layers=cfg.attn_layers,
+                grad_checkpoint=cfg.grad_checkpoint,
             )
             self.shared_online = build_backbone(**trunk_kwargs)
             self.shared_target = build_backbone(**trunk_kwargs)
@@ -51,7 +52,7 @@ class MultimodalJEPA(nn.Module):
             rho_head_dim=cfg.rho_head_dim, rho_beta=cfg.rho_beta,
             rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
-            shared_encoder=self.shared_online,
+            grad_checkpoint=cfg.grad_checkpoint, shared_encoder=self.shared_online,
         )
         self.text_online = TextEncoder(
             vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
@@ -60,7 +61,7 @@ class MultimodalJEPA(nn.Module):
             rho_beta=cfg.rho_beta, rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
             embed_factor=cfg.embed_factor,
-            shared_encoder=self.shared_online,
+            grad_checkpoint=cfg.grad_checkpoint, shared_encoder=self.shared_online,
         )
 
         # —— 编码（目标，EMA、stop-gradient）——
@@ -73,7 +74,7 @@ class MultimodalJEPA(nn.Module):
             rho_head_dim=cfg.rho_head_dim, rho_beta=cfg.rho_beta,
             rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
-            shared_encoder=self.shared_target,
+            grad_checkpoint=cfg.grad_checkpoint, shared_encoder=self.shared_target,
         )
         self.text_target = TextEncoder(
             vocab_size, length, cfg.dim, cfg.heads, cfg.depth, cfg.mlp_ratio,
@@ -82,7 +83,7 @@ class MultimodalJEPA(nn.Module):
             rho_beta=cfg.rho_beta, rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
             embed_factor=cfg.embed_factor,
-            shared_encoder=self.shared_target,
+            grad_checkpoint=cfg.grad_checkpoint, shared_encoder=self.shared_target,
         )
         self.image_target.load_state_dict(self.image_online.state_dict())
         self.text_target.load_state_dict(self.text_online.state_dict())
@@ -99,11 +100,11 @@ class MultimodalJEPA(nn.Module):
         self.image_decoder = ImageDecoder(
             cfg.image_size, cfg.patch_size, cfg.image_channels, cfg.dim,
             dec_heads, cfg.depth, cfg.mlp_ratio,
-            backbone=cfg.backbone, attn_layers=cfg.attn_layers,
+            backbone=cfg.backbone, attn_layers=cfg.attn_layers, grad_checkpoint=cfg.grad_checkpoint,
         )
         self.text_decoder = TextDecoder(
             vocab_size, length, cfg.dim, dec_heads, cfg.depth, cfg.mlp_ratio,
-            backbone=cfg.backbone, attn_layers=cfg.attn_layers,
+            backbone=cfg.backbone, attn_layers=cfg.attn_layers, grad_checkpoint=cfg.grad_checkpoint,
         )
 
         # —— 软对齐投影头（§3.4）：InfoNCE 用 proj；BYOL/DINO 用 align ——
@@ -124,6 +125,7 @@ class MultimodalJEPA(nn.Module):
 
         # —— Flow Matching 速度场（§4.1）：潜空间 v_ψ，欧氏 OT 直线基线 ——
         self.velocity = (
-            VelocityField(cfg.dim, cfg.flow_depth, cfg.flow_heads, cfg.mlp_ratio, use_adaln=cfg.flow_adaln)
+            VelocityField(cfg.dim, cfg.flow_depth, cfg.flow_heads, cfg.mlp_ratio,
+                          use_adaln=cfg.flow_adaln, grad_checkpoint=cfg.grad_checkpoint)
             if cfg.flow_enabled else None
         )

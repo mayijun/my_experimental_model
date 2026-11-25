@@ -12,7 +12,7 @@ import math
 import torch
 import torch.nn as nn
 
-from .encoder import SelfAttention, TransformerBlock
+from .encoder import SelfAttention, TransformerBlock, _ckpt
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -88,10 +88,11 @@ class VelocityField(nn.Module):
       - use_adaln=True：DiT 的 AdaLN-Zero 条件（规模化档，逐 block 调制）。
     """
 
-    def __init__(self, dim, depth, heads, mlp_ratio=4.0, use_adaln=False):
+    def __init__(self, dim, depth, heads, mlp_ratio=4.0, use_adaln=False, grad_checkpoint=False):
         super().__init__()
         self.dim = dim
         self.use_adaln = use_adaln
+        self.grad_checkpoint = grad_checkpoint
         self.time_embed = nn.Sequential(
             SinusoidalTimeEmbedding(dim),
             nn.Linear(dim, dim),
@@ -112,11 +113,11 @@ class VelocityField(nn.Module):
         if self.use_adaln:
             h = z_t
             for blk in self.blocks:
-                h = blk(h, t_emb)  # AdaLN-Zero：t_emb 作为逐 block 条件 [B, d]
+                h = _ckpt(blk, h, t_emb, enabled=self.grad_checkpoint, training=self.training)  # AdaLN-Zero 条件 [B, d]
             return self.head(self.norm(h))
         h = z_t + t_emb.unsqueeze(1)  # 加法注入 [B, 1, d]
         for blk in self.blocks:
-            h = blk(h)
+            h = _ckpt(blk, h, enabled=self.grad_checkpoint, training=self.training)
         return self.head(self.norm(h))
 
 

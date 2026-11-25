@@ -17,14 +17,14 @@ class ImageDecoder(nn.Module):
     """
 
     def __init__(self, image_size, patch_size, channels, dim, heads, depth,
-                 mlp_ratio=4.0, backbone="hybrid", attn_layers=2):
+                 mlp_ratio=4.0, backbone="hybrid", attn_layers=2, grad_checkpoint=False):
         super().__init__()
         self.image_size = image_size
         self.patch_size = patch_size
         self.channels = channels
         self.n_patches = (image_size // patch_size) ** 2
         self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, dim))
-        self.decoder = build_backbone(backbone, dim, heads, depth, mlp_ratio, attn_layers)
+        self.decoder = build_backbone(backbone, dim, heads, depth, mlp_ratio, attn_layers, grad_checkpoint)
         self.head = nn.Linear(dim, patch_size * patch_size * channels)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
@@ -48,10 +48,10 @@ class TextDecoder(nn.Module):
     """
 
     def __init__(self, vocab_size, max_len, dim, heads, depth,
-                 mlp_ratio=4.0, backbone="hybrid", attn_layers=2):
+                 mlp_ratio=4.0, backbone="hybrid", attn_layers=2, grad_checkpoint=False):
         super().__init__()
         self.pos_embed = nn.Parameter(torch.zeros(1, max_len, dim))
-        self.decoder = build_backbone(backbone, dim, heads, depth, mlp_ratio, attn_layers)
+        self.decoder = build_backbone(backbone, dim, heads, depth, mlp_ratio, attn_layers, grad_checkpoint)
         self.head = nn.Linear(dim, vocab_size)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
