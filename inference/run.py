@@ -41,16 +41,25 @@ def image_to_text(model, image):
     return model.text_decoder(encode_image(model, image)).argmax(-1)
 
 
+def sample_logits(logits, temperature=1.0):
+    """温度采样：temperature<=0 退化为 argmax；否则 softmax(logits/T) + multinomial（§4.2(f)）。"""
+    if temperature <= 0:
+        return logits.argmax(-1)
+    V = logits.size(-1)
+    probs = torch.softmax(logits.reshape(-1, V) / temperature, dim=-1)
+    return torch.multinomial(probs, num_samples=1).reshape(logits.shape[:-1])
+
+
 @torch.no_grad()
-def generate_text(model, n_samples, n_steps):
-    """无条件生成文本：噪声 →（软投影）Euler 采样 → 文本 argmax（§4.1.4 + §4.1.7）。"""
+def generate_text(model, n_samples, n_steps, temperature=1.0):
+    """无条件生成文本：噪声 →（软投影）Euler 采样 → 文本采样（§4.1.4 + §4.1.7 + §4.2(f)）。"""
     if model.velocity is None:
         raise ValueError("该模型未启用 Flow（flow_enabled=False），无法生成。")
     device = next(model.parameters()).device
     z_0 = torch.randn(n_samples, model.cfg.text_len, model.dim, device=device)
     proj = make_projection(model.text_decoder.head.weight)
     z_1 = euler_sample(model.velocity, z_0, n_steps, projection=proj)
-    return model.text_decoder(z_1).argmax(-1)  # [n, L]
+    return sample_logits(model.text_decoder(z_1), temperature)  # [n, L]
 
 
 @torch.no_grad()
@@ -97,6 +106,7 @@ def main():
     parser.add_argument("--generate-text", type=int, default=0, metavar="N")    # 无条件生成 N 条文本
     parser.add_argument("--generate-image", type=int, default=0, metavar="N")   # 无条件生成 N 张图像
     parser.add_argument("--flow-steps", type=int, default=0)     # 采样步数；0 用 cfg.flow_steps
+    parser.add_argument("--temperature", type=float, default=1.0)  # 文本生成温度；<=0 退化 argmax
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -126,7 +136,7 @@ def main():
         if tokenizer is None:
             raise ValueError("该 checkpoint 未保存字符词表，无法解码出文本。")
         n_steps = args.flow_steps or cfg.flow_steps
-        ids = generate_text(model, args.generate_text, n_steps)
+        ids = generate_text(model, args.generate_text, n_steps, args.temperature)
         for i, row in enumerate(ids):
             print(f"生成文本[{i}]: {tokenizer.decode(row.tolist())!r}")
 

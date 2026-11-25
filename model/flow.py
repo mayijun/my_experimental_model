@@ -12,7 +12,7 @@ import math
 import torch
 import torch.nn as nn
 
-from .encoder import TransformerBlock
+from .encoder import SelfAttention, TransformerBlock
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -40,16 +40,58 @@ class SinusoidalTimeEmbedding(nn.Module):
         return emb
 
 
+class AdaLNZero(nn.Module):
+    """AdaLN-Zero 调制（DiT）：条件向量 c → 6 组 (scale, shift, gate)，末层零初始化。
+
+    零初始化使 DiT 块初始退化为恒等残差，深网也能稳训（对比加法注入）。
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
+        nn.init.constant_(self.net[-1].weight, 0.0)
+        nn.init.constant_(self.net[-1].bias, 0.0)
+
+    def forward(self, c):
+        return self.net(c).chunk(6, dim=-1)  # 6×[B, d]
+
+
+class DiTBlock(nn.Module):
+    """DiT 块（AdaLN-Zero）：时间/条件逐 block 逐维度调制 scale/shift，门控残差。
+
+    与加法注入不同，条件信号能精细控制每一层、每一维的语义；残差门控零初始化。
+    """
+
+    def __init__(self, dim, heads, mlp_ratio=4.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
+        self.attn = SelfAttention(dim, heads)
+        self.norm2 = nn.LayerNorm(dim, elementwise_affine=False)
+        hidden = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        self.adaln = AdaLNZero(dim)
+
+    def forward(self, x, c):
+        s1, b1, g1, s2, b2, g2 = (m.unsqueeze(1) for m in self.adaln(c))  # 各 [B, 1, d]
+        h = self.attn(self.norm1(x) * (1.0 + s1) + b1)
+        x = x + g1 * h
+        h = self.mlp(self.norm2(x) * (1.0 + s2) + b2)
+        x = x + g2 * h
+        return x
+
+
 class VelocityField(nn.Module):
     """速度场 v_ψ(z_t, t)（§4.1）：潜空间点 z_t 与时间 t → 速度 [B, L, d]。
 
-    欧氏 OT 直线基线回归恒定速度 z_1-z_0（§4.1.2）。位置混合复用 TransformerBlock；
-    时间条件用正弦嵌入加性注入每个位置（保持最小，AdaLN 留作后续可选）。
+    欧氏 OT 直线基线回归恒定速度 z_1-z_0（§4.1.2）。主干可选两种时间条件：
+      - use_adaln=False：加法注入（最小实现，冒烟档）；
+      - use_adaln=True：DiT 的 AdaLN-Zero 条件（规模化档，逐 block 调制）。
     """
 
-    def __init__(self, dim, depth, heads, mlp_ratio=4.0):
+    def __init__(self, dim, depth, heads, mlp_ratio=4.0, use_adaln=False):
         super().__init__()
         self.dim = dim
+        self.use_adaln = use_adaln
         self.time_embed = nn.Sequential(
             SinusoidalTimeEmbedding(dim),
             nn.Linear(dim, dim),
@@ -57,18 +99,22 @@ class VelocityField(nn.Module):
             nn.Linear(dim, dim),
         )
         self.cond_embed = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))  # 条件注入（§4.1.8）
-        self.blocks = nn.ModuleList(
-            [TransformerBlock(dim, heads, mlp_ratio) for _ in range(depth)]
-        )
+        block = DiTBlock if use_adaln else TransformerBlock
+        self.blocks = nn.ModuleList([block(dim, heads, mlp_ratio) for _ in range(depth)])
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, dim)
 
     def forward(self, z_t, t, c=None):
-        t_emb = self.time_embed(t).unsqueeze(1)  # [B, 1, dim]
+        t_emb = self.time_embed(t)  # [B, dim]
         if c is not None:
-            # 条件 c [B,L,d] → 全局池化 → [B,d]，与时间嵌入相加（最小条件注入，§4.1.8）
-            t_emb = t_emb + self.cond_embed(c.mean(dim=1)).unsqueeze(1)
-        h = z_t + t_emb
+            # 条件 c [B,L,d] → 全局池化 → [B,d]，注入时间嵌入（最小条件注入，§4.1.8）
+            t_emb = t_emb + self.cond_embed(c.mean(dim=1))
+        if self.use_adaln:
+            h = z_t
+            for blk in self.blocks:
+                h = blk(h, t_emb)  # AdaLN-Zero：t_emb 作为逐 block 条件 [B, d]
+            return self.head(self.norm(h))
+        h = z_t + t_emb.unsqueeze(1)  # 加法注入 [B, 1, d]
         for blk in self.blocks:
             h = blk(h)
         return self.head(self.norm(h))
@@ -183,6 +229,20 @@ def smoke():
         opt2.step()
         cond.append(loss.item())
     print(f"条件 flow_loss: {cond[0]:.3f} -> {cond[-1]:.3f}")
+
+    # DiT 主干（AdaLN-Zero）：验证前向/损失下降/采样有限。
+    vel_adaln = VelocityField(dim, depth, heads, use_adaln=True)
+    print(f"DiT(AdaLN-Zero) 参数: {sum(p.numel() for p in vel_adaln.parameters())/1e3:.2f}K")
+    opt3 = torch.optim.AdamW(vel_adaln.parameters(), lr=1e-3)
+    a = [flow_loss(vel_adaln, z_1)]
+    for _ in range(19):
+        opt3.zero_grad()
+        loss = flow_loss(vel_adaln, z_1)
+        loss.backward()
+        opt3.step()
+        a.append(loss.item())
+    z_1_hat_d = euler_sample(vel_adaln, z_0, n_steps=8)
+    print(f"DiT flow_loss: {a[0]:.3f} -> {a[-1]:.3f} | 采样有限 {torch.isfinite(z_1_hat_d).all().item()}")
 
 
 if __name__ == "__main__":

@@ -81,9 +81,11 @@ class MultimodalJEPA(nn.Module):
         self.image_decoder = ImageDecoder(
             cfg.image_size, cfg.patch_size, cfg.image_channels, cfg.dim,
             dec_heads, cfg.depth, cfg.mlp_ratio,
+            backbone=cfg.backbone, attn_layers=cfg.attn_layers,
         )
         self.text_decoder = TextDecoder(
             vocab_size, length, cfg.dim, dec_heads, cfg.depth, cfg.mlp_ratio,
+            backbone=cfg.backbone, attn_layers=cfg.attn_layers,
         )
 
         # —— 软对齐投影头（§3.4）：InfoNCE 用 proj；BYOL/DINO 用 align ——
@@ -104,6 +106,6 @@ class MultimodalJEPA(nn.Module):
 
         # —— Flow Matching 速度场（§4.1）：潜空间 v_ψ，欧氏 OT 直线基线 ——
         self.velocity = (
-            VelocityField(cfg.dim, cfg.flow_depth, cfg.flow_heads, cfg.mlp_ratio)
+            VelocityField(cfg.dim, cfg.flow_depth, cfg.flow_heads, cfg.mlp_ratio, use_adaln=cfg.flow_adaln)
             if cfg.flow_enabled else None
         )

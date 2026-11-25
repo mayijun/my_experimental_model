@@ -94,6 +94,7 @@ class MJEPAConfig:
     flow_weight: float = 0.1         # 流匹配损失权重（§4.1.2）
     flow_cond_enabled: bool = True   # 条件流（§4.1.8）：text→image / image→text 跨模态，z_0=噪声、c=源模态 Z
     flow_cond_weight: float = 0.1    # 条件流损失权重
+    flow_adaln: bool = False         # 速度场主干：True=DiT AdaLN-Zero 条件（规模化档），False=加法注入（冒烟档）
 
     @property
     def vision_patch(self) -> int:
