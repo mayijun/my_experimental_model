@@ -59,6 +59,7 @@ class MultimodalJEPA(nn.Module):
             rho_compress=cfg.rho_compress, rho_head_dim=cfg.rho_head_dim,
             rho_beta=cfg.rho_beta, rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
+            embed_factor=cfg.embed_factor,
             shared_encoder=self.shared_online,
         )
 
@@ -80,6 +81,7 @@ class MultimodalJEPA(nn.Module):
             rho_compress=cfg.rho_compress, rho_head_dim=cfg.rho_head_dim,
             rho_beta=cfg.rho_beta, rho_eps=cfg.rho_eps, rho_eps_z=cfg.rho_eps_z, rho_eps_keep=cfg.rho_eps_keep,
             rho_b_a=cfg.rho_b_a, rho_b_c=cfg.rho_b_c, rho_b_min=cfg.rho_b_min, rho_b_max=cfg.rho_b_max,
+            embed_factor=cfg.embed_factor,
             shared_encoder=self.shared_target,
         )
         self.image_target.load_state_dict(self.image_online.state_dict())

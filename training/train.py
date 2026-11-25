@@ -82,12 +82,29 @@ def apply_pac_schedule(optimizer, step, total_steps, cfg):
         g["lr"] = g["base_lr"] * (z_scale if name == "shared" else 1.0)
 
 
-def train(model, batch_fn, pad_id, mask_id, device, steps, lr):
+def build_optimizer(params, lr, optim):
+    """按 §3.4 选优化器（省显存开关）：
+
+    adamw（默认）/ adafactor（torch 内置，省 ~50% 优化器态，T5/PaLM 验证）
+    / adamw8bit（bitsandbytes，CUDA-only，省 ~50%，需 uv sync --extra train-gpu）。
+    """
+    if optim == "adafactor":
+        return torch.optim.Adafactor(params, lr=lr, weight_decay=0.0)
+    if optim == "adamw8bit":
+        try:
+            import bitsandbytes as bnb
+        except ImportError as e:
+            raise ImportError("adamw8bit 需要 bitsandbytes（CUDA-only）：uv sync --extra train-gpu") from e
+        return bnb.optim.AdamW8bit(params, lr=lr)
+    return torch.optim.AdamW(params, lr=lr)
+
+
+def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw"):
     """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。"""
     model.train()
     cfg = model.cfg
     params = build_param_groups(model, lr) if cfg.pac_enabled else model.parameters()
-    optimizer = torch.optim.AdamW(params, lr=lr)
+    optimizer = build_optimizer(params, lr, optim)
     for step in range(1, steps + 1):
         img, txt = batch_fn()
         with maybe_autocast(device):
@@ -107,7 +124,7 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr):
     return model
 
 
-def train_flow_stage(model, batch_fn, device, steps, lr):
+def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw"):
     """Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ 与解码器，只训速度场 v_ψ，不 update_target。
 
     p_1（冻结目标 latent 分布）静止是 Flow Matching 运输映射 well-posed 的前提；
@@ -119,8 +136,8 @@ def train_flow_stage(model, batch_fn, device, steps, lr):
     model.train()
     for name, p in model.named_parameters():
         p.requires_grad_(name.startswith("velocity."))
-    optimizer = torch.optim.AdamW(
-        [p for p in model.velocity.parameters() if p.requires_grad], lr=lr
+    optimizer = build_optimizer(
+        [p for p in model.velocity.parameters() if p.requires_grad], lr, optim
     )
     for step in range(1, steps + 1):
         img, txt = batch_fn()
@@ -196,6 +213,7 @@ def main():
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--optim", choices=["adamw", "adafactor", "adamw8bit"], default="adamw")
     # 对齐方法（§3.4）：infonce / byol（默认）/ dino
     parser.add_argument("--alignment-method", choices=["infonce", "byol", "dino"], default=None)
     # 交叉掩码（§3.2 式 18）与 PAC（§3.4 式 21）
@@ -222,6 +240,7 @@ def main():
     parser.add_argument("--flow-cond-weight", type=float, default=None)
     parser.add_argument("--flow-adaln", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--share-trunk", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
+    parser.add_argument("--embed-factor", type=int, default=None)  # 文本词嵌入低秩分解维 F（0=关闭）
     parser.add_argument("--flow-stage-steps", type=int, default=0)  # >0 时主训练后进入 Flow 阶段（§4.2(e)）
     parser.add_argument("--dataset-size", type=int, default=2048)
     parser.add_argument("--eval-samples", type=int, default=16)
@@ -293,6 +312,7 @@ def main():
         flow_cond_weight=args.flow_cond_weight,
         flow_adaln=args.flow_adaln,
         share_trunk=args.share_trunk,
+        embed_factor=args.embed_factor,
     )
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"
@@ -342,11 +362,11 @@ def main():
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"参数: {total/1e6:.2f}M 总 | {trainable/1e6:.2f}M 可训练 | vocab={vocab_size}")
 
-    train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr)
+    train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr, optim=args.optim)
 
     if args.flow_stage_steps > 0:
         print(f"\n=== Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ，只训 v_ψ，{args.flow_stage_steps} 步 ===")
-        train_flow_stage(model, batch_fn, device, args.flow_stage_steps, args.lr)
+        train_flow_stage(model, batch_fn, device, args.flow_stage_steps, args.lr, optim=args.optim)
 
     if args.save:
         save_checkpoint(args.save, model, cfg, vocab_size, tokenizer_meta=tokenizer_meta)

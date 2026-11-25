@@ -34,6 +34,10 @@ hf = [
 train = [
     "accelerate>=0.30",
 ]
+# CUDA-only 训练加速件（8-bit 优化器 bitsandbytes，仅 --optim adamw8bit 需要）
+train-gpu = [
+    "bitsandbytes>=0.43",
+]
 
 [tool.uv]
 # 三个 torch extra 两两互斥：同一环境只能装一种 torch，且 --all-extras 不再可用。

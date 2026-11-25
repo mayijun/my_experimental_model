@@ -361,10 +361,18 @@ class TextEncoder(nn.Module):
                  rho_compress=False, rho_head_dim=64, rho_beta=0.1,
                  rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
                  rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0,
-                 shared_encoder=None):
+                 embed_factor=0, shared_encoder=None):
         super().__init__()
         hidden_dim = hidden_dim or dim
-        self.embedding = nn.Embedding(vocab_size, hidden_dim)
+        # 词嵌入低秩分解（§2.2.7，ALBERT factorized embedding）：V×H → V×F + F×H。
+        # 中型档 hidden_dim 大（1024–4096）× 词表大（~126k）时，embedding 可占 ~500M 参数，
+        # 低秩分解到 F（如 128）可省一个量级，且不动主干、成熟低风险。
+        if 0 < embed_factor < hidden_dim:
+            self.embedding = nn.Embedding(vocab_size, embed_factor)
+            self.embed_proj = nn.Linear(embed_factor, hidden_dim, bias=False)
+        else:
+            self.embedding = nn.Embedding(vocab_size, hidden_dim)
+            self.embed_proj = None
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, max_len + 1, hidden_dim))
         self.mask_embed = nn.Parameter(torch.zeros(1, 1, hidden_dim))  # ρ 压缩的 mask 填充
@@ -389,6 +397,8 @@ class TextEncoder(nn.Module):
     def forward(self, ids):
         batch = ids.size(0)
         x = self.embedding(ids)
+        if self.embed_proj is not None:
+            x = self.embed_proj(x)  # 低秩分解：F → H
         if self.rho_compressor is not None:  # 先写后压：embedding 上算 ρ 丢冗余，mask 填充保 L
             x, self.last_keep, self.last_rho, self.last_b = self.rho_compressor(x, self.mask_embed)
         cls = self.cls_token.expand(batch, -1, -1)
