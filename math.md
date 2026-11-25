@@ -1,6 +1,6 @@
 # 多阶段潜空间推理多模态模型：端到端架构与数学基础（含核心命题验证）
 
-> 本文按「端到端四阶段流水线」组织：**阶段一编码（§2）→ 阶段二对齐与推理（§3）→ 阶段三解码（§4）→ 阶段四自反馈修正（§5）**。§2.2（JEPA 表征学习）的公式与当前实现（`model/`、`training/` 各模块）对齐；§4（Flow Matching / 解码）为规划章节，尚未实现；§2.1、§2.7、§3 引入的 $W, I, V, Y, \phi, M, \Omega, \Psi, E^I, E^V, E^A, R_I, R_V, R_A, K, e_t$ 是概念量，对应 [`plan`](file:///home/simon-ma/JEPA/.trae/plan_mosaic_text_unified_lossy_channel.md) 的 P1–P8，本脚本暂不实现。
+> 本文按「端到端四阶段流水线」组织：**阶段一编码（§2）→ 阶段二对齐与推理（§3）→ 阶段三解码（§4）→ 阶段四自反馈修正（§5）**。§2.2（JEPA 表征学习）的公式与当前实现（`model/`、`training/` 各模块）对齐；§4.1 Flow Matching 速度场 $v_\psi$ 的欧氏 OT 基线已实现（[flow.py](file:///home/simon-ma/JEPA/model/flow.py) 的 `VelocityField`），测地整流 / RFM（§4.1.6–4.1.8）仍为规划；§2.1、§2.7、§3 引入的 $W, I, V, Y, \phi, M, \Omega, \Psi, E^I, E^V, E^A, R_I, R_V, R_A, K, e_t$ 是概念量，对应 [`plan`](file:///home/simon-ma/JEPA/.trae/plan_mosaic_text_unified_lossy_channel.md) 的 P1–P8，本脚本暂不实现。
 
 ---
 
@@ -12,7 +12,7 @@
 | $E_\theta$ | 在线编码器（接收梯度，图像/文本各一） | `model.image_online`/`model.text_online`，[jepa.py](file:///home/simon-ma/JEPA/model/jepa.py) 的 `MultimodalJEPA` |
 | $E_\xi$ | 目标编码器（仅 EMA 更新，图像/文本各一） | `model.image_target`/`model.text_target`，[jepa.py](file:///home/simon-ma/JEPA/model/jepa.py) 的 `MultimodalJEPA` |
 | $P_\phi$ | JEPA 潜变量预测器（图像/文本各一） | `model.image_predictor`/`model.text_predictor`，[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `LatentPredictor` |
-| $v_\psi$ | Flow Matching 速度场预测器 | 概念量（§4 为规划章节，当前未实现） |
+| $v_\psi$ | Flow Matching 速度场预测器（欧氏 OT 直线基线） | [flow.py](file:///home/simon-ma/JEPA/model/flow.py) 的 `VelocityField`（已实现；测地整流 / RFM 见 §4.1.6–4.1.8） |
 | $D_\eta$ | 潜变量→各模态解码器 | `model.image_decoder`/`model.text_decoder`，[decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `ImageDecoder`/`TextDecoder` |
 | $D$ | 通用解码器记号（$R_I/g/R_V/R_A$ 的并称，§3.9），把 $Z$ 渲染回模态，对重建/生成无差别 | 概念量（§3.9） |
 | $H(X)$、$h(X)$ | Shannon 熵 $H(X)=-\sum_x p_x\log_2 p_x$（离散）；微分熵 $h(X)=-\int p_X\log_2 p_X$（连续） | §2.3；此 $H$/$h$ 为熵，区别于 §3.9 的隐含模式编码 $H$、状态 $h$ |
@@ -29,10 +29,11 @@
 | $Y$ | 跨模态共享语义因子 | 概念量，可由跨模态对齐或线性探针估计 |
 | $g$ | 文本量化器 $Z \mapsto \mathcal{V}^L$ | `generate` 的 argmax 解码，[decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `TextDecoder` |
 | $\mathbf G$ | 解码器诱导的拉回度量 $\mathbf G=J_D^\top J_D$（黎曼度量，区别于量化器 $g$） | 概念量，§2.1.1 / §2.2.6 / §3.7.1 |
+| $\mathrm{verify}$ | 客观正确性判定器 $\Omega\to\{0,1\}$（硬反馈的决策过程形式） | 概念量（§4.1.8 / §5 硬反馈），外部决策程序，未内置 |
 | $\mathcal{F}_t$ | 文本 $t$ 对应的潜空间纤维 | 概念量，$\mathcal{F}_t = g^{-1}(t)$ |
 | $\phi, M$ | 马赛克算子与马赛克观测 $M=\phi(I)$ | 概念量（plan P2），下采样 + 分块平均，未实现 |
-| $\Psi_h, H$ | 状态依赖算子、隐含模式编码 $Z'=\Psi_h(Z),\ h=H(x)$ | 概念量（plan P5），未实现 |
-| $h$ | 隐含模式状态（由 $H$ 自推断，含描述/推理倾向） | 概念量（plan P5），未实现 |
+| $\Psi_h, H$ | 状态依赖算子、隐含模式编码 $Z'=\Psi_h(Z),\ h=H(x)$ | [operator.py](file:///home/simon-ma/JEPA/model/operator.py) 的 `PsiLayer`（已实现，含 `infer_h`） |
+| $h$ | 隐含模式状态（由 $H$ 自推断，含描述/推理倾向） | [operator.py](file:///home/simon-ma/JEPA/model/operator.py) 的 `PsiLayer.infer_h`（已实现） |
 | $\mathrm{id}$ | 恒等算子（$Z\to Z$ 的单位元），重建 = $D(\mathrm{id}(Z))$（式 29） | 概念量（§3.9） |
 | $\Omega$ | 算子空间（$Z$ 上的自映射半群，$\mathrm{id}\in\Omega$、复合封闭，式 30） | 概念量（§3.5 / §3.9），未实现 |
 | $\omega$ | 算子参数 / 指令的变换分量（$\omega\in\Omega$，$Z'=\Psi(Z,\omega)$） | 概念量（plan P5），未实现 |
@@ -1522,6 +1523,80 @@ $$z_t = \exp_{z_0}\!\big(t\cdot\log_{z_0}(z_1)\big),\qquad v_\psi \in T\mathcal 
 | 推理串行深度 | $O(N)$（Euler 步，与 $L$ 解耦） | $O(N\cdot K)$（每步 Euler 外再套测地积分） |
 
 **关键瓶颈**：我们的 $\mathcal M$ 是**隐式定义**的（$\mathbf G=J_D^\top J_D$，无闭式 $\exp/\log$），每一步都要数值求解测地线方程，串行深度从 $O(N)$ 恶化到 $O(NK)$，且 $\mathbf G$ 随解码器漂移使测地线不稳定。因此 RFM **数学上更正确、GPU 上明显更贵**，仅在 $d$ 很小（如冒烟 $d=64$）或流形有闭式 $\exp/\log$（球面/双曲等）时才划算。当前建议：保持欧氏 FM，把 RFM 列为「当 off-manifold 生成退化（中途 $c(t)$ 塌陷）被实测观察到时」的备选，不强制切换。
+
+#### 4.1.7 黎曼流匹配的 GPU 友好近似（retraction-based）
+
+§4.1.6 指出 RFM 的瓶颈是 $\exp_z/\log_z$ 要数值解测地线 ODE，串行深度 $O(NK)$。但存在把「测地线」降级为「一阶 retraction」的近似族，代价从 $O(NK)$ 回到 $O(N)$、每步 $O(1)$，同时保留「路径始终在 $\mathcal M$ 上」的核心收益：
+
+**retraction 定义。** $R_z:T_z\mathcal M\to\mathcal M$ 满足 $R_z(0)=z$ 且 $\frac{d}{dt}R_z(tv)\big|_{t=0}=v$，即与 $\exp_z$ 一阶一致。两条公理（仅 Fréchet 可微）只给出一阶 $R_z(v)=z+v+o(\|v\|)$；要升到二阶 $O(\|v\|^2)$ 需 $R_z$ 为 $C^2$（Taylor 余项被二次项控制）：
+$$\exp_z(v) = R_z(v) + O(\|v\|^2)\quad(\text{当 }R_z\text{ 为 }C^2).$$
+
+**GPU 友好的 retraction（软投影）定义。** $\mathcal M$ 隐式由量化器 $g$（argmax）定义。连续流每步用**软投影** retraction，把环境空间步进投影到 token 区分方向——即拉回度量 $\mathbf G=J_D^\top J_D$ 的像空间（$T_z\mathcal M=\operatorname{im}J_D^\top=\operatorname{im}\mathbf G$，§4.2(a)）：
+
+$$R_z(v) = z + P_z v,\qquad P_z = J_D^+ J_D \in \mathbb R^{d\times d},$$
+
+其中 $J_D\in\mathbb R^{|\mathcal V|\times d}$ 是读出层雅可比（第 $v$ 行为 $w_v^\top$，§4.2(a) 式 35），$J_D^+$ 为 Moore–Penrose 伪逆。$P_z$ 是 $\operatorname{im}J_D^\top$（token 区分方向）上的**正交投影**，四条性质：
+
+1. $P_z^2=P_z$（幂等）、$P_z^\top=P_z$（对称）、$\operatorname{rank}P_z=\operatorname{rank}J_D=r\le\min(|\mathcal V|,d)$（§4.2(a)）；
+2. 线性 $\Rightarrow C^\infty$；$R_z(0)=z$；$dR_z(0)=P_z$，且 $P_z|_{\operatorname{im}J_D^\top}=\mathrm{id}$（在切空间上恒等）；
+3. 故对 $v\in T_z\mathcal M$ 有 $R_z(v)=z+v$——切空间上一阶**精确**（无 $o$ 项），是真正的 retraction；核方向（token 内自由度）被投影掉，不引入伪流；
+4. GPU 成本：$P_z$ 为秩 $r$ 矩阵，每步一次 $O(rd)\le O(d\min(|\mathcal V|,d))$ 矩阵-向量乘，全 batch 并行、无 ODE 求解、无串行深度；$P_z$ 随 $z$ 慢变可摊销（缓存/低秩更新，见梯度 3）。
+
+**硬 decode–reencode** $E(g(z+v))$ 是**离散读出/锚定**（snap-to-codebook，§4.2(f) 的 argmax/FSQ），保证最终落在可解码点上；但它是分段常值（Voronoi 胞内 $dR=0$、胞界跳变），**不是** retraction，只用于最终读出一步。
+
+**误差分析（两类正交误差）。** 设每步速度已投影到切空间（$v_\psi(z_t,t)\in T_{z_t}\mathcal M$），则 $P_{z_t}v=v$、$R_{z_t}(v\Delta t)=z_t+v\Delta t$。精确流的一步为 $\exp_{z_t}(v\Delta t)=z_t+v\Delta t+O(\Delta t^2)$（$\exp$ 为 $C^\infty$、$d\exp_{z_t}(0)=\mathrm{id}$），故**局部截断误差**
+
+$$\big\|R_{z_t}(v\Delta t)-\exp_{z_t}(v\Delta t)\big\|=O(\Delta t^2),$$
+
+即软投影是一阶方法（与欧氏 Euler 同阶）；累计 $N=O(\Delta t^{-1})$ 步后**全局误差** $O(\Delta t)$，可经 reflow（§4.1.5）迭代拉直消除。与之**正交**的是最终硬读出的**量化误差**
+
+$$\big\|E(g(z))-z\big\|\le\varepsilon_{\mathrm{quant}},\qquad \varepsilon_{\mathrm{quant}}\sim\text{Voronoi 胞半径}\sim f(|\mathcal V|,d),$$
+
+它不随 $\Delta t\to0$ 消失，只能靠增大 $|\mathcal V|$ 或软量化（FSQ/温度退火，§4.2(f)）压小。两类误差来源独立、可分别控制：
+
+| 误差 | 量级 | 来源 | 消除手段 |
+|---|---|---|---|
+| 截断（离散化） | 局部 $O(\Delta t^2)$ / 全局 $O(\Delta t)$ | 用 $R_z$ 替代 $\exp$ 的一阶积分器误差 | 减小 $\Delta t$、reflow、高阶积分器（截断测地线，梯度 2） |
+| 量化（读出） | $O(1)$（码本分辨率地板） | 硬 argmax snap-to-codebook | 增大 $|\mathcal V|$、FSQ/温度退火软量化 |
+
+GPU 视角：截断误差由 $\Delta t$ 与积分器阶数决定（**算力**换精度），量化误差由码本与软量化决定（**记忆/容量**换精度），二者在 $O(N)$ 串行深度下独立调优。
+
+**retraction-based FM。** 把速度场回归与采样里的 $\exp$ 换成 $R$：
+$$\mathcal L=\mathbb E\Big[\big\|v_\psi(z_t,t)-\dot R\big\|^2\Big],\qquad z_{t+\Delta t}=R_{z_t}\!\big(v_\psi(z_t,t)\,\Delta t\big).$$
+（截断/量化两类误差的量级与消除手段见上面误差分析；式 33 运输代价单调不增在软投影下仍成立。）三条 GPU 友好的梯度：
+
+1. **软投影 retraction**（上）：$R_z(v)=z+P_z v$，$O(1)$ 一步低秩投影（$r\le\min(|\mathcal V|,d)$），全程在 token 区分方向内；硬读出 $E(g(z))$ 只在最后一步做；
+2. **截断测地线（少步 RK）**：$K=1\text{–}2$ 步廉价积分器替代 $K=20\text{–}50$，降常数、不降阶；
+3. **低秩度量利用**：$\mathbf G=J_D^\top J_D$ 的秩 $\le\min(|\mathcal V|,d)$（§4.2(a)），只在 $\mathbf G$ 的像空间（token 区分方向）上做流、核空间走欧氏，配合投影 retraction。
+
+**结论。** 欧氏 FM（§4.1.1–4.1.4）是 retraction 的 $R_z(v)=z+v$（$P_z=\mathrm{id}$）退化特例；「欧氏 FM + 软投影 retraction」是最小 GPU 友好的 RFM 近似——把 off-manifold 偏差从「全局漂出 $\mathcal M$」压到「每步 $O(\Delta t^2)$、可被 reflow 吸收」，同时保持 $O(N)$ 串行深度。升级路径：先欧氏 FM（已实现，§4.1.2）→ 软投影 retraction（每步加 $z\leftarrow z+P_z v$，$P_z=J_D^+J_D$，秩 $r\le\min(|\mathcal V|,d)$）→ 需要时再上真 RFM。硬 argmax 读出 $E(g(z))$ 是最终离散化（§4.2(f)），不是连续流的 retraction。
+
+#### 4.1.8 反向合成（自举）：用模型自身轨迹 + 硬反馈过滤生成训练数据
+
+§4.1.5 的 reflow 需要「弯曲轨迹的 (起点, 终点) 配对」，而真实中间态（CoT）数据稀缺（见 §5 硬/软反馈：自然语言 CoT 是软反馈，无客观判据）。模型成型后可以**自己合成**这些轨迹，再经硬反馈过滤，构成自举回路：
+
+**verify 接口（数学定义）。** 设输出空间 $\Omega$（解码产物 $T=g(Z)$ 的取值域）。硬反馈的客观判定器是一个与模型 $\theta$ 无关的**全函数决策过程**
+$$\mathrm{verify}:\Omega\to\{0,1\},\qquad \mathrm{verify}(o)=1\iff o\in C,$$
+其中 $C\subseteq\Omega$ 是客观定义的「正确集」：
+
+- 形式语言：$\mathrm{verify}(\text{proof})=1$ 当且仅当证明项通过内核类型检查（Lean/mathlib）；
+- 程序：$\mathrm{verify}(\text{prog})=1$ 当且仅当执行满足规格（全部测试通过）；
+- 物理观测：$\mathrm{verify}(\text{state})=1$ 当且仅当状态与测量一致。
+
+它区别于 §5 的软反馈 $e_{\text{soft}}=\hat Z-E(g(\hat Z))$：软反馈是「自洽性」（$E\circ g\approx\mathrm{id}$），verify 是「正确性」（$o\in C$），二者正交（§5 命题 10）。分级形式 $\mathrm{verify}:\Omega\to[0,1]$（如通过测试比例）作偏分奖励，二元是极限。
+
+**四步自举回路。**
+
+1. **轨迹自举**：用 $\Psi_h$ 迭代（或 §3.7.2 的 ToT/MCTS 搜索）从起点滚出中间态 $Z^{(0)}\to Z^{(1)}\to\cdots\to Z^{(N)}$，$Z^{(i+1)}=\Psi_{h^{(i)}}(Z^{(i)})$。
+2. **硬反馈过滤（拒绝采样）**：只保留终点可验证正确的轨迹
+   $$q\big(Z^{(1:N)}\mid Z^{(0)}\big) = \frac{p_\theta\big(Z^{(1:N)}\mid Z^{(0)}\big)\,\mathrm{verify}\!\big(g(Z^{(N)})\big)}{\mathcal Z(Z^{(0)})},\qquad \mathcal Z(Z^{(0)})=\mathbb E_{p_\theta}\big[\mathrm{verify}(g(Z^{(N)}))\big],$$
+   其中 $\mathcal Z(Z^{(0)})$ 是「该起点可解率」（成功概率）。
+3. **reflow 蒸馏**（§4.1.5 式 32）：用自生成配对 $(Z^{(0)},Z^{(N)})$ 拉直轨迹，$\mathcal L_{\text{reflow}}=\mathbb E\int_0^1\|v_\psi(z_t,t)-(Z^{(N)}-Z^{(0)})\|^2 dt$。
+4. **迭代不动点**（式 33）：运输代价单调不增，极限为 OT 测地线。
+
+**正确性 / 经济性二分量。** verify 是「正确性」分量的硬锚；reflow 的「最短流 / 码率」是「经济性」分量的锚。二者正交（§5 末的二维 reward）：仅正确性会导致模型学「绕远但正确」的路径，仅经济性会导致「直但错」——自举必须同时保留两个过滤条件。
+
+**冷启动节奏。** 成型前无法自举：先真实自监督语料（§2.2）练出初版 → 少量硬反馈数据（LeanDojo 证明态、程序执行态等）冷启动推理轨迹 → 进入上述自举放大。这解决了「中间态数据稀缺」：模型自己造，verify 只当裁判。
 
 ### 4.2 与本模型实现的对齐
 

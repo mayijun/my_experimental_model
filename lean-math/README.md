@@ -15,6 +15,7 @@
 | `LeanMath/Contractive.lean` | §3.7.1 收缩算子：复合仍是收缩（Banach 根基）、Neumann 级数代数身份 `(1-a)Σaⁱ = 1-aᵏ` |
 | `LeanMath/FixedPoint.lean` | （纯 Lean，无 mathlib）§3.7「结论状态 = 变换链不动点」：轨迹稳定 ⟹ 不动点、读模式退化为恒等、pred 迭代收敛到 0 |
 | `LeanMath/Semigroup.lean` | （纯 Lean，无 mathlib）§3.9 式 (29)–(30) 算子幺半群 + 命题 11 二分：`Ψ=id ⟺ 重建`、`Ψ≠id ⟺ 生成 ⟺ 移动了某点` |
+| `LeanMath/Retraction.lean` | §4.1.7 黎曼流匹配 GPU 友好近似：retraction 公理与一阶一致、欧氏 retraction 退化特例、投影 retraction 幂等核心、低秩度量 `rank(JᵀJ) ≤ min(\|𝒱\|, d)` |
 
 ## 形式化结果 ↔ math.md 命题对照
 
@@ -115,6 +116,47 @@ theorem generation_iff_moves_some_point (f) : isGeneration f ↔ ∃ z, f z ≠ 
 即「生成 ⟺ 非恒等 ⟺ 移动了某个点」，与 §3.9 式 (29)「重建 = D(id(Z))、生成 = D(Ψ(Z,ω))、
 Ψ≠id」严格对应；`LeanMath/FixedPoint.lean` 则证明「结论状态 = 变换链的不动点」及
 读模式（改分量为零）退化为恒等的两个基本断言。
+
+### 7. §4.1.7 黎曼流匹配的 GPU 友好近似（retraction-based）
+
+`Retraction.lean` 把 §4.1.7 的数学核心机械化（把切空间/环境空间统一抽象为同一赋范向量
+空间 `E`，即环境坐标下的展开）：
+
+```lean
+structure Retraction (E) where
+  base : E
+  toFun : E → E
+  map_zero : toFun 0 = base                       -- R_z(0) = z
+  fderiv_id : HasFDerivAt toFun (.id ℝ E) 0        -- dR_z(0) = id
+
+theorem Retraction.first_order_consistency (R : Retraction E) :
+    (fun v => R v - R.base - v) =o[𝓝 0] fun v => v   -- R(v) = z + v + o(‖v‖)
+
+theorem rank_pullbackMetric_le_min (J : Matrix m n ℝ) :
+    (Jᵀ * J).rank ≤ min (Fintype.card m) (Fintype.card n)  -- rank(G) ≤ min(|𝒱|, d)
+```
+
+四条结论：
+
+1. **retraction 公理**：`R_z(0)=z` 与 `dR_z(0)=id` 作为 `Retraction` 结构的两字段，与 §4.1.7
+   的 `R_z(0)=z`、`(d/dt)R_z(tv)|_{t=0}=v` 对应；
+2. **一阶一致**（`first_order_consistency`）：Fréchet 可微 + `dR(0)=id` 直接给出
+   `R(v)=z+v+o(‖v‖)`——这是 §4.1.7 `exp_z(v)=R_z(v)+O(‖v‖²)` 去掉二阶余项的一阶部分；
+3. **欧氏 FM 是退化特例**（`euclideanRetraction`）：`R_z(v)=z+v` 满足两条公理；且
+   `projectionRetraction_id_eq_euclidean` 证明投影 retraction 在 `π=id` 时退化为它；
+4. **低秩度量**（`rank_pullbackMetric_*`）：`rank(JᵀJ)=rank(J)≤min(|𝒱|,d)`（引用 mathlib
+   `Matrix.rank_transpose_mul_self` 与 `rank_le_card_height/width`），是 §4.1.7 梯度 3 与
+   §4.2(a)「可区分维度至多 min(|𝒱|,d)」的精确线性代数形式；
+5. **线性投影 retraction**（`linearProjectionRetraction_fderiv` / `linearProjection_idOnImage`
+   / `linearProjectionRetraction_eq_euclidean_of_id`）：软投影 `R_z(v)=z+P_z v` 的导数恰为
+   `P_z`（非 `id`），且幂等投影在像空间上是恒等——合起来证明它是「切空间 `im J_Dᵀ` 上的
+   一阶精确 retraction」，`P_z=id` 时退化为欧氏 retraction。这是「问题 9」修正建议
+   （软投影 vs 硬 argmax 两分）的已验证核心。
+
+投影 retraction 的代数核心（`IsProjection` 幂等 + `projectionRetraction_lands_on_manifold`）
+证明 `π(R_z v)=R_z v`——即一步之后恒在不动点集（流形）上，是 §4.1.6/4.1.7「路径始终在
+M 上、全程可解码」的代数保证。真流形的 exp/log、测地线 ODE 与「投影 retraction 是
+retraction」的 `fderiv_id` 公理（需 π 为光滑投影）不在本文件展开，见「问题 8」「问题 9」。
 
 ## 数值校验结果
 
@@ -219,6 +261,57 @@ $\rho=\max_i|\tilde a_{h,i}|$ 且全部为正 ⟹ $\rho=\max_i\tilde a_{h,i}$）
 若文档需要，可把命题 8 的「⟹」方向（充分模型 ⟹ 创新白噪声）作为一条可证命题补进
 `Lossy.lean` 的统计扩展，但这已超出当前 mathlib 的信息论能力范围。
 
+### 问题 8（§4.1.7 的「O(‖v‖²)」需 C² 光滑性，两条公理只给出一阶 o(‖v‖)）
+
+math.md §4.1.7 写 `exp_z(v) = R_z(v) + O(‖v‖²)` 与「每步偏差 O(‖Δt·v‖²)」。但
+`Retraction.lean` 形式化的两条公理（`R(0)=z`、`dR(0)=id`，仅要求 Fréchet 可微）**只蕴含**
+一阶一致 `R(v)=z+v+o(‖v‖)`（`first_order_consistency`），不蕴含二阶界。要从
+`o(‖v‖)` 升级到 `O(‖v‖²)`，需要 retraction 至少 `C²`（或 `C¹` 且导数 Lipschitz），使
+Taylor 余项被二次项控制——这是标准事实，但**不在两条公理之内**。
+
+**修正建议（面向 GPU 友好近似）：把「每步偏差 O(‖Δt·v‖²)」拆成两类正交误差、分两档
+retraction 表述，而不是合并成一句：**
+
+1. **截断误差（随 Δt→0 消失）**：对**光滑** retraction（含线性投影 `R_z(v)=z+P_z v`），
+   Taylor 余项给出 `R_z(v)=z+v+O(‖v‖²)`，故每步 off-manifold 偏差 `O(Δt²)`、可被 reflow
+   吸收。前提是 retraction 为 `C²`——两条公理只给 `o(‖v‖)`。
+2. **量化误差（不随 Δt→0 消失）**：**硬 argmax** 投影 `E(g(z+v))` 在 Voronoi 胞内是常数
+   （`dR=0`）、跨胞界是 O(1) 跳变，既非 C² 也不一阶一致，其「每步偏差」是 **O(1) 量化跳变**，
+   只能靠增大 `|𝒱|`/`d` 或软量化（FSQ/温度退火，§4.2(f)）压小，**不能**靠减小 Δt 或 reflow 消除。
+
+建议 §4.1.7 结论句改为：「光滑 retraction（线性投影）把 off-manifold 偏差压到每步 O(Δt²)、
+可被 reflow 吸收；硬 argmax 读出引入的是 O(1) 量化地板（码本分辨率），二者是正交的两类
+误差，不应合并成同一句『每步 O(Δt²)』」。
+
+### 问题 9（§4.1.7「投影 retraction」是 retraction 需光滑子流形前提，本目录只机械化代数核心）
+
+§4.1.7 断言 `R_z(v)=E(g(z+v))` 是 retraction。`Retraction.lean` 已机械化其**代数核心**：
+幂等 `π∘π=π`（`IsProjection`）、基点 `R_z(0)=z`（当 `π z = z`）、像落在不动点集
+`π(R_z v)=R_z v`（`projectionRetraction_lands_on_manifold`）。但「`dR_z(0)=id`」这条
+`fderiv_id` 公理要求 `π=E∘g` 是**光滑**投影到子流形 `M=Fix(π)`、且 `dπ(z)` 在切空间
+`T_zM` 上为恒等——这属于子流形/横截性范畴，本目录**未机械化**，且对离散 argmax 量化器
+`g`（分段常值、不可微）该光滑前提天然不成立。更严重的是：硬 argmax 的 `E(g(z+v))` 是
+**分段常值**（胞内 `dR=0`、胞界跳变），连一阶一致都不满足（导数在胞内恒为 0，不是 id）。
+
+**修正建议（面向 GPU 友好近似）：把「自然 retraction = 投影（decode–reencode）」改为两层，**
+并已用 `linearProjectionRetraction_fderiv` / `linearProjection_idOnImage` /
+`linearProjectionRetraction_eq_euclidean_of_id` 三条定理机械化：
+
+1. **连续流的 retraction（软、一阶精确、GPU 友好）**：`R_z(v)=z+P_z v`，其中
+   `P_z=J_D^+J_D` 是拉回度量 `G=J_D^TJ_D` 的像空间（token 区分方向 = `T_zM`）正交投影。
+   它是**线性（C^∞）、一阶精确（无 o 项）、每步 O(1)、秩 ≤ min(|𝒱|,d)**。
+   `linearProjectionRetraction_fderiv` 证明其导数恰为 `P_z`；`linearProjection_idOnImage`
+   证明 `P_z` 在 `im J_Dᵀ` 上恒等——二者合起来即「在切空间 `T_zM=im J_Dᵀ` 上是一阶一致的
+   retraction」，且它是 §4.1.7 梯度 3「低秩度量利用」的精确形式。
+2. **硬 decode–reencode 的职责**：`E(g(z+v))` 是**离散读出/锚定**（snap-to-codebook），保证
+   落在可解码点上，但它是分段常值（胞内 `dR=0`、胞界跳变），**不是** retraction；应定位为
+   「最终生成 token 的离散化」（§4.2(f) 的 argmax/FSQ），而非连续流的每步映射。
+
+建议 §4.1.7 把「投影 retraction」明确为「**切空间正交投影（软）** `R_z(v)=z+P_z v`」，并把
+`E(g(z+v))` 改述为「离散读出/锚定」，避免把分段常值的硬量化当作一阶一致的 retraction。
+这样「欧氏 FM + 软投影」才是最小 GPU 友好的 RFM 近似：连续流每步用 `z←z+P_z v`（O(1)、
+秩 r≤min(|𝒱|,d)），只在最后读出一步做硬 argmax。
+
 形式化确立的两条不变式——(a) 码率上界 $H(T)\le L\log_2|\mathcal{V}|$；(b) 分解
 $H(T)=I(T;Y)+H(T\mid Y)$——指向以下效率方向：
 
@@ -253,5 +346,5 @@ $H(T)=I(T;Y)+H(T\mid Y)$——指向以下效率方向：
 cd lean-math && lake build
 ```
 
-（Lean 4.36.0 + mathlib，见 `lean-toolchain`。全部 9 个模块——含纯 Lean 的
+（Lean 4.36.0 + mathlib，见 `lean-toolchain`。全部 10 个模块——含纯 Lean 的
 `FixedPoint` / `Semigroup`——均由 `lake build` 一次编译验证，无 `sorry`/`axiom`。）
