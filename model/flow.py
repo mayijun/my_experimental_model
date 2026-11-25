@@ -56,14 +56,18 @@ class VelocityField(nn.Module):
             nn.GELU(),
             nn.Linear(dim, dim),
         )
+        self.cond_embed = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))  # 条件注入（§4.1.8）
         self.blocks = nn.ModuleList(
             [TransformerBlock(dim, heads, mlp_ratio) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, dim)
 
-    def forward(self, z_t, t):
+    def forward(self, z_t, t, c=None):
         t_emb = self.time_embed(t).unsqueeze(1)  # [B, 1, dim]
+        if c is not None:
+            # 条件 c [B,L,d] → 全局池化 → [B,d]，与时间嵌入相加（最小条件注入，§4.1.8）
+            t_emb = t_emb + self.cond_embed(c.mean(dim=1)).unsqueeze(1)
         h = z_t + t_emb
         for blk in self.blocks:
             h = blk(h)
@@ -87,16 +91,56 @@ def flow_loss(velocity, z_1):
     return (v_pred - target).pow(2).mean()
 
 
+def conditional_flow_loss(velocity, c, z_1):
+    """条件 Flow Matching 损失（§4.1.2 条件变体，§4.1.8）。
+
+    c = 条件潜变量（源模态，冻结），z_1 = 目标潜变量（冻结），z_0~N(0,I)（§4.4 熵源）。
+    z_t=(1-t)z_0+t z_1，回归 v_ψ(z_t,t,c)→z_1-z_0。c 经全局池化注入速度场。
+    """
+    b, _, _ = z_1.shape
+    device = z_1.device
+    z_0 = torch.randn_like(z_1)
+    t = torch.rand(b, device=device)
+    t_exp = t.view(b, 1, 1)
+    z_t = (1.0 - t_exp) * z_0 + t_exp * z_1
+    v_pred = velocity(z_t, t, c=c)
+    target = z_1 - z_0
+    return (v_pred - target).pow(2).mean()
+
+
+def projection_components(readout_weight, eps=1e-6):
+    """读出层权重 W=J_D [V,d] → 右奇异向量 V_r [d,r]，正交投影 P_z=V_r V_r^T（§4.1.7 软投影）。
+
+    P_z 投影到 im J_D^T（token 区分方向），核方向（token 内自由度）被投影掉。
+    当 V>=d 满列秩时 r=d、P_z=I（退化为欧氏）。返回 V_r [d,r]；
+    应用 P_z v = V_r(V_r^T v)，O(L·d·r)。冻结解码器时可预计算一次、摊销到每步。
+    """
+    W = readout_weight.detach().float()
+    _, S, Vh = torch.linalg.svd(W, full_matrices=False)  # Vh [min(V,d), d]
+    r = int((S > eps * S.max()).sum().item())
+    return Vh[:r].T.contiguous()  # [d, r]
+
+
+def make_projection(readout_weight, eps=1e-6):
+    """把读出层权重转成软投影算子 v ↦ P_z v（[B,L,d] → [B,L,d]）。"""
+    V_r = projection_components(readout_weight, eps)
+    P = V_r @ V_r.t()  # [d,d] 对称幂等
+    return lambda v: v @ P
+
+
 @torch.no_grad()
-def euler_sample(velocity, z_0, n_steps):
-    """Euler 采样（§4.1.4）：z_{t+Δt}=z_t+v_ψ(z_t,t)Δt。"""
+def euler_sample(velocity, z_0, n_steps, projection=None):
+    """Euler 采样（§4.1.4），可选软投影 retraction（§4.1.7）：z_{t+Δt}=z_t+P_z v_ψ(z_t,t)Δt。"""
     device = z_0.device
     b = z_0.size(0)
     z = z_0
     dt = 1.0 / max(1, n_steps)
     for i in range(n_steps):
         t = torch.full((b,), i * dt, device=device)
-        z = z + velocity(z, t) * dt
+        v = velocity(z, t)
+        if projection is not None:
+            v = projection(v)
+        z = z + v * dt
     return z
 
 
@@ -119,6 +163,26 @@ def smoke():
     z_0 = torch.randn(4, L, dim)
     z_1_hat = euler_sample(vel, z_0, n_steps=8)
     print(f"采样有限: {torch.isfinite(z_1_hat).all().item()} | z 范数 {z_1_hat.norm():.2f}")
+
+    # 软投影 retraction（§4.1.7）：验证 P_z 幂等/对称/秩，及投影后采样有限。
+    W = torch.randn(30, dim) * 0.1  # 模拟 V<d 的 char 读出层（V=30 < d=64）
+    V_r = projection_components(W)
+    P = V_r @ V_r.t()
+    print(f"软投影: r={V_r.size(1)} | 幂等 {(P @ P - P).abs().max():.2e} | 对称 {(P - P.t()).abs().max():.2e}")
+    z_1_hat_p = euler_sample(vel, z_0, n_steps=8, projection=make_projection(W))
+    print(f"投影采样有限: {torch.isfinite(z_1_hat_p).all().item()} | z 范数 {z_1_hat_p.norm():.2f}")
+
+    # 条件流（§4.1.8）：c 条件注入，验证损失下降。
+    c = torch.randn(4, L, dim)
+    cond = []
+    opt2 = torch.optim.AdamW(vel.parameters(), lr=1e-3)
+    for _ in range(20):
+        opt2.zero_grad()
+        loss = conditional_flow_loss(vel, c, z_1)
+        loss.backward()
+        opt2.step()
+        cond.append(loss.item())
+    print(f"条件 flow_loss: {cond[0]:.3f} -> {cond[-1]:.3f}")
 
 
 if __name__ == "__main__":

@@ -165,6 +165,8 @@ def main():
     parser.add_argument("--flow-heads", type=int, default=None)
     parser.add_argument("--flow-steps", type=int, default=None)
     parser.add_argument("--flow-weight", type=float, default=None)
+    parser.add_argument("--flow-cond", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
+    parser.add_argument("--flow-cond-weight", type=float, default=None)
     parser.add_argument("--dataset-size", type=int, default=2048)
     parser.add_argument("--eval-samples", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
@@ -231,6 +233,8 @@ def main():
         flow_heads=args.flow_heads,
         flow_steps=args.flow_steps,
         flow_weight=args.flow_weight,
+        flow_cond_enabled=args.flow_cond,
+        flow_cond_weight=args.flow_cond_weight,
     )
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"

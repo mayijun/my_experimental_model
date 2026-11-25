@@ -91,6 +91,8 @@ class MJEPAConfig:
     flow_heads: int = 4              # v_ψ 注意力头数（需整除 d）
     flow_steps: int = 8              # Euler 采样步数（§4.1.4）
     flow_weight: float = 0.1         # 流匹配损失权重（§4.1.2）
+    flow_cond_enabled: bool = True   # 条件流（§4.1.8）：text→image / image→text 跨模态，z_0=噪声、c=源模态 Z
+    flow_cond_weight: float = 0.1    # 条件流损失权重
 
     @property
     def vision_patch(self) -> int:

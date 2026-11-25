@@ -5,7 +5,7 @@ from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
 
-from model.flow import flow_loss
+from model.flow import conditional_flow_loss, flow_loss
 
 
 def mask_patches(batch, n_patches, ratio, device):
@@ -205,10 +205,17 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
             model, img_tokens, txt_tokens, img_ctx, txt_ctx, img_tgt, txt_tgt
         )
 
-    # —— Flow Matching（§4.1.2）：无条件欧氏 OT 直线，z_0=噪声，z_1=冻结目标 Z ——
+    # —— Flow Matching（§4.1.2 + §4.1.8）：无条件欧氏 OT + 条件流（跨模态）——
     flow = torch.zeros((), device=device)
+    flow_cond = torch.zeros((), device=device)
     if cfg.flow_enabled and model.velocity is not None:
         flow = flow_loss(model.velocity, img_tgt) + flow_loss(model.velocity, txt_tgt)
+        if cfg.flow_cond_enabled:
+            # 条件流（§4.1.8）：text→image（c=文本目标 Z，z_1=图像目标 Z）+ image→text 双向
+            flow_cond = (
+                conditional_flow_loss(model.velocity, txt_tgt, img_tgt)
+                + conditional_flow_loss(model.velocity, img_tgt, txt_tgt)
+            )
 
     total = (
         cfg.jepa_weight * jepa
@@ -223,6 +230,7 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.psi_stop_weight * psi_stop
         + cfg.psi_consist_weight * psi_consist
         + cfg.flow_weight * flow
+        + cfg.flow_cond_weight * flow_cond
     )
     parts = {
         "jepa": jepa, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
@@ -230,6 +238,6 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         "align": align, "var": var, "rate": rate, "cross_pred": cross_pred,
         "psi_readout": psi_readout, "psi_var": psi_var,
         "psi_stop": psi_stop, "psi_consist": psi_consist,
-        "flow": flow,
+        "flow": flow, "flow_cond": flow_cond,
     }
     return total, parts
