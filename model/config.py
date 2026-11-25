@@ -123,11 +123,16 @@ PRESETS = {
     "tiny": dict(image_size=32, patch_size=8, dim=64, depth=2, heads=4),
     "small": dict(image_size=32, patch_size=8, dim=128, depth=4, heads=8),
     "base": dict(image_size=64, patch_size=8, dim=256, depth=6, heads=8),
-    # 中型：主干宽、潜空间窄，d = d_hidden / 8，词表用 LLaDA（§2.2.7 规模表）。
-    "0.3b": dict(image_size=256, patch_size=8, hidden_dim=1024, dim=128, depth=24, heads=16, share_trunk=True),
-    "1b": dict(image_size=256, patch_size=8, hidden_dim=2048, dim=256, depth=24, heads=16, share_trunk=True),
-    "3b": dict(image_size=512, patch_size=8, hidden_dim=3072, dim=384, depth=32, heads=32, share_trunk=True),
-    "7b": dict(image_size=512, patch_size=8, hidden_dim=4096, dim=512, depth=32, heads=32, share_trunk=True),
+    # 中型：主干宽、潜空间窄，d = d_hidden / 4（冲生成，§2.2.7 允许 r∈[4,16]，d 翻倍给生成中间表示更多容量）。
+    # Flow 速度场加深 + DiT AdaLN-Zero 冲生成质量（§4.1：flow_depth=12、flow_adaln=True、flow_steps=20）。
+    "0.3b": dict(image_size=256, patch_size=8, hidden_dim=1024, dim=256, depth=24, heads=16, share_trunk=True,
+                flow_depth=12, flow_adaln=True, flow_steps=20),
+    "1b": dict(image_size=256, patch_size=8, hidden_dim=2048, dim=512, depth=24, heads=16, share_trunk=True,
+               flow_depth=12, flow_adaln=True, flow_steps=20),
+    "3b": dict(image_size=512, patch_size=8, hidden_dim=3072, dim=768, depth=32, heads=32, share_trunk=True,
+               flow_depth=12, flow_adaln=True, flow_steps=20),
+    "7b": dict(image_size=512, patch_size=8, hidden_dim=4096, dim=1024, depth=32, heads=32, share_trunk=True,
+               flow_depth=12, flow_adaln=True, flow_steps=20),
 }
 
 
