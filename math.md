@@ -15,6 +15,9 @@
 | $v_\psi$ | Flow Matching 速度场预测器 | 概念量（§4 为规划章节，旧 `flow_matching_jepa.py` 已废弃、当前未实现） |
 | $D_\eta$ | 潜变量→各模态解码器 | `model.image_decoder`/`model.text_decoder`，[decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `ImageDecoder`/`TextDecoder` |
 | $D$ | 通用解码器记号（$R_I/g/R_V/R_A$ 的并称，§3.9），把 $Z$ 渲染回模态，对重建/生成无差别 | 概念量（§3.9） |
+| $H(X)$、$h(X)$ | Shannon 熵 $H(X)=-\sum_x p_x\log_2 p_x$（离散）；微分熵 $h(X)=-\int p_X\log_2 p_X$（连续） | §2.3；此 $H$/$h$ 为熵，区别于 §3.9 的隐含模式编码 $H$、状态 $h$ |
+| $I(X;Y)$ | 互信息 $=H(X)+H(Y)-H(X,Y)=H(X)-H(X\mid Y)$ | §2.3–2.5；写作 $I(\cdot;\cdot)$，区别于图像观测 $I$ |
+| $D_{\mathrm{KL}}(p\,\|\,q)$ | KL 散度（相对熵）$=\sum_x p_x\log_2\frac{p_x}{q_x}$（离散），$\int p\log_2\frac p q$（连续） | §3.5/§4/§5；$p\ll q$ 时有限，否则 $+\infty$ |
 | $\mu$ | EMA 衰减系数 | `ema_decay=0.99`，[config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `MJEPAConfig` |
 | $L$ | 潜序列长度（硬对齐要求两模态同长） | `text_len = n_patches = (image_size/patch_size)^2`，随规模伸缩；冒烟 tiny/small 为 16 |
 | $d$ | 潜空间维度 | `dim`，随规模伸缩；冒烟 tiny=64/small=128，大规模按 §2.2.7 的 $r=8$ 解耦 |
@@ -533,7 +536,7 @@ $$I(Z;T) = H(T) - H(T\mid Z) = H(T) \le L\log_2|\mathcal{V}|. \tag{3}$$
 
 $$H(Z_\delta) \approx h(Z) + Ld \log_2 \frac{1}{\delta} \;\xrightarrow{\delta \to 0}\; +\infty. \tag{4}$$
 
-例如 $\delta = 10^{-2}$ 时量化熵增量项 $Ld\log_2 100 \approx 6.64\,Ld$ bit；只要 $d \log_2(1/\delta) > \log_2|\mathcal{V}|$（几乎总成立，见 §2.8），(4) 就远超 (2)，$\delta\to0$ 时 $H(Z_\delta)\gg H(T)$。
+例如 $\delta = 10^{-2}$ 时量化熵增量项 $Ld\log_2 100 \approx 6.64\,Ld$ bit；只要 $d \log_2(1/\delta) > \log_2|\mathcal{V}| - h(Z)/L$（右端随 $\delta\to0$ 趋于 $\log_2|\mathcal{V}|$，几乎总成立，见 §2.8），(4) 就远超 (2)，$\delta\to0$ 时 $H(Z_\delta)\gg H(T)$。这里不能丢掉 $h(Z)/L$ 项：$h(Z)/L=O(d)$，在中等 $\delta$ 下与 $d\log_2(1/\delta)$ 同阶，仅在 $\delta\to0$ 极限下才可忽略。
 
 **(d) 数据处理不等式。**
 $Z_\delta$ 与 $T$ 都是 $Z$ 的函数，构成 Markov 链 $Z_\delta \leftarrow Z \to T$（$Z$ 为公共父节点）。由**数据处理不等式**，
@@ -573,9 +576,9 @@ $$I(Z;\hat Z) \le I(Z;T) = H(T) \le L\log_2|\mathcal{V}|. \tag{9}$$
 
 $$R(D_T) \le L\log_2|\mathcal{V}|
 \quad\Longrightarrow\quad
-D_T \ \ge\ D^{\star} := \min\{\, D : R(D) \le L\log_2|\mathcal{V}| \,\}. \tag{10}$$
+D_T \ \ge\ D^{\star} := \inf\{\, D : R(D) \le L\log_2|\mathcal{V}| \,\}. \tag{10}$$
 
-由 $R(0)=+\infty$ 得 $D^{\star}>0$。注意 $R^{-1}$ 是多值的，故必须用上述"最小失真"定义，而不能写成简单的反函数。这把"有损"从定性变成了可计算的量：词表越小、序列越短，$D^{\star}$ 越高。
+由 $R(0)=+\infty$ 得 $D^{\star}>0$。注意 $R^{-1}$ 是多值的，故必须用上述"下确界失真"定义，而不能写成简单的反函数（严格说 $R$ 定义域上的极值应取 $\inf$；对连续源 $R$ 连续、下确界可达，故 $\inf$ 即 $\min$）。这把"有损"从定性变成了可计算的量：词表越小、序列越短，$D^{\star}$ 越高。
 
 **视觉通道对比。** 对 $Ld$ 维、每维方差 $\sigma^2$ 的连续源，高斯情形下
 
@@ -598,11 +601,11 @@ $$\min_{p(t\mid z)}\ I(Z;T) - \beta\, I(T;Y), \qquad \beta > 0. \tag{13}$$
 
 但本模型的 $g$ 是确定性映射，$H(T\mid Z)=0$，$I(Z;T)=H(T)$，压缩只来自码本基数、**不来自随机噪声**。因此正确的对象不是 (13)，而是**确定性信息瓶颈（DIB，Strouse & Schwab 2017）**的基数约束形式：
 
-$$\max_{g:\ \mathcal{Z}\to\mathcal{C},\ |\mathcal{C}| \le |\mathcal{V}|^L}\ I(g(Z);Y). \tag{14}$$
+$$\max_{g:\ \mathcal{Z}\to\mathcal{C},\ |g(Z)| \le |\mathcal{V}|^L}\ I(g(Z);Y). \tag{14}$$
 
-这里**不能写"$\beta\to\infty$ 的极限"**：在 (13) 中 $\beta\to\infty$ 会丢掉压缩项，最优解退化为 $T=Z$（无限码率、零压缩），与目标恰好相反。(14) 把"码本基数不超过 $|\mathcal{V}|^L$"作为硬约束；由 (1) 它蕴含 $H(g(Z))\le L\log_2|\mathcal{V}|$，这才对应"固定词表 + 固定长度"的架构。
+这里**不能写"$\beta\to\infty$ 的极限"**：在 (13) 中 $\beta\to\infty$ 会丢掉压缩项，最优解退化为 $T$ 是 $Z$ 的**无损编码**（任意可逆 $T$，含 $T=Z$；无限码率、零压缩），与目标恰好相反。(14) 把"码本基数不超过 $|\mathcal{V}|^L$"作为硬约束——注意约束的是 $g$ 的**像集** $|g(Z)|$ 而非陪域 $|\mathcal{C}|$；由 (1) 它蕴含 $H(g(Z))\le \log_2|g(Z)|\le L\log_2|\mathcal{V}|$，这才对应"固定词表 + 固定长度"的架构。
 
-在 (14) 下，$T$ 是把 $Z$ 投影到离散码本、使语义互信息最大的量化器。要区分"语义"与"措辞"，需用 $Y$ 对**码率**做分解。由于 $Y$ 与 $T$ 都是 $Z$ 的函数，
+在 (14) 下，$T$ 是把 $Z$ 投影到离散码本、使语义互信息最大的量化器。要区分"语义"与"措辞"，需用 $Y$ 对**码率**做分解。注意式 (15) 是互信息定义式 $I(T;Y)=H(T)-H(T\mid Y)$ 的重排，对**任意**两个离散变量 $(T,Y)$ 恒成立、**不要求**它们同为 $Z$ 的函数；
 
 $$H(T) \;=\; \underbrace{I(T;Y)}_{\text{语义码率}} \;+\; \underbrace{H(T\mid Y)}_{\text{措辞码率}}. \tag{15}$$
 
@@ -788,7 +791,7 @@ $$H(I \mid M) > 0. \tag{16}$$
 
 **比值 A：有损裕度 $m = \dfrac{d\,\log_2(1/\delta)}{\log_2|\mathcal V|}$**（$\delta$ 取 $10^{-2}$，$\log_2(1/\delta)\approx 6.64$）。它度量式 (6) 中「潜空间量化熵 vs 文本码率」的差：$m>1$ 时 $H(Z_\delta\mid T)>0$。
 
-**比值 B：噪声熵预算 $r = \dfrac{h(z_0)/L}{H(T)/L}\approx\dfrac{d\cdot 2.047}{\log_2|\mathcal V|}$**。它度量 §4.4 中「噪声端熵源 vs 文本端码率」的比。
+**比值 B：噪声熵预算 $r = \dfrac{h(z_0)/L}{H(T)/L}\approx\dfrac{d\cdot 2.047}{\log_2|\mathcal V|}$**。它度量 §4.4 中「噪声端熵源 vs 文本端码率」的比。⚠️ 注意 $h(z_0)$ 是**微分熵**（相对量、可为负），不是绝对 bit 数，与离散熵 $H(T)$ 不可直接同单位相除；本比值是**启发式**，其严格版本是走式 (4) 的量化桥：固定与文本分辨率匹配的 $\delta$ 后 $H(Z_{\delta,0})\approx h(z_0)+Ld\log_2(1/\delta)\gg H(T)$，结论不变且更强。
 
 | 规模 | 有损裕度 $m$ | 噪声/文本 $r$ | $H(T)\le L\log_2|\mathcal V|$ | $h(z_0)=Ld\cdot2.047$ |
 |---|---|---|---|---|

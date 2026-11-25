@@ -6,7 +6,8 @@ import torch.nn as nn
 from .config import MJEPAConfig
 from .decoder import ImageDecoder, TextDecoder
 from .encoder import ImageEncoder, TextEncoder
-from .representation import LatentPredictor
+from .alignment import build_alignment_head
+from .representation import CrossMaskPredictor, LatentPredictor
 
 
 def _decoder_heads(dim, head_dim=64):
@@ -83,5 +84,11 @@ class MultimodalJEPA(nn.Module):
             vocab_size, length, cfg.dim, dec_heads, cfg.depth, cfg.mlp_ratio,
         )
 
-        # —— 软对齐投影头（InfoNCE 用）——
+        # —— 软对齐投影头（§3.4）：InfoNCE 用 proj；BYOL/DINO 用 align ——
         self.proj = nn.Sequential(nn.LayerNorm(cfg.dim), nn.Linear(cfg.dim, cfg.dim))
+        self.align = build_alignment_head(cfg)
+
+        # —— 交叉掩码预测器（§3.2 式 18）——
+        self.cross_mask_predictor = (
+            CrossMaskPredictor(cfg.dim, _decoder_heads(cfg.dim)) if cfg.cross_mask else None
+        )

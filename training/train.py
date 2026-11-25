@@ -30,22 +30,64 @@ from model.representation import update_target
 from training.losses import forward_losses, maybe_autocast
 
 
+def build_param_groups(model, lr):
+    """PAC 分层 lr（§3.4）：锚模态低 lr、新模态高 lr（~3×）、Z/共享层基准 lr。"""
+    cfg = model.cfg
+    anchor_enc = model.image_online if cfg.anchor_modality == "image" else model.text_online
+    new_enc = model.text_online if cfg.anchor_modality == "image" else model.image_online
+    anchor_params = list(anchor_enc.parameters())
+    new_params = list(new_enc.parameters())
+    anchor_ids = {id(p) for p in anchor_params}
+    new_ids = {id(p) for p in new_params}
+    rest = [p for p in model.parameters() if id(p) not in anchor_ids and id(p) not in new_ids]
+    return [
+        {"name": "anchor", "params": anchor_params, "lr": lr, "base_lr": lr},
+        {"name": "new", "params": new_params, "lr": lr * cfg.pac_new_lr_scale,
+         "base_lr": lr * cfg.pac_new_lr_scale},
+        {"name": "shared", "params": rest, "lr": lr, "base_lr": lr},
+    ]
+
+
+def pac_anchor_prob(step, total_steps, cfg):
+    """PAC 锚模态采样概率（§3.4 式 21）：p_anchor(t)=p_inf+(p_0-p_inf)·σ(-(t-t0)/τ)。"""
+    t = step / max(1, total_steps)
+    p0, pinf, tau, t0 = cfg.pac_anchor_p0, cfg.pac_anchor_pinf, cfg.pac_tau, cfg.pac_t0
+    return pinf + (p0 - pinf) * float(torch.sigmoid(torch.tensor(-(t - t0) / tau)))
+
+
+def apply_pac_schedule(optimizer, step, total_steps, cfg):
+    """PAC 阶段 lr 缩放（§3.4 表）：S2（50–90%）起 Z/共享层 lr ×pac_z_lr_scale。"""
+    if not cfg.pac_enabled:
+        return
+    t = step / max(1, total_steps)
+    z_scale = cfg.pac_z_lr_scale if 0.5 <= t < 0.9 else 1.0
+    for g in optimizer.param_groups:
+        name = g.get("name", "")
+        g["lr"] = g["base_lr"] * (z_scale if name == "shared" else 1.0)
+
+
 def train(model, batch_fn, pad_id, mask_id, device, steps, lr):
     """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。"""
     model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    cfg = model.cfg
+    params = build_param_groups(model, lr) if cfg.pac_enabled else model.parameters()
+    optimizer = torch.optim.AdamW(params, lr=lr)
     for step in range(1, steps + 1):
         img, txt = batch_fn()
         with maybe_autocast(device):
-            loss, parts = forward_losses(model, img, txt, pad_id, mask_id)
+            loss, parts = forward_losses(
+                model, img, txt, pad_id, mask_id, step=step, total_steps=steps
+            )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        update_target(model, model.cfg.ema_decay)
+        apply_pac_schedule(optimizer, step, steps, cfg)
+        update_target(model, cfg.ema_decay)
 
         if step == 1 or step % 25 == 0 or step == steps:
             detail = " ".join(f"{k}={v.item():.3f}" for k, v in parts.items())
-            print(f"step {step:4d} | loss {loss.item():.4f} | {detail}")
+            extra = f" | p_anchor={pac_anchor_prob(step, steps, cfg):.3f}" if cfg.pac_enabled else ""
+            print(f"step {step:4d} | loss {loss.item():.4f} | {detail}{extra}")
     return model
 
 
@@ -101,6 +143,12 @@ def main():
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-3)
+    # 对齐方法（§3.4）：infonce / byol（默认）/ dino
+    parser.add_argument("--alignment-method", choices=["infonce", "byol", "dino"], default=None)
+    # 交叉掩码（§3.2 式 18）与 PAC（§3.4 式 21）
+    parser.add_argument("--cross-mask", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
+    parser.add_argument("--pac", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
+    parser.add_argument("--anchor-modality", choices=["image", "text"], default=None)
     parser.add_argument("--dataset-size", type=int, default=2048)
     parser.add_argument("--eval-samples", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
@@ -148,6 +196,10 @@ def main():
         rho_b_min=args.rho_b_min,
         rho_b_max=args.rho_b_max,
         rho_rate_weight=args.rho_rate_weight,
+        alignment_method=args.alignment_method,
+        cross_mask=args.cross_mask,
+        pac_enabled=args.pac,
+        anchor_modality=args.anchor_modality,
     )
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"
@@ -156,7 +208,8 @@ def main():
     print(f"device: {device} | preset: {args.preset} | d={cfg.dim} d_hidden={cfg.width} "
           f"depth={cfg.depth} heads={cfg.heads} backbone={cfg.backbone} "
           f"frontend={cfg.image_frontend} image={cfg.image_size} patch={cfg.patch_size} "
-          f"latent_len={cfg.text_len} rho_compress={cfg.rho_compress}")
+          f"latent_len={cfg.text_len} rho_compress={cfg.rho_compress} "
+          f"align={cfg.alignment_method} cross_mask={cfg.cross_mask} pac={cfg.pac_enabled}")
 
     # —— 词表（tokenizer）选择 ——
     tokenizer_meta = None

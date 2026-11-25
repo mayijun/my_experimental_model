@@ -48,6 +48,31 @@ class MJEPAConfig:
     align_weight: float = 0.1   # InfoNCE 软对齐权重。
     var_weight: float = 0.1     # VICReg 方差正则（防塌缩）。
 
+    # —— 对齐方法（§3.4）：跨模态软对齐信号源，默认 BYOL（无负样本、无 batch 依赖）——
+    alignment_method: str = "byol"   # infonce（软对齐兜底）/ byol（默认）/ dino
+    byol_proj_dim: int = 0           # BYOL/DINO 投影输出维；0 表示 = dim
+    byol_hidden_dim: int = 0         # 投影/预测头隐层维；0 表示 = 4*dim
+    byol_ema_decay: float = 0.99     # BYOL 目标投影头 EMA
+    dino_teacher_temp: float = 0.04  # DINO 教师温度（锐化，越低越尖）
+    dino_student_temp: float = 0.1   # DINO 学生温度
+    dino_center_momentum: float = 0.9  # DINO centering 动量
+
+    # —— 交叉掩码（§3.2 式 18）：本模态剩余 + 其他模态联合预测被掩部分，防模态坍缩 ——
+    cross_mask: bool = True          # 启用跨模态交叉掩码
+    cross_mask_weight: float = 1.0   # 交叉掩码损失权重
+    cross_mask_ratio_start: float = 0.2  # ρ_mask(t) 起始掩码比
+    cross_mask_ratio_end: float = 0.8    # ρ_mask(t) 终点掩码比
+
+    # —— 渐进锚定课程 PAC（§3.4 式 21）：锚模态先定 Z，其余向锚对齐 ——
+    pac_enabled: bool = False        # 启用 PAC（冒烟档默认关，无多模态收益）
+    anchor_modality: str = "image"   # 锚模态：image / text
+    pac_anchor_p0: float = 1.0       # 锚概率初值
+    pac_anchor_pinf: float = 0.5     # 锚概率终值（1/K，K=2）
+    pac_tau: float = 0.1             # sigmoid 温度（归一化步数后）
+    pac_t0: float = 0.2              # 锚概率开始下降的归一化时刻
+    pac_new_lr_scale: float = 3.0    # 新模态 lr 倍数（锚低 lr、新高 lr）
+    pac_z_lr_scale: float = 0.1      # S2 起 Z/共享层 lr 缩放
+
     @property
     def vision_patch(self) -> int:
         """图像前端的 patch 边长：siglip2 用 16（SigLIP-2），patch 前端用 patch_size。"""

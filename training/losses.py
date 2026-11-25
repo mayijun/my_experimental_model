@@ -50,14 +50,61 @@ def info_nce(zi, zt, temperature):
     return (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels)) / 2
 
 
+def byol_loss(online_img, online_txt, target_img, target_txt):
+    """BYOL 跨模态自蒸馏损失（§3.4）：在线预测拟合 EMA 目标，无负样本、无 batch 依赖。"""
+    return cosine_loss(online_img, target_txt) + cosine_loss(online_txt, target_img)
+
+
+def dino_loss(s_img, s_txt, t_img, t_txt, student_temp, teacher_temp):
+    """DINO 自蒸馏损失（§3.4）：学生软标签拟合教师软标签（锐化），跨模态对称。"""
+    p_i = F.softmax(s_img / student_temp, dim=-1)
+    p_t = F.softmax(s_txt / student_temp, dim=-1)
+    q_t = F.softmax(t_txt / teacher_temp, dim=-1)  # 教师（已 stop-gradient）
+    q_i = F.softmax(t_img / teacher_temp, dim=-1)
+    return (
+        -(q_t * torch.log(p_i + 1e-8)).sum(-1)
+        - (q_i * torch.log(p_t + 1e-8)).sum(-1)
+    ).mean()
+
+
+def alignment_loss(model, img_cls, txt_cls):
+    """按 cfg.alignment_method 分派软对齐损失（§3.4），默认 BYOL。"""
+    cfg = model.cfg
+    if cfg.alignment_method == "infonce":
+        return info_nce(model.proj(img_cls), model.proj(txt_cls), cfg.temperature)
+    if cfg.alignment_method == "byol":
+        return byol_loss(
+            model.align(img_cls), model.align(txt_cls),
+            model.align.target(img_cls), model.align.target(txt_cls),
+        )
+    if cfg.alignment_method == "dino":
+        return dino_loss(
+            model.align(img_cls), model.align(txt_cls),
+            model.align.teacher_forward(img_cls), model.align.teacher_forward(txt_cls),
+            cfg.dino_student_temp, cfg.dino_teacher_temp,
+        )
+    return torch.zeros((), device=img_cls.device)
+
+
+def cross_mask_ratio(step, total_steps, start, end):
+    """交叉掩码递进（§3.4）：ρ_mask(t)=min(end, start+(end-start)·t/T)。"""
+    if step is None or total_steps is None:
+        return 0.5 * (start + end)
+    t = step / max(1, total_steps)
+    return min(end, start + (end - start) * t)
+
+
 def maybe_autocast(device):
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return nullcontext()
 
 
-def forward_losses(model, img, txt, pad_id, mask_id):
-    """跑通「编码 → 对齐/推理 → 解码」，返回 (总损失, 分项损失 dict)。"""
+def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None):
+    """跑通「编码 → 对齐/推理 → 解码」，返回 (总损失, 分项损失 dict)。
+
+    step/total_steps 供交叉掩码递进 ρ_mask(t) 与 PAC 锚概率调度使用；None 时取中值。
+    """
     cfg = model.cfg
     batch = img.size(0)
     device = img.device
@@ -92,10 +139,6 @@ def forward_losses(model, img, txt, pad_id, mask_id):
     img_cross = model.image_decoder(txt_tokens)   # 文本 token → 图像
     txt_cross = model.text_decoder(img_tokens)    # 图像 token → 文本
 
-    # —— 软对齐：InfoNCE ——
-    zi = model.proj(img_cls)
-    zt = model.proj(txt_cls)
-
     jepa = cosine_loss(img_pred, img_tgt) + cosine_loss(txt_pred, txt_tgt)
     recon_img_self = F.mse_loss(img_self, img)
     recon_txt_self = F.cross_entropy(
@@ -105,11 +148,24 @@ def forward_losses(model, img, txt, pad_id, mask_id):
     recon_txt_cross = F.cross_entropy(
         txt_cross.reshape(-1, txt_cross.size(-1)), txt.reshape(-1), ignore_index=pad_id
     )
-    align = info_nce(zi, zt, cfg.temperature)
+    align = alignment_loss(model, img_cls, txt_cls)
     var = variance_loss(img_tokens) + variance_loss(txt_tokens)
     rate = torch.zeros((), device=device)
     if cfg.rho_compress and img_b is not None and txt_b is not None:
         rate = 0.5 * (img_b.mean() + txt_b.mean())
+
+    # —— 交叉掩码（§3.2 式 18）：本模态剩余 + 其他模态联合预测被掩部分，防模态坍缩 ——
+    cross_pred = torch.zeros((), device=device)
+    if cfg.cross_mask and model.cross_mask_predictor is not None:
+        ratio = cross_mask_ratio(
+            step, total_steps, cfg.cross_mask_ratio_start, cfg.cross_mask_ratio_end
+        )
+        cm_img_mask = mask_patches(batch, cfg.n_patches, ratio, device)
+        cm_txt_masked = mask_text(txt, mask_id, ratio, device)
+        _, cm_img_ctx = model.image_online(img, mask=cm_img_mask)
+        _, cm_txt_ctx = model.text_online(cm_txt_masked)
+        cm_pred_img, cm_pred_txt = model.cross_mask_predictor(cm_img_ctx, cm_txt_ctx)
+        cross_pred = cosine_loss(cm_pred_img, img_tgt) + cosine_loss(cm_pred_txt, txt_tgt)
 
     total = (
         cfg.jepa_weight * jepa
@@ -118,10 +174,11 @@ def forward_losses(model, img, txt, pad_id, mask_id):
         + cfg.align_weight * align
         + cfg.var_weight * var
         + cfg.rho_rate_weight * rate
+        + cfg.cross_mask_weight * cross_pred
     )
     parts = {
         "jepa": jepa, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
-        "align": align, "var": var, "rate": rate,
+        "align": align, "var": var, "rate": rate, "cross_pred": cross_pred,
     }
     return total, parts

@@ -9,6 +9,8 @@ PSCO（§3.7.3）的算子迭代层也挂在表征层，见 model/psco.py。
 import torch
 import torch.nn as nn
 
+from .encoder import TransformerBlock
+
 
 class LatentPredictor(nn.Module):
     """P_φ：在 Z 内把掩码上下文的潜变量预测成干净目标潜变量（逐位置共享 MLP）。"""
@@ -26,6 +28,24 @@ class LatentPredictor(nn.Module):
         return self.net(context)  # [B,L,d] -> [B,L,d]
 
 
+class CrossMaskPredictor(nn.Module):
+    """跨模态掩码预测器（§3.2 式 18）：对 [img_ctx; txt_ctx] 做共享自注意力，
+    使图像 token 能补文本被掩缺失、反之亦然，从而防「单模态坍缩」（命题 6）。"""
+
+    def __init__(self, dim, heads, depth=1, mlp_ratio=4.0):
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [TransformerBlock(dim, heads, mlp_ratio) for _ in range(depth)]
+        )
+
+    def forward(self, img_ctx, txt_ctx):
+        L = img_ctx.size(1)
+        x = torch.cat([img_ctx, txt_ctx], dim=1)  # [B, 2L, d]
+        for block in self.blocks:
+            x = block(x)
+        return x[:, :L], x[:, L:]
+
+
 @torch.no_grad()
 def update_target(model, decay):
     """ξ ← μξ + (1−μ)θ，让 JEPA 目标缓慢移动（stop-gradient 防表征塌缩）。"""
@@ -36,3 +56,7 @@ def update_target(model, decay):
     for online, target in pairs:
         for o, t in zip(online.parameters(), target.parameters()):
             t.mul_(decay).add_(o, alpha=1.0 - decay)
+    # 对齐头（BYOL/DINO）的目标投影 EMA
+    align = getattr(model, "align", None)
+    if align is not None and hasattr(align, "update_target"):
+        align.update_target(decay)
