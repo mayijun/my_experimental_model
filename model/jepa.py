@@ -8,6 +8,7 @@ from .decoder import ImageDecoder, TextDecoder
 from .encoder import ImageEncoder, TextEncoder
 from .alignment import build_alignment_head
 from .representation import CrossMaskPredictor, LatentPredictor
+from .operator import PsiLayer
 
 
 def _decoder_heads(dim, head_dim=64):
@@ -91,4 +92,11 @@ class MultimodalJEPA(nn.Module):
         # —— 交叉掩码预测器（§3.2 式 18）——
         self.cross_mask_predictor = (
             CrossMaskPredictor(cfg.dim, _decoder_heads(cfg.dim)) if cfg.cross_mask else None
+        )
+
+        # —— PSCO 状态依赖收缩算子（§3.7.3）：共享 Z 上的自映射，防塌缩 ——
+        self.psi_layer = (
+            PsiLayer(cfg.dim, cfg.psi_transient_steps, cfg.psi_scan_steps,
+                     cfg.psi_delta, cfg.psi_gamma, cfg.psi_residual)
+            if cfg.psi_enabled else None
         )

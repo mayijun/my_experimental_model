@@ -73,6 +73,16 @@ class MJEPAConfig:
     pac_new_lr_scale: float = 3.0    # 新模态 lr 倍数（锚低 lr、新高 lr）
     pac_z_lr_scale: float = 0.1      # S2 起 Z/共享层 lr 缩放
 
+    # —— PSCO 状态依赖收缩算子（§3.7.3）：Z 空间自映射 Ψ_h，谱夹层防塌缩 ——
+    psi_enabled: bool = False        # 启用 PsiLayer（冒烟档默认关，先验证再开）
+    psi_transient_steps: int = 2     # 瞬态段串行步数 m（含门控 + 残差）
+    psi_scan_steps: int = 16         # 渐近段并行扫描步数 N
+    psi_delta: float = 0.05          # 谱夹层下界 δ
+    psi_gamma: float = 0.10          # 谱夹层上界 (1-γ)
+    psi_residual: str = "none"       # 非线性残差 r_h：none（线性骨架）/ mlp
+    psi_readout_weight: float = 0.1  # 读出头锚定损失权重（防线 2）
+    psi_var_weight: float = 0.1      # 方差正则权重（防线 3）
+
     @property
     def vision_patch(self) -> int:
         """图像前端的 patch 边长：siglip2 用 16（SigLIP-2），patch 前端用 patch_size。"""

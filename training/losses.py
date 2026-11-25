@@ -94,6 +94,22 @@ def cross_mask_ratio(step, total_steps, start, end):
     return min(end, start + (end - start) * t)
 
 
+def psi_losses(model, img_z, txt_z):
+    """PSCO 算子（§3.7.3）反塌缩损失：读出头锚定（防线 2）+ 方差正则（防线 3）。
+
+    Ψ_h 把 Z 映射到不动点 Z*；读出头要求 Z* 能重建输入 Z（塌成常数则重建不了），
+    方差正则要求 Z* 每维标准差 ≥ 1（防维度塌缩）。返回 (readout, var)。
+    """
+    img_star = model.psi_layer(img_z)
+    txt_star = model.psi_layer(txt_z)
+    readout = (
+        (model.psi_layer.readout(img_star) - img_z).pow(2).mean()
+        + (model.psi_layer.readout(txt_star) - txt_z).pow(2).mean()
+    )
+    var = variance_loss(img_star) + variance_loss(txt_star)
+    return readout, var
+
+
 def maybe_autocast(device):
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -167,6 +183,12 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         cm_pred_img, cm_pred_txt = model.cross_mask_predictor(cm_img_ctx, cm_txt_ctx)
         cross_pred = cosine_loss(cm_pred_img, img_tgt) + cosine_loss(cm_pred_txt, txt_tgt)
 
+    # —— PSCO 算子（§3.7.3）：读出头锚定 + 方差正则，防算子不动点塌缩 ——
+    psi_readout = torch.zeros((), device=device)
+    psi_var = torch.zeros((), device=device)
+    if cfg.psi_enabled and model.psi_layer is not None:
+        psi_readout, psi_var = psi_losses(model, img_tokens, txt_tokens)
+
     total = (
         cfg.jepa_weight * jepa
         + cfg.recon_weight * (recon_img_self + recon_txt_self)
@@ -175,10 +197,13 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.var_weight * var
         + cfg.rho_rate_weight * rate
         + cfg.cross_mask_weight * cross_pred
+        + cfg.psi_readout_weight * psi_readout
+        + cfg.psi_var_weight * psi_var
     )
     parts = {
         "jepa": jepa, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
         "align": align, "var": var, "rate": rate, "cross_pred": cross_pred,
+        "psi_readout": psi_readout, "psi_var": psi_var,
     }
     return total, parts

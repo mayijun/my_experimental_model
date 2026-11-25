@@ -1,6 +1,6 @@
 # 多阶段潜空间推理多模态模型：端到端架构与数学基础（含核心命题验证）
 
-> 本文按「端到端四阶段流水线」组织：**阶段一编码（§2）→ 阶段二对齐与推理（§3）→ 阶段三解码（§4）→ 阶段四自反馈修正（§5）**。§2.2（JEPA 表征学习）的公式与当前实现（`model/`、`training/` 各模块）对齐；§4（Flow Matching / 解码）为规划章节，其旧实现 `flow_matching_jepa.py` 已废弃、尚未重构；§2.1、§2.7、§3 引入的 $W, I, V, Y, \phi, M, \Omega, \Psi, E^I, E^V, E^A, R_I, R_V, R_A, K, e_t$ 是概念量，对应 [`plan`](file:///home/simon-ma/JEPA/.trae/plan_mosaic_text_unified_lossy_channel.md) 的 P1–P8，本脚本暂不实现。
+> 本文按「端到端四阶段流水线」组织：**阶段一编码（§2）→ 阶段二对齐与推理（§3）→ 阶段三解码（§4）→ 阶段四自反馈修正（§5）**。§2.2（JEPA 表征学习）的公式与当前实现（`model/`、`training/` 各模块）对齐；§4（Flow Matching / 解码）为规划章节，尚未实现；§2.1、§2.7、§3 引入的 $W, I, V, Y, \phi, M, \Omega, \Psi, E^I, E^V, E^A, R_I, R_V, R_A, K, e_t$ 是概念量，对应 [`plan`](file:///home/simon-ma/JEPA/.trae/plan_mosaic_text_unified_lossy_channel.md) 的 P1–P8，本脚本暂不实现。
 
 ---
 
@@ -12,7 +12,7 @@
 | $E_\theta$ | 在线编码器（接收梯度，图像/文本各一） | `model.image_online`/`model.text_online`，[jepa.py](file:///home/simon-ma/JEPA/model/jepa.py) 的 `MultimodalJEPA` |
 | $E_\xi$ | 目标编码器（仅 EMA 更新，图像/文本各一） | `model.image_target`/`model.text_target`，[jepa.py](file:///home/simon-ma/JEPA/model/jepa.py) 的 `MultimodalJEPA` |
 | $P_\phi$ | JEPA 潜变量预测器（图像/文本各一） | `model.image_predictor`/`model.text_predictor`，[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `LatentPredictor` |
-| $v_\psi$ | Flow Matching 速度场预测器 | 概念量（§4 为规划章节，旧 `flow_matching_jepa.py` 已废弃、当前未实现） |
+| $v_\psi$ | Flow Matching 速度场预测器 | 概念量（§4 为规划章节，当前未实现） |
 | $D_\eta$ | 潜变量→各模态解码器 | `model.image_decoder`/`model.text_decoder`，[decoder.py](file:///home/simon-ma/JEPA/model/decoder.py) 的 `ImageDecoder`/`TextDecoder` |
 | $D$ | 通用解码器记号（$R_I/g/R_V/R_A$ 的并称，§3.9），把 $Z$ 渲染回模态，对重建/生成无差别 | 概念量（§3.9） |
 | $H(X)$、$h(X)$ | Shannon 熵 $H(X)=-\sum_x p_x\log_2 p_x$（离散）；微分熵 $h(X)=-\int p_X\log_2 p_X$（连续） | §2.3；此 $H$/$h$ 为熵，区别于 §3.9 的隐含模式编码 $H$、状态 $h$ |
@@ -638,7 +638,7 @@ $$x \xrightarrow{\ \text{按 }\rho\text{ 丢/留}\ } \tilde x \xrightarrow{\ E\ 
 
 丢/留与比特由冗余度 $\rho=\|v-Mk\|^2$ 决定（见下文「创新编码」）；token 通道走无损（LM 熵模型），token 层走有损，$Z$ 完整保留。
 
-**接口契约：$Z$ 保持连续，不施加量化瓶颈 $Q$。**（注：本节讨论的语义量化器 FSQ/VQ/RVQ 来自已废弃的 Flow Matching 旧实现，仅作历史记录与备选参考，**非强制约束**；主表征路径以连续 $Z$ 为准。）三条理由：
+**接口契约：$Z$ 保持连续，不施加量化瓶颈 $Q$。**（注：本节讨论的语义量化器 FSQ/VQ/RVQ 仅为备选参考，**非强制约束**；主表征路径以连续 $Z$ 为准。）三条理由：
 
 1. **$Z$ 是精华，量化即二次有损**：本节的目标是让 $Z$ 完整承载 $I(Z;Y)$；若再对 $Z$ 施加 FSQ/VQ/RVQ，等于在已压好的精华上再砍一刀，与"有损只发生在 token 层"的定位直接矛盾。
 2. **§4 的 Flow 阶段要求连续潜变量**：线性路径 $z_t=(1-t)z_0+tz_1$ 与速度场 $v_\psi$ 的连续回归都要求 $z_1\in\mathbb R^{L\times d}$；$Z$ 一旦离散化，生成退化为离散序列建模，串行深度从 $O(N)$ 恶化到 $O(L)$（§4.3(a)）。
@@ -1366,7 +1366,7 @@ $$\mathcal L = \mathbb E_{(x_c,\ h,\ x_y)\sim \mathcal D}\Big[ d\big(P_\phi(c,h)
 $$\text{重建}\ =\ D\big(\mathrm{id}(Z)\big),\qquad
 \text{生成}\ =\ D\big(\Psi(Z,\omega)\big),\quad \Psi\neq\mathrm{id}. \tag{29}$$
 
-$\mathrm{id}$ 是恒等算子（$Z$ 不动，$D(Z)\approx$ 输入）；$\Psi(\cdot,\omega)$ 是非恒等算子（$Z\mapsto Z'$ 是新状态，$D(Z')$ 是输入之外的新东西）。于是「解码器做不做生成」是伪问题——**生成是算子赋予的，不是解码器赋予的**。废案里生成 = 离散码上的 Flow（须用量化器把 $Z$ 打成离散 token）；本框架生成 = 连续 $Z$ 上的算子，§3.7 的 $\Psi^{(N)}(Z)$ 全程不离开 $Z$，量化器的码空间角色被算子替代。
+$\mathrm{id}$ 是恒等算子（$Z$ 不动，$D(Z)\approx$ 输入）；$\Psi(\cdot,\omega)$ 是非恒等算子（$Z\mapsto Z'$ 是新状态，$D(Z')$ 是输入之外的新东西）。于是「解码器做不做生成」是伪问题——**生成是算子赋予的，不是解码器赋予的**。旧方案里生成 = 离散码上的 Flow（须用量化器把 $Z$ 打成离散 token）；本框架生成 = 连续 $Z$ 上的算子，§3.7 的 $\Psi^{(N)}(Z)$ 全程不离开 $Z$，量化器的码空间角色被算子替代。
 
 **算子空间与半群。** 令表征空间 $Z\subset\mathbb R^{L\times d}$，算子空间是 $Z$ 上的一族自映射，在复合下封闭：
 
@@ -1405,7 +1405,7 @@ $g_{\text{change}}\to0$ 时 $\Psi_h\to\mathrm{id}$（$L_0$，描述/重建端，
 
 ## 4. 阶段三 · 解码：表征空间 → 多模态输出
 
-> **【废弃方案 · 记录备查，非强制约束】** 本节（§4）的 Flow Matching 数学与实现方案——§4.1 线性插值 OT 路径、速度场回归、Euler 采样、FlowBlock 交叉注意力、时间嵌入，以及 §4.2 的解码——来自已废弃的旧实现 `flow_matching_jepa.py`，其代码已从当前仓库移除（当前仅保留 JEPA 核心 + PSCO 骨架）。本节仅作为历史记录与备选参考，**不作为本架构的强制约束**；解码/生成路径可按需重新选型（自回归、MaskGIT、离散 diffusion、或重写 Flow），不受本节公式束缚。
+> **【规划方案 · 非强制约束】** 本节（§4）的 Flow Matching 数学与实现方案——§4.1 线性插值 OT 路径、速度场回归、Euler 采样、FlowBlock 交叉注意力、时间嵌入，以及 §4.2 的解码——尚未在当前实现中落地（当前仅保留 JEPA 核心 + PSCO 骨架）。本节作为备选参考，**不作为本架构的强制约束**；解码/生成路径可按需选型（自回归、MaskGIT、离散 diffusion 或 Flow），不受本节公式束缚。
 
 ### 4.1 Flow Matching 潜空间生成
 
@@ -1548,7 +1548,7 @@ $$s_v(h)-s_u(h)=(w_v-w_u)^\top h+(b_v-b_u),$$
 
 **拉回度量的「像 / 核」分解。** 承接 §2.2.6 的 $g=J_D^\top J_D$（$J_D$ 为读出层雅可比）：$g$ 的**像空间**由 $\{w_v-w_u\}$ 张成，是「token 间区分方向」，决定 $\mathcal R_v$ 的超平面边界；$g$ 的**核空间**是「token 内的连续自由度」，即 $\mathcal R_v$ 内部、读出层看不见的方向。因此 $\mathrm{rank}(g)\le\min(|\mathcal V|,d)$ 精确刻画「连续 $Z$ 被折叠成多少个可区分离散 token」——可区分维度至多 $\min(|\mathcal V|,d)$，其余维度都是 token 内的连续语义。
 
-位置混合使解码器能借助其他位置纠正单个位置的采样误差，从而对 Flow 采样误差更鲁棒（旧实现是逐位置 `nn.Linear`，单点噪声直接变成乱码）。
+位置混合使解码器能借助其他位置纠正单个位置的采样误差，从而对 Flow 采样误差更鲁棒。
 
 **(b) 率是架构硬约束，不是损失项。**
 本模型没有任何 KL 项或码率惩罚。码率由 $|\mathcal{V}|^L$ 硬性封顶，对应 (14) 的约束集而不是 (13) 的 $\beta$。训练中只有失真项（重建交叉熵：JEPA 阶段 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`、Flow 阶段的教师强制重建；另加 Flow 端点采样重建一路）和防塌缩正则。

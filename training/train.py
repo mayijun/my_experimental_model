@@ -149,6 +149,15 @@ def main():
     parser.add_argument("--cross-mask", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--pac", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--anchor-modality", choices=["image", "text"], default=None)
+    # PSCO 状态依赖收缩算子（§3.7.3）
+    parser.add_argument("--psi", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
+    parser.add_argument("--psi-transient-steps", type=int, default=None)
+    parser.add_argument("--psi-scan-steps", type=int, default=None)
+    parser.add_argument("--psi-delta", type=float, default=None)
+    parser.add_argument("--psi-gamma", type=float, default=None)
+    parser.add_argument("--psi-residual", choices=["none", "mlp"], default=None)
+    parser.add_argument("--psi-readout-weight", type=float, default=None)
+    parser.add_argument("--psi-var-weight", type=float, default=None)
     parser.add_argument("--dataset-size", type=int, default=2048)
     parser.add_argument("--eval-samples", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
@@ -200,6 +209,14 @@ def main():
         cross_mask=args.cross_mask,
         pac_enabled=args.pac,
         anchor_modality=args.anchor_modality,
+        psi_enabled=args.psi,
+        psi_transient_steps=args.psi_transient_steps,
+        psi_scan_steps=args.psi_scan_steps,
+        psi_delta=args.psi_delta,
+        psi_gamma=args.psi_gamma,
+        psi_residual=args.psi_residual,
+        psi_readout_weight=args.psi_readout_weight,
+        psi_var_weight=args.psi_var_weight,
     )
     assert cfg.width % cfg.heads == 0, f"主干宽度 ({cfg.width}) 必须能被 heads ({cfg.heads}) 整除"
     assert cfg.image_size % cfg.vision_patch == 0, "image_size 必须能被前端 patch 边长整除"
@@ -209,7 +226,8 @@ def main():
           f"depth={cfg.depth} heads={cfg.heads} backbone={cfg.backbone} "
           f"frontend={cfg.image_frontend} image={cfg.image_size} patch={cfg.patch_size} "
           f"latent_len={cfg.text_len} rho_compress={cfg.rho_compress} "
-          f"align={cfg.alignment_method} cross_mask={cfg.cross_mask} pac={cfg.pac_enabled}")
+          f"align={cfg.alignment_method} cross_mask={cfg.cross_mask} pac={cfg.pac_enabled} "
+          f"psi={cfg.psi_enabled}")
 
     # —— 词表（tokenizer）选择 ——
     tokenizer_meta = None
