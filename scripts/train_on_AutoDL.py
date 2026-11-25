@@ -2,7 +2,8 @@
 """AutoDL 单卡 3b / L=1024 全流程：环境自举 → ImageNet-1K → 训练 → 评测。
 
 AutoDL 专属行为全部集中在本文件：
-- 自动定位 `/root/autodl-pub` 下的 ImageNet-1K（已解压优先，只有 tar/zip 时才解压）；
+- 数据集按「公开数据(/root/autodl-pub) → 共享数据(网盘/数据盘转存目录) → 公网下载」
+  三级顺序定位；已解压目录只读使用，只有 tar/zip 时才解压；
 - 用 uv 安装与显卡匹配的 torch（A800 → cu126，RTX PRO 6000/Blackwell → cu130）；
 - HF 镜像、数据盘缓存、bf16 checkpoint（约 13.7GB）；
 - TensorBoard 事件默认写入 `/root/tf-logs`（AutoDL 文档），AutoPanel 直接可视化。
@@ -13,8 +14,15 @@ inference.run、evaluation.metrics。
     python scripts/train_on_AutoDL.py
     python scripts/train_on_AutoDL.py --steps 20000 --batch-size 2
     python scripts/train_on_AutoDL.py --imagenet-root /root/autodl-pub/ImageNet/ILSVRC2012
+    python scripts/train_on_AutoDL.py --shared-root /root/autodl-nas/datasets
+    python scripts/train_on_AutoDL.py --download-urls https://.../ILSVRC2012_img_train.tar
 
-注意：ImageNet-1K 训练集约 1.28M 张、解压后约 150GB。若公开数据已是解压目录，
+数据查找顺序：公开数据 `/root/autodl-pub` → 共享数据（`--shared-root` /
+`/root/autodl-nas`、`/root/autodl-fs`、`/root/autodl-tmp` 等转存位置）→ 公网下载
+（`--download-urls` 指定的 tar/zip 直链；未指定时走 HuggingFace ILSVRC/imagenet-1k，
+该数据集是 gated，需要先接受许可并设置 HF_TOKEN）。
+
+注意：ImageNet-1K 训练集约 1.28M 张、解压后约 150GB。若公开/共享数据已是解压目录，
 脚本直接只读使用，不占数据盘；若只有 ILSVRC2012_img_train.tar，需要先把数据盘扩到
 ≥160GB，否则脚本会明确报错而不会写满磁盘。
 """
@@ -28,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -37,7 +46,7 @@ if str(REPO) not in sys.path:  # 允许 `python scripts/train_on_AutoDL.py` 直�
     sys.path.insert(0, str(REPO))
 VENV_PY = REPO / ".venv" / "bin" / "python"
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
-CANDIDATE_NAMES = ("ImageNet", "imagenet", "ImageNet-1K", "imagenet1k",
+CANDIDATE_NAMES = ("ImageNet", "imagenet", "ImageNet-1K", "imagenet-1k", "imagenet1k",
                    "ILSVRC2012", "ImageNet2012", "ImageNet1K")
 CLASS_FILES = ("LOC_synset_mapping.txt", "imagenet_classes.txt", "classnames.txt",
                "classes.txt", "synset_words.txt")
@@ -50,6 +59,17 @@ TEMPLATES = [
     "a close-up photo of a {}.",
     "a picture of a {}.",
 ]
+
+# 数据源优先级：AutoDL「公开数据」→「共享数据」→ 公网下载。
+PUBLIC_DATA_ROOTS = ("/root/autodl-pub",)   # 控制台「公开数据」，只读挂载
+SHARE_DATA_ROOTS = (                        # 「共享数据」转存到网盘/数据盘后的常见落点
+    "/root/autodl-nas",
+    "/root/autodl-fs",
+    "/root/autodl-tmp/shared_data",
+    "/root/autodl-tmp/shareData",
+    "/root/autodl-tmp/share_data",
+)
+IMAGENET_HF = "ILSVRC/imagenet-1k"          # 公网兜底：gated 数据集，需要 HF_TOKEN
 
 
 # ---------------------------------------------------------------- bootstrap
@@ -131,53 +151,109 @@ def _looks_like_class_dir(path):
 def _layout(path):
     """返回 (train_dir, val_dir, archive)，archive 表示尚未解压的文件。"""
     p = Path(path)
+    if not p.is_dir():
+        return None, None, None
     if (p / "train").is_dir() and _looks_like_class_dir(p / "train"):
-        val = p / "val"
-        return p / "train", (val if _looks_like_class_dir(val) else None), None
+        for name in ("val", "validation"):
+            val = p / name
+            if val.is_dir() and _looks_like_class_dir(val):
+                return p / "train", val, None
+        return p / "train", None, None
     if _looks_like_class_dir(p):
         return p, None, None
     for name in ("ILSVRC2012_img_train.tar", "imagenet.tar", "ImageNet.tar"):
         if (p / name).exists():
             return None, None, p / name
-    zips = sorted(list(p.glob("*.zip")) + list(p.glob("*.tar.gz")))
+    try:
+        entries = sorted(p.iterdir())
+    except OSError:
+        return None, None, None
+    for f in entries:
+        low = f.name.lower()
+        if f.is_file() and ("imagenet" in low or "ilsvrc" in low) and low.endswith(
+                (".tar", ".zip", ".tar.gz")):
+            return None, None, f
+    zips = [f for f in entries if f.suffix.lower() == ".zip" or f.name.endswith(".tar.gz")]
     if zips:
         return None, None, zips[0]
     return None, None, None
 
 
-def _find_imagenet(root):
-    env = os.environ.get("AUTODL_IMAGENET", "")
-    cands = [env] + [str(Path(base) / n) for base in ("/root/autodl-pub", "/root/autodl-tmp")
-                     for n in CANDIDATE_NAMES]
-    pub = Path("/root/autodl-pub")
-    if pub.is_dir():
-        for child in pub.iterdir():
-            if not child.is_dir():
-                continue
-            if "imagenet" in child.name.lower() or "ilsvrc" in child.name.lower():
-                cands.append(str(child))
-                cands.extend(str(g) for g in child.iterdir() if g.is_dir())
-            elif (child / "ILSVRC2012_img_train.tar").exists():
-                cands.append(str(child))
+def _scan_for_imagenet(base):
+    """在单个根目录下寻找可用的 ImageNet-1K（类别目录或 train/val 目录、tar/zip 压缩包）。"""
+    base = Path(base)
+    if not base.is_dir():
+        return None
+    try:
+        children = list(base.iterdir())
+    except OSError:
+        return None
+    cands = [base] + [base / n for n in CANDIDATE_NAMES]
+    for child in children:
+        if not child.is_dir():
+            continue
+        low = child.name.lower()
+        if "imagenet" in low or "ilsvrc" in low:
+            cands.append(child)
+            try:  # 「数据集名/版本」两级目录，如 ImageNet/ILSVRC2012
+                cands.extend(c for c in child.iterdir() if c.is_dir())
+            except OSError:
+                pass
+        elif any((child / n).exists() for n in CANDIDATE_NAMES):
+            cands.append(child)
+            cands.extend(child / n for n in CANDIDATE_NAMES if (child / n).exists())
+    seen = set()
     for cand in cands:
-        if cand and Path(cand).exists():
-            train, val, archive = _layout(cand)
-            if train or archive:
-                return Path(cand)
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            train, _, archive = _layout(cand)
+        except OSError:
+            continue
+        if train or archive:
+            return cand
     return None
 
 
-def _need_space(path, need):
+def _find_imagenet(root, share_roots=()):
+    """按 公开数据 → 共享数据 → 本地 的顺序定位 ImageNet-1K。
+
+    返回 (路径, 来源标签)；都找不到时返回 (None, None)，由调用方走公网下载兜底。
+    """
+    env = os.environ.get("AUTODL_IMAGENET", "")
+    if env and Path(env).exists():
+        return Path(env), "AUTODL_IMAGENET"
+    tiers = (
+        ("公开数据", PUBLIC_DATA_ROOTS),
+        ("共享数据", tuple(share_roots) + SHARE_DATA_ROOTS),
+        ("本地", (str(root), str(Path(root) / "data" / "imagenet"), "/root/autodl-tmp")),
+    )
+    for label, roots in tiers:
+        seen = set()
+        for base in roots:
+            key = str(Path(base))
+            if key in seen:
+                continue
+            seen.add(key)
+            found = _scan_for_imagenet(base)
+            if found:
+                return found, label
+    return None, None
+
+
+def _need_space(path, need, what="解压"):
     p = Path(path).resolve()
     while not p.exists() and p != p.parent:
         p = p.parent
     free = shutil.disk_usage(p).free
     if free < need:
         raise SystemExit(
-            f"[ImageNet] 解压需要约 {need / 1e9:.0f}GB，数据盘仅剩 {free / 1e9:.0f}GB。\n"
-            "请在 AutoDL 扩容数据盘到 ≥160GB，或改用已解压的公开数据目录：\n"
+            f"[ImageNet] {what}需要约 {need / 1e9:.0f}GB，数据盘仅剩 {free / 1e9:.0f}GB。\n"
+            "请在 AutoDL 扩容数据盘到 ≥160GB，或改用已解压的公开/共享数据目录：\n"
             "  python scripts/train_on_AutoDL.py --imagenet-root <含 train/n0xxxxxxxx 的目录>\n"
-            "若公开数据已是解压目录，脚本会只读使用，不会复制。"
+            "公开数据与共享数据中已解压的目录会只读使用，不会复制。"
         )
 
 
@@ -262,19 +338,128 @@ def _download_classes(dest):
     return None
 
 
-def prepare_imagenet(root, imagenet_root=None):
-    """定位或解压 ImageNet-1K，返回 (train_dir, val_dir, classes_file)。"""
-    found = Path(imagenet_root) if imagenet_root else _find_imagenet(root)
-    if not found:
-        raise SystemExit(
-            "未找到 ImageNet-1K。请先在 AutoDL 控制台「公开数据」搜索 ImageNet，\n"
-            "复制其路径后用 --imagenet-root 指定；或等待公开数据挂载到 /root/autodl-pub。"
-        )
-    print(f"[ImageNet] 数据集目录: {found}")
+def _download_archive(url, dest_dir, retries=4):
+    """下载单个压缩包到 dest_dir（支持断点续传，已完整则跳过）。"""
+    import urllib.error
+    import urllib.request
+
+    name = url.split("?")[0].rstrip("/").split("/")[-1] or "imagenet.tar"
+    dest = Path(dest_dir) / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(retries):
+        pos = dest.stat().st_size if dest.exists() else 0
+        req = urllib.request.Request(url, headers={"Range": f"bytes={pos}-"} if pos else {})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                status = getattr(r, "status", 200)
+                mode = "ab" if pos and status == 206 else "wb"
+                if mode == "wb":
+                    pos = 0
+                total = pos + int(r.headers.get("Content-Length") or 0)
+                print(f"[download] {name}：{pos / 1e9:.2f}GB / 约 {total / 1e9:.2f}GB")
+                mark = pos // (1 << 30)
+                with open(dest, mode) as f:
+                    while True:
+                        chunk = r.read(1 << 22)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        pos += len(chunk)
+                        if pos // (1 << 30) > mark:
+                            mark = pos // (1 << 30)
+                            print(f"[download]   {pos / 1e9:.2f}GB", flush=True)
+            return dest
+        except urllib.error.HTTPError as e:
+            if e.code == 416:  # Range 越界，说明本地文件已经完整
+                return dest
+            print(f"[download] {name} 失败（第 {attempt + 1}/{retries} 次）: {e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[download] {name} 失败（第 {attempt + 1}/{retries} 次）: {e}")
+        time.sleep(2 * (attempt + 1))
+    raise SystemExit(
+        f"[ImageNet] 公网下载失败: {url}\n"
+        "ImageNet 官方 tar 需要登录 image-net.org；可改用 --download-urls 指定可直连镜像，\n"
+        "或不传 --download-urls，让脚本走 HuggingFace ILSVRC/imagenet-1k（需 HF_TOKEN）。"
+    )
+
+
+def _download_imagenet_hf(dest, limit=0):
+    """公网兜底：从 HuggingFace 下载 ILSVRC/imagenet-1k 并导出为 ImageFolder。
+
+    ILSVRC/imagenet-1k 是 gated 数据集：需先在 HF 页面接受许可并设置 HF_TOKEN。
+    导出后 train/、val/ 下均为 n0xxxxxxxx 类别目录，可直接被 `_layout` 识别。
+    """
+    try:
+        from datasets import Image as HFImage
+        from datasets import load_dataset
+    except ImportError as e:  # noqa: BLE001
+        raise SystemExit(f"[ImageNet] 缺少 datasets 依赖，无法公网下载: {e}") from e
+
+    print(f"[ImageNet] 开始公网下载 {IMAGENET_HF}（gated，需 HF_TOKEN）...")
+    total = 0
+    for split, sub in (("train", "train"), ("validation", "val")):
+        try:
+            ds = load_dataset(IMAGENET_HF, split=split, streaming=True)
+            labels = ds.features["label"].names
+            ds = ds.cast_column("image", HFImage(decode=False))  # 保留原始 JPEG 字节
+        except Exception as e:  # noqa: BLE001
+            raise SystemExit(
+                "[ImageNet] 公网下载失败：ILSVRC/imagenet-1k 是 gated 数据集。\n"
+                "  1) 在 https://huggingface.co/datasets/ILSVRC/imagenet-1k 接受许可；\n"
+                "  2) export HF_TOKEN=hf_xxx（HF_ENDPOINT 默认已指向 hf-mirror.com）；\n"
+                "  3) 或改用 --download-urls 指定可直连的 ImageNet tar/zip 镜像。\n"
+                f"原始错误: {e}"
+            ) from e
+        out = Path(dest) / sub
+        for i, ex in enumerate(ds):
+            if limit and i >= limit:
+                break
+            raw, label = ex.get("image"), ex.get("label")
+            data = raw.get("bytes") if isinstance(raw, dict) else None
+            if not data or label is None:
+                continue
+            ext = (Path(raw.get("path") or "").suffix or ".jpg") if isinstance(raw, dict) else ".jpg"
+            cls_dir = out / labels[label]
+            cls_dir.mkdir(parents=True, exist_ok=True)
+            (cls_dir / f"{i:08d}{ext}").write_bytes(data)
+            total += 1
+            if total % 10000 == 0:
+                print(f"[ImageNet]   已导出 {total} 张（{split} {i + 1}）", flush=True)
+    print(f"[ImageNet] 公网下载完成：{dest}（{total} 张）")
+
+
+def _download_dataset(root, urls=(), limit=0):
+    """公网下载兜底：优先用显式 tar/zip 直链，否则走 HuggingFace ILSVRC/imagenet-1k。"""
+    out = Path(root) / "data" / "imagenet"
+    out.mkdir(parents=True, exist_ok=True)
+    if urls:
+        print(f"[ImageNet] 公开/共享数据均未找到，从公网下载 {len(urls)} 个压缩包 ...")
+        for url in urls:
+            _download_archive(url, out)
+        return out
+    need = max(2_000_000_000, limit * 400_000) if limit else 160_000_000_000
+    _need_space(out, need, what="下载")
+    _download_imagenet_hf(out, limit)
+    return out
+
+
+def prepare_imagenet(root, imagenet_root=None, share_roots=(), download_urls=(), download_limit=0):
+    """按「公开数据 → 共享数据 → 公网下载」定位 ImageNet-1K。
+
+    返回 (train_dir, val_dir, classes_file)。
+    """
+    if imagenet_root:
+        found, source = Path(imagenet_root), "指定路径"
+    else:
+        found, source = _find_imagenet(root, share_roots)
+    if found is None:
+        found, source = _download_dataset(root, download_urls, download_limit), "公网下载"
+    print(f"[ImageNet] 数据来源: {source} -> {found}")
     train, val, archive = _layout(found)
     if archive and not train:
         out = _extract_archive(archive, Path(root) / "data" / "imagenet")
         train, val, _ = _layout(out)
+        found = out
         if not train:
             raise SystemExit(f"[ImageNet] 解压后仍未找到 train/n0xxxxxxxx 目录: {out}")
     if not train:
@@ -397,7 +582,15 @@ def parse_args():
     p.add_argument("--root", type=str, default="",
                    help="AutoDL 数据盘工作目录（默认 /root/autodl-tmp/jepa_autodl）")
     p.add_argument("--imagenet-root", type=str, default="",
-                   help="ImageNet-1K 目录（含 train/n0xxxxxxxx），默认自动搜索 /root/autodl-pub")
+                   help="显式指定 ImageNet-1K 目录，优先于自动搜索（默认按 公开数据 → 共享数据 顺序查找）")
+    p.add_argument("--shared-root", action="append", default=[], metavar="DIR",
+                   help="共享数据目录（可多次指定；默认扫描 /root/autodl-nas、/root/autodl-fs、"
+                        "/root/autodl-tmp 等常见转存位置）")
+    p.add_argument("--download-urls", type=str, default="",
+                   help="公开数据与共享数据都没有时的公网 tar/zip 直链（逗号分隔）；"
+                        "留空则从 HuggingFace ILSVRC/imagenet-1k 下载（gated，需 HF_TOKEN）")
+    p.add_argument("--download-limit", type=int, default=0,
+                   help="公网下载每个 split 的图片上限（仅调试用，0=全量）")
     p.add_argument("--holdout", type=int, default=20, help="无 val 目录时每类切出的评测张数")
     p.add_argument("--steps", type=int, default=10000)
     p.add_argument("--flow-steps", type=int, default=1000)
@@ -444,8 +637,13 @@ def main():
         print(f"[gpu] {torch.cuda.get_device_name(0)} "
               f"{torch.cuda.get_device_properties(0).total_memory / 2**30:.0f}GiB")
 
-    # —— 1. ImageNet-1K ——
-    train_dir, val_dir, classes_file = prepare_imagenet(root, args.imagenet_root or None)
+    # —— 1. ImageNet-1K（公开数据 → 共享数据 → 公网下载）——
+    train_dir, val_dir, classes_file = prepare_imagenet(
+        root, args.imagenet_root or None,
+        share_roots=args.shared_root,
+        download_urls=[u.strip() for u in args.download_urls.split(",") if u.strip()],
+        download_limit=args.download_limit,
+    )
     manifest_path = Path(args.manifest) if args.manifest else root / "data" / "autodl_manifest.json"
     build_manifest(train_dir, val_dir, classes_file, args.holdout, manifest_path)
 
