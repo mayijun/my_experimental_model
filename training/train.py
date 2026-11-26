@@ -62,10 +62,12 @@ def _unwrap(model):
 
 
 def build_param_groups(model, lr):
-    """PAC 分层 lr（§3.4「分层 lr（软锚定）」）：锚编码器低 lr、新编码器/新解码器高 lr（~3×）、Z/共享层基准 lr。
+    """PAC 分层 lr（§3.4「分层 lr（软锚定）」）+ ρ 记忆独立分组（§3.4.2 先写后压）。
 
-    解码器是模态专属解释器（§4.2(a)），新模态接入时其解码器应与新编码器同档高 lr，
-    对应 §3.4 S1「训新前端+M+头」里的解码头；锚解码器仍归 shared（S2 起 ×0.1 防漂移）。
+    锚编码器低 lr、新编码器/新解码器高 lr（~3×）、Z/共享层基准 lr；
+    ρ 记忆（rho_compressor 的 k_proj/v_proj）单列一组，S1 冻结（lr=0）、S2 解冻，
+    由 apply_rho_schedule 按课程阶段门控。解码器是模态专属解释器（§4.2(a)），
+    新模态接入时其解码器应与新编码器同档高 lr；锚解码器仍归 shared（S2 起 ×0.1 防漂移）。
     """
     cfg = model.cfg
     anchor_enc = model.image_online if cfg.anchor_modality == "image" else model.text_online
@@ -74,17 +76,27 @@ def build_param_groups(model, lr):
     shared_ids = set()
     if model.shared_online is not None:
         shared_ids = {id(p) for p in model.shared_online.parameters()}
-    anchor_params = [p for p in anchor_enc.parameters() if id(p) not in shared_ids]
-    new_params = [p for p in new_enc.parameters() if id(p) not in shared_ids]
+    # ρ 记忆参数（在线编码器的 rho_compressor，若启用）：从锚/新组剥离，独立成组供课程门控。
+    rho_params = []
+    for enc in (model.image_online, model.text_online):
+        rc = getattr(enc, "rho_compressor", None)
+        if rc is not None:
+            rho_params.extend(rc.parameters())
+    rho_ids = {id(p) for p in rho_params}
+    anchor_params = [p for p in anchor_enc.parameters()
+                     if id(p) not in shared_ids and id(p) not in rho_ids]
+    new_params = [p for p in new_enc.parameters()
+                  if id(p) not in shared_ids and id(p) not in rho_ids]
     new_dec_params = list(new_dec.parameters())
     anchor_ids = {id(p) for p in anchor_params}
     new_ids = {id(p) for p in new_params}
     new_dec_ids = {id(p) for p in new_dec_params}
     rest = [
         p for p in model.parameters()
-        if id(p) not in anchor_ids and id(p) not in new_ids and id(p) not in new_dec_ids
+        if id(p) not in anchor_ids and id(p) not in new_ids
+        and id(p) not in new_dec_ids and id(p) not in rho_ids
     ]
-    return [
+    groups = [
         {"name": "anchor", "params": anchor_params, "lr": lr, "base_lr": lr},
         {"name": "new", "params": new_params, "lr": lr * cfg.pac_new_lr_scale,
          "base_lr": lr * cfg.pac_new_lr_scale},
@@ -92,6 +104,9 @@ def build_param_groups(model, lr):
          "base_lr": lr * cfg.pac_new_lr_scale},
         {"name": "shared", "params": rest, "lr": lr, "base_lr": lr},
     ]
+    if rho_params:
+        groups.append({"name": "rho_memory", "params": rho_params, "lr": lr, "base_lr": lr})
+    return groups
 
 
 def apply_pac_schedule(optimizer, step, total_steps, cfg):
@@ -103,6 +118,23 @@ def apply_pac_schedule(optimizer, step, total_steps, cfg):
     for g in optimizer.param_groups:
         name = g.get("name", "")
         g["lr"] = g["base_lr"] * (z_scale if name == "shared" else 1.0)
+
+
+def apply_rho_schedule(optimizer, step, total_steps, cfg):
+    """§3.4.2 先写后压：S1 冻结 ρ 记忆（lr=0），S2 起解冻（lr=base_lr）。
+
+    ρ 记忆（rho_compressor）追踪前端特征 v，上游未平稳时训练它无稳定不动点
+    （Curriculum.rho_memory_convergence_requires_stationary_input），故 S1 门控 lr=0；
+    与 forward 层的 rho_active（S1 不丢 token、不产生码率信号）配合，实现「先写后压」。
+    curriculum_enabled=False 时旁路（lr 保持 base_lr，等价旧行为）。
+    """
+    if not cfg.curriculum_enabled:
+        return
+    t = step / max(1, total_steps)
+    rho_active = t >= cfg.curriculum_rho_start
+    for g in optimizer.param_groups:
+        if g.get("name") == "rho_memory":
+            g["lr"] = g["base_lr"] if rho_active else 0.0
 
 
 def build_optimizer(params, lr, optim):
@@ -220,9 +252,31 @@ def make_writer(logdir, rank=0):
     return writer
 
 
+@torch.no_grad()
+def _ema_l2(model):
+    """在线 vs 目标编码器参数差的 RMS 范数，监控 EMA 漂移/发散。
+
+    若突然放大说明 ema_decay 不合理或训练发散；此前完全黑盒。share_trunk 下
+    共享主干只计一次，避免因图文都引用同一 trunk 而重复统计。无可比参数对时返回 None。
+    """
+    pairs = []
+    if model.shared_online is not None:
+        pairs.append((model.shared_online, model.shared_target))
+    pairs += [(model.image_online, model.image_target),
+              (model.text_online, model.text_target)]
+    sq_sum = 0.0
+    n = 0
+    for online, target in pairs:
+        for o, t in zip(online.parameters(), target.parameters()):
+            sq_sum += (o.detach() - t.detach()).pow(2).sum().item()
+            n += o.numel()
+    return (sq_sum / n) ** 0.5 if n else None
+
+
 def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", rank=0,
           writer=None, optimizer=None, start_step=0,
-          save_path=None, save_every=0, save_dtype="fp32", vocab_size=0, tokenizer_meta=None):
+          save_path=None, save_every=0, save_dtype="fp32", vocab_size=0, tokenizer_meta=None,
+          max_grad_norm=0.0):
     """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。
 
     resume 时传入已恢复状态的 optimizer 与 start_step，从 start_step+1 继续；
@@ -246,24 +300,44 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
         writer.add_scalar(tag, val, step)
         writer.add_scalar(tag + "_ema", cur, step)
 
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
     for step in range(start_step + 1, steps + 1):
+        t0 = time.time()
         img, txt = batch_fn()
         with maybe_autocast(device):
             # 走 model(...)（而非直接调 forward_losses），使 DDP 能同步梯度。
-            loss, parts = model(img, txt, pad_id, mask_id, step=step, total_steps=steps)
+            loss, parts, stats = model(img, txt, pad_id, mask_id, step=step, total_steps=steps)
         optimizer.zero_grad()
         loss.backward()
+        # 梯度范数 + 可选裁剪：max_grad_norm<=0 时不裁剪（inf 阈值），但仍记录范数，
+        # 用于诊断 bf16 下梯度爆炸/消失或某分支梯度为 0（多分支加权损失下 loss 曲线看不出）。
+        total_norm = torch.nn.utils.clip_grad_norm_(
+            trainable_params, max_grad_norm if max_grad_norm > 0 else float("inf")
+        )
         optimizer.step()
         apply_pac_schedule(optimizer, step, steps, cfg)
+        apply_rho_schedule(optimizer, step, steps, cfg)
         update_target(raw, cfg.ema_decay)
+        step_time = time.time() - t0
 
         if writer is not None:
             _log_scalar("train/loss", loss.item(), step)
             for k, v in parts.items():
                 _log_scalar(f"train/{k}", v.item(), step)
+            # 诊断统计：keep_ratio / z_std / z_mean / cross_cos_sim / cross_mask_ratio / txt_acc
+            for k, v in stats.items():
+                _log_scalar(f"train/{k}", v.item() if torch.is_tensor(v) else v, step)
             cur_lr = optimizer.param_groups[0].get("lr")
             if cur_lr is not None:
                 writer.add_scalar("train/lr", cur_lr, step)
+            writer.add_scalar("train/grad_norm", float(total_norm), step)
+            writer.add_scalar("train/step_time_ms", step_time * 1000.0, step)
+            writer.add_scalar("train/images_per_sec", img.size(0) / max(step_time, 1e-9), step)
+            if device.type == "cuda":
+                writer.add_scalar("train/gpu_mem_gb", torch.cuda.max_memory_allocated() / 1e9, step)
+            ema_l2 = _ema_l2(raw)
+            if ema_l2 is not None:
+                writer.add_scalar("train/ema_l2", ema_l2, step)
             if cfg.pac_enabled:
                 writer.add_scalar("train/p_anchor", pac_anchor_prob(step, steps, cfg), step)
             if cfg.curriculum_enabled:
@@ -290,7 +364,8 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
     return model
 
 
-def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, writer=None):
+def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, writer=None,
+                     max_grad_norm=0.0):
     """Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ 与解码器，只训速度场 v_ψ，不 update_target。
 
     p_1（冻结目标 latent 分布）静止是 Flow Matching 运输映射 well-posed 的前提；
@@ -315,17 +390,26 @@ def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, 
         writer.add_scalar(tag, val, step)
         writer.add_scalar(tag + "_ema", cur, step)
 
+    flow_params = [p for p in raw.velocity.parameters() if p.requires_grad]
     for step in range(1, steps + 1):
+        t0 = time.time()
         img, txt = batch_fn()
         with maybe_autocast(device):
-            loss, parts = model(img, txt, mode="flow")
+            loss, parts, _ = model(img, txt, mode="flow")
         optimizer.zero_grad()
         loss.backward()
+        total_norm = torch.nn.utils.clip_grad_norm_(
+            flow_params, max_grad_norm if max_grad_norm > 0 else float("inf")
+        )
         optimizer.step()
+        step_time = time.time() - t0
         if writer is not None:
             _log_scalar("flow/loss", loss.item(), step)
             for k, v in parts.items():
                 _log_scalar(f"flow/{k}", v.item(), step)
+            writer.add_scalar("flow/grad_norm", float(total_norm), step)
+            writer.add_scalar("flow/step_time_ms", step_time * 1000.0, step)
+            writer.add_scalar("flow/images_per_sec", img.size(0) / max(step_time, 1e-9), step)
         if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
             print(f"flow-stage {step:4d} | flow {parts['flow'].item():.4f} "
                   f"| flow_cond {parts['flow_cond'].item():.4f}", flush=True)
@@ -423,6 +507,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--optim", choices=["adamw", "adafactor", "adamw8bit"], default="adamw8bit")
+    parser.add_argument("--max-grad-norm", type=float, default=0.0,
+                        help="梯度裁剪阈值（0=不裁剪，仍记录 grad_norm 供诊断爆炸/消失；>0 时裁剪到该范数）")
     # 对齐方法（§3.4）：infonce / byol（默认）/ dino
     parser.add_argument("--alignment-method", choices=["infonce", "byol", "dino"], default=None)
     # 交叉掩码（§3.2 式 18）与 PAC（§3.4 式 21）
@@ -671,13 +757,14 @@ def main():
     train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr, optim=args.optim,
           rank=rank, writer=writer, optimizer=optimizer, start_step=start_step,
           save_path=args.save or None, save_every=args.save_every, save_dtype=args.save_dtype,
-          vocab_size=vocab_size, tokenizer_meta=tokenizer_meta)
+          vocab_size=vocab_size, tokenizer_meta=tokenizer_meta,
+          max_grad_norm=args.max_grad_norm)
 
     if args.flow_stage_steps > 0:
         if rank == 0:
             print(f"\n=== Flow 阶段（§4.2(e)）：冻结 E_ξ/E_θ，只训 v_ψ，{args.flow_stage_steps} 步 ===")
         train_flow_stage(model, batch_fn, device, args.flow_stage_steps, args.lr, optim=args.optim,
-                         rank=rank, writer=writer)
+                         rank=rank, writer=writer, max_grad_norm=args.max_grad_norm)
 
     if rank == 0 and args.save:
         # DDP 下 state_dict 键带 "module." 前缀，落盘前解包回裸模型，供 inference 直接加载。

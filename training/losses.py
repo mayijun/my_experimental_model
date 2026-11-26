@@ -197,7 +197,11 @@ def maybe_autocast(device):
 
 
 def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None):
-    """跑通「编码 → 对齐/推理 → 解码」，返回 (总损失, 分项损失 dict)。
+    """跑通「编码 → 对齐/推理 → 解码」，返回 (总损失, 分项损失 dict, 诊断统计 dict)。
+
+    诊断统计（第三项）不参与反传，仅为 TensorBoard 观测服务：ρ 保留率、潜空间 std/均值、
+    跨模态余弦、交叉掩码比例、文本重建准确率，用于验证 math.md 核心命题是否成立。
+    未启用的模块对应键不出现（而非写 0），避免曲线噪声。
 
     step/total_steps 供交叉掩码递进 ρ_mask(t) 与 PAC 锚概率调度使用；None 时取中值。
     """
@@ -205,9 +209,16 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     batch = img.size(0)
     device = img.device
 
+    # —— 课程门控（§3.4.2）：上游 ε-平稳前下游目标权重置 0；curriculum_enabled=False 时全 1 ——
+    gates = curriculum_gates(step, total_steps, cfg)
+    anchor_is_img = cfg.anchor_modality == "image"
+    # §3.4.2 先写后压：S1（t<curriculum_rho_start）时 ρ 压缩休眠（不丢 token、不产生码率信号），
+    # S2 起激活（丢 token + 码率 warmup）。curriculum_enabled=False 时 gates["rate"]=1 → 恒激活（旧行为）。
+    rho_active = gates["rate"] > 0.0
+
     # —— 编码（在线，干净 + 掩码）——
-    img_cls, img_tokens = model.image_online(img)
-    txt_cls, txt_tokens = model.text_online(txt)
+    img_cls, img_tokens = model.image_online(img, rho_active=rho_active)
+    txt_cls, txt_tokens = model.text_online(txt, rho_active=rho_active)
     # 码率信号 b_t（§2.6 式 665）：取自在线编码器干净输入，表示编码完整输入所需码率。
     # 必须在掩码 forward（下面）覆盖 last_b 之前捕获。
     img_b = model.image_online.last_b
@@ -215,17 +226,13 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
 
     img_mask = mask_patches(batch, cfg.n_patches, cfg.mask_ratio, device)
     txt_masked = mask_text(txt, mask_id, cfg.mask_ratio, device)
-    _, img_ctx = model.image_online(img, mask=img_mask)
-    _, txt_ctx = model.text_online(txt_masked)
+    _, img_ctx = model.image_online(img, mask=img_mask, rho_active=rho_active)
+    _, txt_ctx = model.text_online(txt_masked, rho_active=rho_active)
 
     # —— 目标（EMA、无梯度）——
     with torch.no_grad():
-        _, img_tgt = model.image_target(img)
-        _, txt_tgt = model.text_target(txt)
-
-    # —— 课程门控（§3.4.2）：上游 ε-平稳前下游目标权重置 0；curriculum_enabled=False 时全 1 ——
-    gates = curriculum_gates(step, total_steps, cfg)
-    anchor_is_img = cfg.anchor_modality == "image"
+        _, img_tgt = model.image_target(img, rho_active=rho_active)
+        _, txt_tgt = model.text_target(txt, rho_active=rho_active)
 
     def mscale(img_term, txt_term):
         """按 PAC p_anchor 缩放锚/新模态损失（损失权重门控近似单模态投喂，README 问题 14）。"""
@@ -266,14 +273,15 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     # —— 交叉掩码（§3.2 式 18）：本模态剩余 + 其他模态联合预测被掩部分，防模态坍缩 ——
     cross_pred_i = torch.zeros((), device=device)
     cross_pred_t = torch.zeros((), device=device)
+    cm_ratio = None  # 实际使用的交叉掩码比例（供诊断日志，验证递进调度）
     if cfg.cross_mask and model.cross_mask_predictor is not None:
-        ratio = cross_mask_ratio(
+        cm_ratio = cross_mask_ratio(
             step, total_steps, cfg.cross_mask_ratio_start, cfg.cross_mask_ratio_end
         )
-        cm_img_mask = mask_patches(batch, cfg.n_patches, ratio, device)
-        cm_txt_masked = mask_text(txt, mask_id, ratio, device)
-        _, cm_img_ctx = model.image_online(img, mask=cm_img_mask)
-        _, cm_txt_ctx = model.text_online(cm_txt_masked)
+        cm_img_mask = mask_patches(batch, cfg.n_patches, cm_ratio, device)
+        cm_txt_masked = mask_text(txt, mask_id, cm_ratio, device)
+        _, cm_img_ctx = model.image_online(img, mask=cm_img_mask, rho_active=rho_active)
+        _, cm_txt_ctx = model.text_online(cm_txt_masked, rho_active=rho_active)
         cm_pred_img, cm_pred_txt = model.cross_mask_predictor(cm_img_ctx, cm_txt_ctx)
         cross_pred_i = cosine_loss(cm_pred_img, img_tgt)
         cross_pred_t = cosine_loss(cm_pred_txt, txt_tgt)
@@ -340,4 +348,36 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         "flow": (flow_i + flow_t) * gates["flow"],
         "flow_cond": (flow_cond_i + flow_cond_t) * gates["flow"],
     }
-    return total, parts
+
+    # —— 诊断统计（不参与反传，仅 TensorBoard 观测；验证 math.md 核心命题是否成立）——
+    stats = {}
+    # 1) ρ 压缩实际保留率：验证「压缩率随记忆容量自动平衡」是否发生。
+    #    rate 下降但 keep_ratio 不变 ⇒ 码率正则在空转（记忆没学会吸收冗余）。
+    if cfg.rho_compress:
+        ik = getattr(model.image_online, "last_keep", None)
+        tk = getattr(model.text_online, "last_keep", None)
+        if ik is not None:
+            stats["keep_ratio_img"] = ik.float().mean().detach()
+        if tk is not None:
+            stats["keep_ratio_txt"] = tk.float().mean().detach()
+    # 2) 潜空间健康度：var loss 只惩罚 std<1，这里记录实际 std 与均值幅度，
+    #    第一时间发现维度塌缩（std→0）或均值漂移（|mean| 塌到 0），不等 loss 发散。
+    stats["z_std_img"] = img_tokens.detach().std(dim=(0, 1)).mean()
+    stats["z_std_txt"] = txt_tokens.detach().std(dim=(0, 1)).mean()
+    stats["z_mean_img"] = img_tokens.detach().abs().mean()
+    stats["z_mean_txt"] = txt_tokens.detach().abs().mean()
+    # 3) 跨模态对齐强度（非 loss）：proj 空间配对余弦均值，直观判断软对齐是否收敛。
+    with torch.no_grad():
+        zi = F.normalize(model.proj(img_cls.detach()), dim=-1)
+        zt = F.normalize(model.proj(txt_cls.detach()), dim=-1)
+        stats["cross_cos_sim"] = (zi * zt).sum(-1).mean()
+    # 4) 交叉掩码实际比例：递进调度 ρ_mask(t)，诊断 cross_pred 曲线变化时需对照。
+    if cm_ratio is not None:
+        stats["cross_mask_ratio"] = torch.tensor(cm_ratio, device=device)
+    # 5) 文本自重建 token 准确率（排除 pad）：recon_txt 是 CE，曲线看不出实际解码正确率。
+    with torch.no_grad():
+        pred = txt_self.detach().argmax(-1)
+        valid = txt != pad_id
+        stats["txt_acc"] = ((pred == txt) & valid).sum().float() / valid.sum().clamp_min(1).float()
+
+    return total, parts, stats

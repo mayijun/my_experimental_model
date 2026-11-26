@@ -611,6 +611,21 @@ def run_train(args, manifest_path, ckpt, logdir):
         "--eval-samples", str(args.eval_samples), "--seed", str(args.seed),
         "--logdir", str(logdir),
     ]
+    if args.rho:
+        # token 层 ρ 压缩（§2.6 / §3.4.2 先写后压）：--rho 开启，课程 S1 冻结 ρ 记忆、S2 解冻。
+        argv += [
+            "--rho-compress",
+            "--rho-head-dim", str(args.rho_head_dim),
+            "--rho-beta", str(args.rho_beta),
+            "--rho-eps", str(args.rho_eps),
+            "--rho-eps-z", str(args.rho_eps_z),
+            "--rho-eps-keep", str(args.rho_eps_keep),
+            "--rho-b-a", str(args.rho_b_a),
+            "--rho-b-c", str(args.rho_b_c),
+            "--rho-b-min", str(args.rho_b_min),
+            "--rho-b-max", str(args.rho_b_max),
+            "--rho-rate-weight", str(args.rho_rate_weight),
+        ]
     if args.resume:
         argv += ["--resume", str(args.resume)]
     if args.save_every:
@@ -691,6 +706,18 @@ def parse_args():
                    help="manifest 不加入 ImageNet（纯 Flickr 续训时用，避免再跑已训过的 ImageNet）")
     p.add_argument("--flickr-weight", type=float, default=1.0, help="Flickr30k 在混合 manifest 中的采样权重")
     p.add_argument("--imagenet-weight", type=float, default=1.0, help="ImageNet 在混合 manifest 中的采样权重")
+    # —— token 层 ρ 压缩（§2.6 / §3.4.2 先写后压）：--rho 开启；课程 S1 冻结 ρ 记忆、S2 解冻 + 码率 warmup ——
+    p.add_argument("--rho", action="store_true", help="开启 token 层 ρ 压缩（先写后压课程）")
+    p.add_argument("--rho-head-dim", type=int, default=64, help="ρ 记忆 M 的 k/v 维度（冻结，O(D²) 显存）")
+    p.add_argument("--rho-beta", type=float, default=0.1, help="delta rule 写入率")
+    p.add_argument("--rho-eps", type=float, default=0.0, help="绝对阈值（0 禁用，改相对阈值）")
+    p.add_argument("--rho-eps-z", type=float, default=0.5, help="相对阈值 z-score：ε_ρ=批内均值+z·σ")
+    p.add_argument("--rho-eps-keep", type=float, default=0.02, help="ε 强制采样比例（防自我强化退化）")
+    p.add_argument("--rho-b-a", type=float, default=1.0, help="b_t surprisal 系数 a")
+    p.add_argument("--rho-b-c", type=float, default=0.5, help="b_t 条件熵代理系数 c")
+    p.add_argument("--rho-b-min", type=float, default=0.0, help="b_t clamp 下界")
+    p.add_argument("--rho-b-max", type=float, default=4.0, help="b_t clamp 上界")
+    p.add_argument("--rho-rate-weight", type=float, default=0.1, help="码率正则权重 λ（R+λD）")
     return p.parse_args()
 
 

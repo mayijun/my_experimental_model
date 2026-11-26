@@ -234,9 +234,16 @@ class RhoCompressor(nn.Module):
         self.b_min = b_min
         self.b_max = b_max
 
-    def forward(self, x, mask_token):
+    def forward(self, x, mask_token, active=True):
         # x: [B, L, dim]; mask_token: [1, 1, dim] 或 [1, dim]
         # 返回 (x_tilde, keep [B,L] bool, rho [B,L], b_t [B,L])
+        # active=False（§3.4.2 先写后压的 S1）：ρ 压缩休眠——不丢 token、不产生码率信号，
+        # 让主干 Z 先稳定；S2 起 active=True 才「压」（丢冗余 + 码率 warmup）。
+        if not active:
+            B, L, _ = x.shape
+            keep = torch.ones(B, L, dtype=torch.bool, device=x.device)
+            zeros = torch.zeros(B, L, device=x.device, dtype=x.dtype)
+            return x, keep, zeros, zeros
         rho = self.memory(x)               # [B, L]
 
         # —— 批内统计：ρ 经验分布的代理（无 next-token LM，用 ρ 自身做熵代理）——
@@ -348,14 +355,14 @@ class ImageEncoder(nn.Module):
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.mask_token, std=0.02)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, rho_active=True):
         batch = x.size(0)
         if self.frontend == "siglip2":
             tokens = self.patch_embed(x)  # [B,N,d_hidden]
         else:
             tokens = self.patch_embed(x).flatten(2).transpose(1, 2)  # [B,N,d_hidden]
         if self.rho_compressor is not None:  # 先写后压：干净 tokens 上算 ρ 丢冗余，mask 填充保 L
-            tokens, self.last_keep, self.last_rho, self.last_b = self.rho_compressor(tokens, self.mask_token)
+            tokens, self.last_keep, self.last_rho, self.last_b = self.rho_compressor(tokens, self.mask_token, active=rho_active)
         if mask is not None:  # mask: [B,N] bool，True 处替换为 mask_token。
             tokens = torch.where(mask.unsqueeze(-1), self.mask_token, tokens)
         cls = self.cls_token.expand(batch, -1, -1)
@@ -409,13 +416,13 @@ class TextEncoder(nn.Module):
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.mask_embed, std=0.02)
 
-    def forward(self, ids):
+    def forward(self, ids, rho_active=True):
         batch = ids.size(0)
         x = self.embedding(ids)
         if self.embed_proj is not None:
             x = self.embed_proj(x)  # 低秩分解：F → H
         if self.rho_compressor is not None:  # 先写后压：embedding 上算 ρ 丢冗余，mask 填充保 L
-            x, self.last_keep, self.last_rho, self.last_b = self.rho_compressor(x, self.mask_embed)
+            x, self.last_keep, self.last_rho, self.last_b = self.rho_compressor(x, self.mask_embed, active=rho_active)
         cls = self.cls_token.expand(batch, -1, -1)
         h = torch.cat([cls, x], dim=1) + self.pos_embed[:, : x.size(1) + 1]
         h = self.head(self.encoder(h))

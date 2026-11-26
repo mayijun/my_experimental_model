@@ -164,7 +164,8 @@ class MultimodalJEPA(nn.Module):
                 + conditional_flow_loss(self.velocity, img_tgt, txt_tgt)
             )
         loss = self.cfg.flow_weight * flow + self.cfg.flow_cond_weight * flow_cond
-        return loss, {"flow": flow, "flow_cond": flow_cond}
+        # 与 pretrain 分支一致返回三元组 (loss, parts, stats)；flow 阶段暂无额外诊断统计。
+        return loss, {"flow": flow, "flow_cond": flow_cond}, {}
 
     def state_dict_for_save(self):
         """去重后的落盘 state_dict（§2.8 共享 E）。
