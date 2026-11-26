@@ -18,6 +18,7 @@
 | `LeanMath/Retraction.lean` | §4.1.7 黎曼流匹配 GPU 友好近似：retraction 公理与一阶一致、欧氏 retraction 退化特例、投影 retraction 幂等核心、低秩度量 `rank(JᵀJ) ≤ min(\|𝒱\|, d)` |
 | `LeanMath/AssociativeMemory.lean` | §2.9 CARO 替代结构（门控结合扫描态）的代数核心：更新是仿射（复用 `PSCO.Aff` 幺半群 ⇒ 并行扫描）、内容可寻址读出恒等式、残差⇔被历史重建、不动点/误差/收敛、反塌缩 |
 | `LeanMath/LoopedEncoder.lean` | §2.10 Looped Encoder 替代结构：把 $E$ 主干→$Z$ 的前馈链折叠为权重共享循环；形式化表达力包含（回环=同深度前馈的权重绑定对角）、参数计数、仿射误差恒等式、反输入塌缩、梯度衰减界 |
+| `LeanMath/LoopedZReasoner.lean` | §3.10 Looped Z-Reasoner 替代结构：把 Z 内 N 步算子复合折叠为单一权重共享算子迭代到不动点；形式化表达力三层包含、参数计数、反算子塌缩、Neumann 级数极限、收缩约束代价、串行深度 big-O、DEQ 极限 |
 
 ## 形式化结果 ↔ math.md 命题对照
 
@@ -210,6 +211,34 @@ $=O(T)$、检查点 / DEQ $=O(1)$、算力 $=O(T)$ 落地为定理，并证明�
 可由 $(f,h_0,T)$ 重建（检查点不丢信息）、DEQ 极限态按范数收敛到不动点（`mrLoop_tendsTo_fixedPoint`
 拼 `mrLoop_error` + `gradient_decay` + `AssocMem.real_pow_tendsto_zero`，`squeeze_zero`）。
 详见 math.md §2.10。仍未形式化的部分（常数因子 / 墙钟 / 访存 / 非线性表达力等）见「问题 11」。
+
+### 10. Looped Z-Reasoner 替代结构：把 Z 内计算折叠为内部回环（§3.10）
+
+`LeanMath/LoopedZReasoner.lean`（命名空间 `LoopedZReasoner`）形式化了 §3.10 提出的 Looped
+Z-Reasoner——把 §3.5 / §3.7 中 Z 内的 N 步算子复合 $\Psi^{(N)}$ 与解码端 N 步 Euler 流折叠为
+**单一权重共享算子 $\Psi_\theta$ 在 Z 上迭代到不动点** 的内部回环，$h$ 跨步自推断（状态依赖）。
+与 §2.10 Looped Encoder 的关键区别：§2.10 循环「输入 → Z」的编码器块，本节循环「Z → Z」的
+推理算子 $\Psi_h$，故多出两个独有代价——收缩约束（`expanding_diverges`）与状态依赖破坏
+不动点（DEQ 失效）。在任意域 `K`、任意 `K`-模 `V`、任意赋范空间上机械化以下断言（全部无
+`sorry` / 无新增公理，`lake build` 通过）：
+
+| 断言 | 定理 | math.md |
+|------|------|---------|
+| 表达力三层包含：全绑定 $f^{\circ T}\subseteq$ 状态依赖回环 $\subseteq$ 全独立前馈 | `tied_is_sdl` / `sdl_realized_by_feedforward` | (LZR-6) / §3.10.5 |
+| 参数计数：回环 $p_\Psi+p_h\le Np_\Psi$（$p_h\le(N-1)p_\Psi$）；$N\ge2$ 时严格省 | `param_loop_le_free` / `param_loop_lt_free` | §3.10.3 |
+| 反算子塌缩（模式分离）：固定 $M$ 下 $b_1\neq b_2\Rightarrow$ 不动点不同（任意线性 $M$，无需收缩） | `fixedPoint_diff_b_diff_fp` | §3.10.2 |
+| Neumann 级数极限 $|a|<1\Rightarrow\sum_{i<k}a^i\to(1-a)^{-1}$（BPTT 截断 vs DEQ 完整逆，式 34） | `geometric_series_limit` | (LZR-5) / §3.10.4 / §4.1.5 |
+| 收缩约束代价：$K>1$ 时膨胀算子 $x\mapsto Kx$ 从 $x_0\neq0$ 迭代 $\|K^n x_0\|\to\infty$（不动点不可达） | `expanding_diverges` | §3.10.4 |
+| 串行深度：扫描 `scanDepth(2T)=scanDepth(T)+1`（对数）vs 展开 `unrolledDepth(2T)=2·unrolledDepth(T)`（线性）；`scanDepth\le unrolledDepth` 且 $=O(\cdot)$ | `scanDepth_double` / `scanDepth_le_unrolled` / `scanDepth_isBigO_unrolled` | §3.10.3 |
+| DEQ 极限：$\|M\|<1$ 时从任意初值 $Z_{\text{in}}$ 迭代 $\to$ 不动点（推广 §2.10，初值任意） | `reasoner_tendsTo_fixedPoint` | §3.10.2 |
+
+关键：线性化骨架（固定模式 $h$ 收敛处）$z\mapsto Mz+b$ 与 §3.7.3 PSCO / §2.9 CARO / §2.10 MR-Loop
+是**同一个仿射不动点迭代**（`Affine.lean` 幺半群），故收敛性直接复用 `Contractive` /
+`AssociativeMemory` / `LoopedEncoder` 既有结论；本节新增的机械化核心是**表达力三层包含**
+（状态依赖介于全绑定与全独立之间）、**参数计数**、**反算子塌缩（模式分离）**、**Neumann 级数
+极限**（BPTT vs DEQ）、**收缩约束代价**（膨胀发散划定算法类边界）、以及本节独有的**串行深度
+big-O 对比**（并行扫描把关键路径从 $O(N)$ 降到 $O(\log T)$，编码器回环无此收益）。详见
+math.md §3.10。仍未形式化的部分见「问题 12」。
 
 ## 数值校验结果
 
@@ -431,11 +460,37 @@ $H(T)=I(T;Y)+H(T\mid Y)$——指向以下效率方向：
 
 形式化与未形式化的边界在 math.md §2.10.7 与 §1.0 对照表中如实标注，不把设计断言伪装成定理。
 
+### 问题 12（§3.10 Looped Z-Reasoner：常数因子 / 非线性表达力 / DEQ 数值稳定 / 状态依赖段 m 最优仍为设计断言，未形式化）
+
+`LoopedZReasoner.lean` 机械化的是 Z 回环的**表达力包含（函数代数）、参数计数不等式、不动点对
+偏移的单射性、算子范数幂次界、Neumann 级数极限、膨胀发散、串行深度递推与 big-O、不动点收敛**
+（代数结论对任意域 `K` / 模 `V` 成立；分析结论对 `Filter.atTop` 成立，见 §3.10.7 对照表）。
+但以下断言**仍未在 Lean 中形式化**，属设计分析，需实测或额外理论：
+
+1. **常数因子、真实墙钟与访存**：`scanDepth = O(unrolledDepth)`（`scanDepth_isBigO_unrolled`，
+   常数 1）只刻画渐进关键路径；真实墙钟还依赖 kernel 融合、PSCO 扫描原语的常数、batch 维度
+   并行度与内存带宽，需实测。
+2. **非线性 $\Psi_h$ 的表达力与「同参更深」泛化**：(LZR-6) 只证明状态依赖回环函数族介于全绑定
+   与全独立之间（同深度的容量代价）；「同参数预算下回环迭代更深取得泛化收益」依赖宽度/迭代的
+   渐近通用逼近论证与实测，未形式化。
+3. **DEQ 隐式微分的数值稳定性与求解精度**：`reasoner_tendsTo_fixedPoint` 证明 $\|M\|<1$ 时
+   迭代收敛到不动点，但收敛速度、隐式求解器（Anderson 加速 / 不动点方程残差）的数值精度与
+   重启策略是工程问题，未形式化。
+4. **状态依赖破坏不动点**：$h$ 未收敛时不存在 $Z^*=\Psi_h(Z^*)$，无法用 DEQ 隐式微分、$O(1)$ 显存
+   收益丢失；状态依赖段 $m$（先展开 $m$ 步让 $h$ 收敛、再切 DEQ）的最优取值依赖训练动态，未形式化。
+5. **$\operatorname{im}\Psi$ 逼近全独立的程度**：(LZR-6) 右包含只证「各步算子
+   $\in\operatorname{im}\Psi$」可被前馈实现，未量化 $\Psi$ 的值域与全函数空间的差距；$\Psi$ 需多
+   宽才能在 $N$ 步内表达任意算子序列，是容量/宽度的额外理论问题。
+6. **真实块的非线性**：本文件取固定模式处的线性骨架 $M$（LZR-3）作分析对象（与 §2.9 / §2.10 /
+   §3.7.3 一致）；非线性（softmax 注意力、MLP）的收缩性与表达力需额外论证或实测。
+
+形式化与未形式化的边界在 math.md §3.10.7 与 §1.0 对照表中如实标注，不把设计断言伪装成定理。
+
 ## 复现
 
 ```bash
 cd lean-math && lake build
 ```
 
-（Lean 4.36.0 + mathlib，见 `lean-toolchain`。全部 11 个模块——含纯 Lean 的
+（Lean 4.36.0 + mathlib，见 `lean-toolchain`。全部 12 个模块——含纯 Lean 的
 `FixedPoint` / `Semigroup`——均由 `lake build` 一次编译验证，无 `sorry`/`axiom`。）

@@ -73,6 +73,13 @@
 | §2.10 前向算力 $=O(T)$；检查点总 $2T=O(T)$（常数 2 重算换显存，渐进持平） | `LoopedEncoder.lean` : `eval_isBigO_T` / `checkpoint_eval_isBigO_T` | ✅ 已证 |
 | §2.10 轨迹由 $(f,h_0,T)$ 唯一确定 ⇒ 检查点不丢信息（代数根因） | `LoopedEncoder.lean` : `trajectory_determined` | ✅ 已证 |
 | §2.10 DEQ 极限：$\|M\|<1$ 时迭代态按范数 $\to fp$（极限只需留存不动点） | `LoopedEncoder.lean` : `mrLoop_tendsTo_fixedPoint` | ✅ 已证 |
+| §3.10 (LZR-6) 表达力三层包含：全绑定 $\subseteq$ 状态依赖回环 $\subseteq$ 全独立前馈 | `LoopedZReasoner.lean` : `tied_is_sdl` / `sdl_realized_by_feedforward` | ✅ 已证 |
+| §3.10 参数量：$p_\Psi+p_h\le Np_\Psi$（$p_h\le(N-1)p_\Psi$）⇒ 回环省参 | `LoopedZReasoner.lean` : `param_loop_le_free` / `param_loop_lt_free` | ✅ 已证 |
+| §3.10 反算子塌缩（模式分离）：固定 $M$ 下 $b_1\neq b_2\Rightarrow$ 不动点不同 | `LoopedZReasoner.lean` : `fixedPoint_diff_b_diff_fp` | ✅ 已证 |
+| §3.10 (LZR-5) Neumann 级数极限 $|a|<1\Rightarrow\sum_{i<k}a^i\to(1-a)^{-1}$（BPTT vs DEQ，式 34） | `LoopedZReasoner.lean` : `geometric_series_limit` | ✅ 已证 |
+| §3.10 收缩约束代价：$K>1$ 时膨胀算子迭代 $\|K^n x_0\|\to\infty$（不动点不可达） | `LoopedZReasoner.lean` : `expanding_diverges` | ✅ 已证 |
+| §3.10 串行深度：扫描 `scanDepth(2T)=scanDepth(T)+1`（对数）vs 展开线性；`scanDepth≤unrolledDepth` | `LoopedZReasoner.lean` : `scanDepth_double` / `scanDepth_le_unrolled` / `scanDepth_isBigO_unrolled` | ✅ 已证 |
+| §3.10 DEQ 极限：$\|M\|<1$ 时从任意初值迭代 $\to$ 不动点（推广 §2.10，初值任意） | `LoopedZReasoner.lean` : `reasoner_tendsTo_fixedPoint` | ✅ 已证 |
 | §2.10 非线性块表达力 / 「同参更深」泛化 / DEQ 数值稳定 / 墙钟访存 | — | ⚠️ 设计分析，非 Lean 可形式化，见 §2.10.7 与 README |
 | 命题 11（重建 $L_0$ vs 生成 $L_{\ge1}$） | `Semigroup.lean` : `generation_iff_not_reconstruction` / `generation_iff_moves_some_point` | ✅ 已证 |
 | 命题 7 / 8 / 9（设计 / 诊断断言） | — | ⚠️ 非可形式化定理，见 README 问题 7 |
@@ -1672,6 +1679,157 @@ $$\Psi_h(Z)\ =\ Z + g_{\text{change}}\odot\big(A_h Z + b_h + r_h(Z)\big). \tag{3
 $g_{\text{change}}\to0$ 时 $\Psi_h\to\mathrm{id}$（$L_0$，描述/重建端，$T_d=g(Z)$）；$g_{\text{change}}\to1$ 时 $\Psi_h$ 非平凡（$L_{\ge1}$，推理/生成端，$Z'=\Psi_h(Z)$）。**算子性 = $g_{\text{change}}$ 偏离 0 的程度**，与 §3.7 的停止条件 $h_{\text{change}}\to0\iff$ 变换完成 $\iff$ 读出结论天然对齐。
 
 **推论（量化器可省的算子学表述）。** 量化器的历史作用之一是把连续 $Z$ 打成离散 token 以支撑「离散码上的生成」。当生成被重定义为「连续 $Z$ 上的算子」后，这一作用被 $\Omega$ 的谱系结构整体替代——生成路径 $D\circ\Psi\circ E$ 全程不离开连续 $Z$，无需离散化；量化器剩余的唯一价值（commitment 防塌缩）由 §2.2.3 的 EMA、§2.2.4 的重建与方差、§3.7.3 的谱夹层接管。故在本框架下量化器非必要，AGENTS.md 的「$Z$ 保持连续、不引入语义量化瓶颈」两条硬约束在算子谱系下自然成立。
+
+---
+
+### 3.10 替代结构：Looped Z-Reasoner——把「Z 内 N 步算子复合 / 解码流」折叠为权重共享的不动点回环
+
+> **动机**。§2.10 把 **Z 的生产者**（编码器主干 $E\to Z$）折叠成了权重共享的内部循环；现实中 Loop Transformer / DEQ / MR-Loop（§2.10 已列文献）走的是同一条路。本节处理**正交的另一端**：把 **Z 内的消费者**——推理算子 $\Psi_h$ 的 $N$ 步复合 $\Psi^{(N)}$（§3.5 / §3.7）与解码端流 $v_\psi$ 的 $N$ 步 Euler 积分（§4.1）——折叠为**单一权重共享算子迭代到不动点**，让计算在模型内部沿 $Z$ 产生回环。§3.7.1 已把 Loop Transformer / DEQ 标为 $\Psi_h$ 的参考锚点，§3.7.3 的 PSCO 是它的并行扫描实现，[`psco.py`](file:///home/simon-ma/JEPA/model/psco.py) 已落地线性骨架原型；但它们都停留在**机制描述**，没有像 §2.10 那样给出**收益 / 代价的数学推导 + Lean 机械化**。本节补上这块，并处理 $\Psi_h$ 的**状态依赖性**（$h$ 跨步自推断）这一让 Z 回环区别于编码器回环的核心难点。
+>
+> **与 §2.10 的关键区别（勿混）**：
+> 1. **循环对象不同**：§2.10 循环「输入 $\to Z$」的编码器块 $B_\theta$（样本内权重固定、$h$ 不跨步）；本节循环「$Z\to Z$」的推理算子 $\Psi_h$（$h$ 由网络自推断、可跨步演化）。
+> 2. **独有收益不同**：§2.10 权重共享**不减串行深度**（仍是 $T$ 步串行）；本节配合 PSCO 并行扫描可把前向串行深度从 $O(N)$ 压到 $O(\log N)$（§3.10.3 表）——这是 Z 内计算回环相对编码器回环的**独有算力收益**。
+> 3. **独有代价不同**：§2.10 的代价是梯度衰减；本节额外付出两个代价：① **收缩约束**——不动点迭代只对收缩算子收敛，膨胀型算子被排除（`expanding_diverges`，§3.10.4）；② **状态依赖破坏不动点**——$h$ 未收敛时不存在 $Z^*=\Psi_h(Z^*)$，无法用 DEQ 隐式微分，$O(1)$ 显存收益丢失（§3.10.4 第 4 条）。
+>
+> 二者**正交可叠加**：先用 $E_{\text{loop}}$（§2.10）产出 $Z$，再用 $\Psi_{\text{loop}}$ 在 $Z$ 上推理 / 生成；解码端可把 $N$ 步 Euler 流也折进同一回环（§4.1.5 reflow 是其拉直版）。
+
+#### 3.10.1 定义
+
+记 $Z\in\mathbb R^{L\times d}$（$d:d_{\text{hidden}}=1:8$ 不变，§2.2.7）、单算子参数数 $p_\Psi$、隐含模式网 $H$ 参数数 $p_h$。
+
+**展开基线**（§3.5 / §3.7 现状）：$Z$ 内推理是 $N$ 个可相异的算子实例复合（每步 $h^{(i)}$ 自推断，算子参数也可随步独立）；解码端 Euler 是 $N$ 次独立速度场求值：
+
+$$
+Z^{(0)}=Z_{\text{in}},\quad Z^{(k+1)}=\Psi_{\theta_k,\,h^{(k)}}\!\big(Z^{(k)}\big)\ (k=0,\dots,N-1),\qquad Z_{\text{out}}=r\big(Z^{(N)}\big). \tag{LZR-1}
+$$
+
+总参数 $P_{\text{ff}}=N\cdot p_\Psi+P_{\text{readout}}$（每步算子各一套参数；读出头不参与步间共享）。解码端同理：$N$ 次 $v_\psi(\cdot,k\Delta t,c)$ 求值，参数 $\psi$ 虽共享但**算子身份随 $t$ 变化**（时间条件化），跨 $t$ 不构成权重绑定意义上的回环。
+
+**回环推理器（Looped Z-Reasoner）**：单一共享算子 $\Psi_\theta$，$h^{(k)}=H(Z^{(k)})$ 跨步自推断，迭代 $T$ 次（或到不动点）后读出：
+
+$$
+\boxed{\ Z^{(0)}=Z_{\text{in}},\quad Z^{(k+1)}=\Psi_\theta\!\big(Z^{(k)};\,h^{(k)}\big),\quad h^{(k)}=H\!\big(Z^{(k)}\big)\ (k=0,\dots,T-1),\quad Z_{\text{out}}=r\!\big(Z^{(T)}\big)\ } \tag{LZR-2}
+$$
+
+总参数 $P_{\text{loop}}=p_\Psi+p_h+P_{\text{readout}}$（算子只存一份；$h$ 网另算，通常 $p_h\ll p_\Psi$）。
+
+**线性化骨架**（在稳定段、$h$ 收敛到 $h^*$ 处，取 $\Psi_\theta$ 的线性部分，§3.7.3 式 (30)）：
+
+$$
+Z^{(k+1)}=M_{h^*}Z^{(k)}+b_{h^*},\qquad M_{h^*}=I+\nabla v_{h^*}(Z^*), \tag{LZR-3}
+$$
+
+与 §3.7.3 PSCO、§2.9 CARO、§2.10 MR-Loop 是**同一个仿射不动点迭代**（`Affine.lean` 幺半群），收敛性直接复用 `Contractive` + `AssocMem`。
+
+**两种模式必须分开**（这是 Z 回环与编码器回环的核心数学差异）：
+
+- **(a) 固定模式**（$h^{(k)}\equiv h^*$，描述端 $g_{\text{change}}\to0$ 或推理到达结论段）：退化为单算子仿射迭代 $Z^{(k+1)}=M Z^{(k)}+b$，满足单算子不动点方程 $Z^*=MZ^*+b$，可用 DEQ 隐式微分（式 (25)），$O(1)$ 显存。
+- **(b) 状态依赖模式**（$h^{(k)}=H(Z^{(k)})$ 跨步变化，推理进行中）：**非自治**迭代，$Z^{(k+1)}=\Psi_{h^{(k)}}(Z^{(k)})$ 中算子随步改变，**不满足任何单算子不动点方程**；只能保证「轨迹稳定 $\Rightarrow$ 稳定点是终算子的不动点」（`FixedPoint.stabilized_is_fixed_point`，已证）。这一段必须显式展开 $m$ 步（§3.7.3 两段式的瞬态段），$O(1)$ 显存收益**不成立**。
+
+#### 3.10.2 线性化骨架与收敛（DEQ 极限）
+
+**(a) 固定模式。** 当 $\rho(M_{h^*})<1$（§3.7.1 收缩条件，谱夹层 $\delta<\tilde a_{h,i}<1-\gamma$ 是其逐维加强，见 README 问题 6）时：
+
+1. 存在唯一不动点 $Z^*=(I-M_{h^*})^{-1}b_{h^*}=\sum_{j\ge0}M_{h^*}^j b_{h^*}$（Neumann 级数，`Contractive.geom_sum_one_sub`）；
+2. 误差几何衰减 $Z^{(k)}-Z^*=M_{h^*}^k(Z^{(0)}-Z^*)$，$\|Z^{(k)}-Z^*\|\le K^k\|Z^{(0)}-Z^*\|$，$K=\|M_{h^*}\|<1$（`reasoner_tendsTo_fixedPoint`，推广自 §2.10 的 `mrLoop_tendsTo_fixedPoint`，初值取任意 $Z_{\text{in}}$ 而非 $0$）；
+3. $T$ 足够大时 $Z^{(T)}\approx Z^*$，读出 $r(Z^*)$ 与 $T$ 无关（收益递减，可早停）；反传用 DEQ 隐式微分（式 (25)），只需留存 $Z^*$。
+
+**反算子塌缩（模式分离）**：对固定线性部分 $M$，偏移 $b$ 单射地决定不动点——$b_1\neq b_2\Rightarrow Z^*_1\neq Z^*_2$（`fixedPoint_diff_b_diff_fp`，对任意线性 $M$ 成立，无需收缩）。含义：不同推理指令（不同 $b_h$）给出不同结论不动点，$\Psi_h$ 不会把所有指令坍缩到同一答案。这与 `mrLoop_no_input_collapse`（§2.10，守住 $Z$ 对输入的依赖）形成一对：输入注入守住「$Z$ 依赖输入」，模式分离守住「结论依赖指令」。
+
+**(b) 状态依赖模式。** $h^{(k)}$ 跨步变化时，单算子不动点方程无意义。已证（`FixedPoint.stabilized_is_fixed_point`）：若轨迹在第 $N$ 步稳定（$Z^{(N+1)}=Z^{(N)}$），则 $Z^{(N)}$ 是**终算子** $\Psi_{h^{(N)}}$ 的不动点。这正是 §3.7「结论 $=$ 变换链不动点」的精确成立条件：只有当 $h$ 收敛（改分量 $h_{\text{change}}\to0$、$\Psi_h\approx\mathrm{id}$）时，稳定点才是不动点；推理进行中（$h$ 仍在变）的中间态不是任何算子的不动点，不能用 DEQ 隐式微分。
+
+#### 3.10.3 收益与代价：参数 / 算力 / 串行深度 / 显存 / 表达力 / 优化
+
+下表对比展开基线（深度 $N$）与回环推理器（迭代 $T$、单层算子共享 + 状态依赖 $h$），形式化了的行标注对应 Lean 定理。
+
+| 维度 | 展开基线（$N$ 步，算子可相异） | 回环 $\Psi_{\text{loop}}$（$T$ 迭代，算子共享 + $h$） | 说明 / Lean |
+|---|---|---|---|
+| **参数量**（容量代价） | $N\cdot p_\Psi+P_{\text{readout}}$ | $p_\Psi+p_h+P_{\text{readout}}$ | $p_h\le(N-1)p_\Psi$ 时省（`param_loop_le_free`）；$h$ 网通常远小于算子网，故显著省；若每步 $h$ 需高容量，$p_h$ 吃掉收益 |
+| **算力 FLOPs** | $N\cdot C_\Psi$ | $T\cdot C_\Psi$ | 同深度 $T=N$ 时**渐进持平**（`eval_isBigO_T`，复用 §2.10）；省下的参数预算可加宽单层算子或加深 $T$ |
+| **串行深度**（墙钟关键路径） | $O(N)$ | $O(\log T)$（配 PSCO 并行扫描） | **本节独有收益**：扫描深度 `scanDepth` 满足 `scanDepth(2T)=scanDepth(T)+1`（对数增长），而展开 `unrolledDepth(2T)=2·unrolledDepth(T)`（线性增长）；`scanDepth≤unrolledDepth`（`scanDepth_double` / `scanDepth_le_unrolled`）。编码器回环（§2.10）无此收益 |
+| **训练显存（激活）** | $O(N\cdot L\cdot d)$ | 朴素 $O(T)$；检查点 / DEQ $O(1)$ | 复用 §2.10：朴素 $=O(T)$（`baseline_memory_isBigO_T`）且无界（`baseline_memory_unbounded`），检查点 / DEQ $=O(1)$（`checkpoint_memory_isBigO_one` / `deq_memory_isBigO_one`）；**仅固定模式 (a) 可用 DEQ**，状态依赖模式 (b) 必须展开 |
+| **权重访存** | 每步读 $N$ 套不同权重 | 每 $T$ 步只读 $1$ 套算子（可驻留缓存） | 带宽受限加速器上降访能、提吞吐（同 §2.10） |
+| **推理** | 固定 $N$ 步 | 可自适应停步（残差阈值，PSCO 早停免费） | 简单样本早停、难题跑满，GPU 深度都是 $O(\log T_{\max})$（§3.7.3） |
+| **表达力（同深度）** | 各步算子独立（全函数空间） | 各步算子 $\in\operatorname{im}\Psi$（$\Psi$ 的值域） | 固定模式 = 全绑定对角子集（§2.10 LE-9）；状态依赖模式 = 各步在 $\operatorname{im}\Psi$ 内可相异，**介于全绑定与全独立之间**：$\text{tied}\subseteq\text{loop}(\Psi)\subseteq\text{free}$（`tied_is_sdl` / `sdl_realized_by_feedforward`） |
+| **表达力（同参数预算）** | 深度受限 $N\approx P/p_\Psi$ | 可设 $T\gg N$（同参数下更深） | 「同参更深」潜在收益；但受梯度衰减 + 收缩约束双重限制 |
+| **优化难度**（梯度代价） | 各步雅可比独立 | 共享权重 $\Rightarrow$ 回传 $\sum_t M^{T-t}$，几何衰减 | 复用 §2.10 `gradient_decay_with_K`；BPTT 截断 $\sum_{k<L}J^k$ 与 DEQ 完整逆 $(I-J)^{-1}$ 的关系由 Neumann 级数极限刻画（`geometric_series_limit`） |
+| **收缩约束**（**新代价**①） | 无（每步可膨胀） | 必须 $\rho(M_h)<1$ 才收敛到唯一吸引不动点 | 膨胀型算子的不动点迭代**发散**：$x\mapsto Kx$（$K>1$）从 $x_0\neq0$ 迭代 $\|K^n x_0\|\to\infty$（`expanding_diverges`）——回环只能求吸引不动点，能表达的算法类受限 |
+| **状态依赖代价**（**新代价**②） | 无 | $h$ 未收敛时无单算子不动点，DEQ 失效 | 瞬态段必须展开 $m$ 步（§3.7.3 两段式），$O(1)$ 显存收益在该段丢失；这是 $\Psi_h$ 状态依赖相对 Loop Transformer（固定算子）的额外代价 |
+| **数值求解**（**新代价**③） | 无 | DEQ 每前向需 Picard / Anderson 迭代到收敛 | 额外算力 + 求解精度 / 重启策略是工程量（未形式化） |
+
+> **诚实声明**：本表的**渐进复杂度 $O(\cdot)$ 与递推对比已在 Lean 中形式化**（`scanDepth` 对数增长 vs `unrolledDepth` 线性增长；显存 / 算力 big-O 复用 §2.10；表达力三层包含；不动点收敛；梯度衰减；Neumann 级数极限；膨胀发散）。**仍为设计断言、未形式化**：常数因子、真实 GPU 墙钟 / 访存带宽 / kernel 融合、非线性 $\Psi_h$ 的表达力与「同参更深」泛化收益、DEQ 数值稳定性、状态依赖段 $m$ 的最优取值——需实测。三档取舍见 §3.10.6 第 7 条。
+
+#### 3.10.4 主要代价：梯度衰减、收缩约束与状态依赖非自治性
+
+**1. 梯度衰减（复用 §2.10.4）。** 权重共享回环的反传梯度是各步贡献之和。线性化后第 $t$ 步信号穿过 $T-t$ 层共享雅可比 $M^\top$：
+
+$$
+\frac{\partial\ell}{\partial\theta}\Big|_{\text{来自 }Z^{(t)}}\propto\big(M^\top\big)^{T-t}\nabla_{Z^{(T)}}\ell,\qquad \|M^n v\|\le\|M\|^n\|v\|\le K^n\|v\|,\ K=\|M\|<1. \tag{LZR-4}
+$$
+
+（`gradient_decay_with_K`，仅依赖 `le_opNorm`。）$K$ 越小不动点收敛越快（LZR-3 第 2 条），但早期迭代梯度被 $K^{T-t}$ 杀得越狠——二者此消彼长，故必须谱夹层 $\delta<K<1-\gamma$（§3.7.3）而非一味取小 $K$。
+
+**BPTT vs DEQ 的 Neumann 级数刻画（式 (34) 的形式化）。** §4.1.5 式 (34) 把 $L$ 步 BPTT 梯度写成截断 Neumann 级数 $\sum_{k=0}^{L-1}J^k$，DEQ 写成完整逆 $(I-J)^{-1}$。其代数核心已在 `Contractive.geom_sum_one_sub` 机械化：$(1-a)\sum_{i<k}a^i=1-a^k$；本节补极限：当 $|a|<1$ 时部分和 $\to\frac{1}{1-a}$（`geometric_series_limit`），即
+
+$$
+\sum_{k=0}^{L-1}a^k\xrightarrow{L\to\infty}(1-a)^{-1}. \tag{LZR-5}
+$$
+
+这就把「有限步 CoT / BPTT = 截断级数（有偏）」与「结论 $=$ 不动点 + DEQ = 完整逆（无偏）」的关系落到了定理：$L\to\infty$ 且 $\rho(J)<1$ 时二者相等（标量版；矩阵版同构，见 §4.1.5 末段「只在 $h$ 固定时严格成立」）。
+
+**2. 收缩约束（表达力 / 容量代价，本节新代价①）。** 回环求不动点要求 $\Psi$ 在不动点附近是收缩（$\rho(J)<1$）。这是展开基线没有的约束——展开 $N$ 步中某些步可以是膨胀的（先把状态推开、后续再拉回），只要整体复合把端点映射好。回环则要求**每一步的迭代映射**都朝向吸引不动点，膨胀算子的不动点**迭代不可达**：
+
+> 取 $f(x)=Kx$（$K>1$），其不动点是 $0$，但从任意 $x_0\neq0$ 迭代 $f^n(x_0)=K^n x_0$，$\|K^n x_0\|\to\infty$（`expanding_diverges`）。
+
+故**回环只能求吸引不动点，能表达的算法类被限制在「收缩复合」内**。谱夹层（§3.7.3 五道防线第 1 条）是缓解：它把算子限制在逐维对角 $(\delta,1-\gamma)$，既保收敛（上界）又封死一步塌缩（下界），但代价是进一步缩小了算子族（排除负特征值振荡与强膨胀，见 README 问题 6）。展开基线无此限制——这是回环为「同参更深 + $O(\log N)$ 深度 + $O(1)$ 显存」付出的**表达力代价**。
+
+**3. 状态依赖非自治性（本节新代价②）。** Loop Transformer / 经典 DEQ 的算子固定（$F_\theta(Z;x)$，$x$ 样本内不变），故始终满足单算子不动点方程。本框架的 $\Psi_h$ 是**状态依赖**的（$h^{(k)}=H(Z^{(k)})$ 跨步演化），推理进行中 $h$ 不收敛 $\Rightarrow$ 无 $Z^*=\Psi_h(Z^*)$ $\Rightarrow$ DEQ 隐式微分（式 (25)）的前提不成立 $\Rightarrow$ 必须展开该段 rollout，$O(1)$ 显存收益丢失。§3.7.3 的两段式（瞬态段 $m$ 步显式 + 渐近段 DEQ）是应对：只有 $h$ 收敛后的渐近段能享受 $O(1)$ 显存。这是 $\Psi_h$ 比 Loop Transformer 多付的代价，也是「状态依赖算子」相对「固定算子迭代」的本质差异（§3.7.1 末段已点出）。
+
+#### 3.10.5 表达力包含的精细版：回环 $=$ 各步取自 $\operatorname{im}\Psi$ 的前馈
+
+§2.10 (LE-9) 证明回环 $f^{\circ T}$ 是同深度前馈的**全绑定对角子集**（所有层取同一个 $f$）。Z 回环因 $h$ 跨步自推断，表达力落在**全绑定**与**全独立**之间。精确表述（纯函数代数，已在 Lean 机械化）：
+
+令前馈网为层列表复合 $\mathrm{feedforward}([f_1,\dots,f_N])=f_1\circ\cdots\circ f_N$；状态依赖回环为 `sdl Ψ h T`：从 $Z^{(0)}$ 起依次作用 $\Psi(h_0),\Psi(h_1),\dots,\Psi(h_{T-1})$；全绑定回环为 $f^{\circ T}$（$h$ 取常值）。则
+
+$$
+\underbrace{\{\,f^{\circ T}:f\,\}}_{\text{全绑定（§2.10）}}\ \subseteq\ \underbrace{\{\,\mathrm{sdl}\,\Psi\,h\,T:\Psi,h\,\}}_{\text{状态依赖回环}}\ \subseteq\ \underbrace{\{\,\mathrm{feedforward}([f_1,\dots,f_T]):f_i\,\}}_{\text{全独立前馈}}. \tag{LZR-6}
+$$
+
+- 左包含（`tied_is_sdl`）：取 $h$ 为常值函数，全绑定 $f^{\circ T}$ 实现为状态依赖回环；
+- 右包含（`sdl_realized_by_feedforward`）：任意状态依赖回环都能被一个层列表实现——层 $i=\Psi(h_i)$，全部落在 $\operatorname{im}\Psi$ 内；
+- **反向均不成立**：全独立前馈可让各层取到 $\operatorname{im}\Psi$ 之外的函数；状态依赖回环可让相邻层不同（$h$ 变），故真包含全绑定。
+
+**容量代价的精确含义**：回环省下参数的代价，是把每一步算子限制在 $\operatorname{im}\Psi$ 这一个网络的值域内；$h$ 恢复了「步间可相异」的自由度，但不能突破 $\operatorname{im}\Psi$ 的表达上界。当 $h$ 恒定时退化到 §2.10 的全绑定（最弱表达力）；当 $h$ 跨步充分变化且 $\Psi$ 足够宽时逼近全独立——但逼近程度取决于 $\Psi$ 的宽度与 $h$ 的容量，是「同参数预算下如何分配 $p_\Psi$ 与 $p_h$」的设计问题（未形式化，依赖实测）。
+
+#### 3.10.6 契约核对（对照 AGENTS 规则与 math.md 既有前提）
+
+1. **$Z$ 保持连续、不引入语义量化瓶颈**：回环迭代全程在 $\mathbb R^{L\times d}$ 连续值上进行（LZR-2/3），不施加 FSQ/VQ/RVQ（同 §2.6 / §2.9.5 / §2.10.6 契约 1）。✅
+2. **反塌缩**：① 输入侧由 $E$（§2.2.4）守住；② 算子侧由模式分离 `fixedPoint_diff_b_diff_fp`（不同指令 $\Rightarrow$ 不同结论不动点）+ 读出头锚定（$\mathcal L_{\text{readout}}$，§3.7.3 防线 2）+ 方差正则（防线 3）+ 谱夹层（防线 1，封死 $\tilde A_h\to0$ 一步塌缩）共同守住；③ `expanding_diverges` 反向说明收缩约束本身封死了「算子膨胀后失稳」这一塌缩路径。✅
+3. **$d:d_{\text{hidden}}=1:8$**：回环只改 $Z$ 内计算的参数组织，不改维度比例；读出头 $r:Z\to$ 输出与算子隐藏维仍按 §2.2.7。✅
+4. **通路 / 关系分离（§4.5）**：回环迭代是关系聚合（对 $Z$ 反复重组），读出 $r$ 是逐位置通路映射，二者仍分离；关系从「$N$ 个相异算子复合」变为「同算子族的 $T$ 次复合」，通路仍 $O(L)$ 独立。✅
+5. **与 §3 对齐推理的衔接**：回环只替换 $Z$ 内**计算**的组织方式（$N$ 步展开 $\to$ $T$ 步共享迭代），产出的仍是连续 $Z$；§3.1 硬对齐、§3.2 交叉掩码、§3.4 PAC、§3.8 统一预测框架在 $Z$ 之上照常进行，契约不变。✅
+6. **与 §2.10 / §3.7.3 的正交性**：§2.10 循环编码器（输入 $\to Z$），本节循环推理算子（$Z\to Z$），§3.7.3 PSCO 是本节的并行扫描实现——三者可叠加：$E_{\text{loop}}$ 产 $Z$，$\Psi_{\text{loop}}$（PSCO 加速）在 $Z$ 上推理，互不冲突。本节给 PSCO 补上 §2.10 级别的收益 / 代价形式化，不替代它。✅
+7. **三档规模可扩展性（AGENTS 模型规模规则）**：
+   - **小规模（CPU 冒烟，$\le10$M）**：现有 `tiny`/`small` 的 $N$ 很小，回环收益不明显，但可直接设 $T=N$ 验证算法正确性（损失下降、不动点收敛 `reasoner_tendsTo_fixedPoint`、模式分离 `fixedPoint_diff_b_diff_fp`、膨胀发散被谱夹层排除 `expanding_diverges`），纯 CPU 可跑（回环算子是纯 PyTorch，无 GPU-only 依赖，不进入 `pyproject.toml` 可选 extra）。
+   - **中型（GPU + 真实数据，0.3B–7B）**：主要受益档。参数 $\div N$ 释放的预算可加宽算子或转给对齐 / 生成头；**$O(\log N)$ 串行深度**（PSCO）是长推理 / 长 CoT 的关键墙钟收益；长上下文下跨循环梯度检查点把激活显存从 $O(N\cdot L\cdot d)$ 降到 $O(L\cdot d)$ 乃至 $O(1)$（DEQ）。支持 bf16/AMP、`torch.compile`、梯度检查点（成熟库能力）。
+   - **大规模（scaling 极限）**：权重共享是规模化刚需；DEQ 隐式微分使有效迭代深度 $T$ 可远超显存允许的展开深度，$O(1)$ 激活支撑极深有效推理深度，用于检验 scaling law 的收益 / 拐点与收缩约束下的表达力极限（`expanding_diverges` 划定的算法类边界）。若引入 GPU-only 隐式求解器，按 AGENTS 规则放入 `pyproject.toml` 可选 extra，保证第 1 档仍纯 CPU。
+
+#### 3.10.7 Lean 形式化（见 §1.0 对照表，全部无 sorry / 无新增公理）
+
+(LZR-1)–(LZR-6) 的可证核心已在 [`lean-math/LeanMath/LoopedZReasoner.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/LoopedZReasoner.lean)（命名空间 `LoopedZReasoner`）机械化；收敛性复用既有 `Affine` / `Contractive` / `AssociativeMemory` / `FixedPoint` / `LoopedEncoder`：
+
+| 断言 | 定理 | 对应公式 |
+|---|---|---|
+| (LZR-6) 表达力三层包含：全绑定 $\subseteq$ 状态依赖回环 $\subseteq$ 全独立前馈 | `tied_is_sdl` / `sdl_realized_by_feedforward` | §3.10.5 |
+| 参数量：$p_\Psi+p_h\le N p_\Psi$（$p_h\le(N-1)p_\Psi$）⇒ 回环省参 | `param_loop_le_free` / `param_loop_lt_free` | §3.10.3 |
+| 反算子塌缩（模式分离）：固定 $M$ 下 $b_1\neq b_2\Rightarrow$ 不动点不同 | `fixedPoint_diff_b_diff_fp` | §3.10.2 |
+| (LZR-4) 梯度衰减 $\|M^n v\|\le K^n\|v\|$（优化代价，复用 §2.10） | `gradient_decay_with_K` | §3.10.4 |
+| (LZR-5) Neumann 级数极限 $|a|<1\Rightarrow\sum_{i<k}a^i\to(1-a)^{-1}$（BPTT vs DEQ，式 34） | `geometric_series_limit` | §3.10.4 / §4.1.5 |
+| 收缩约束代价：$K>1$ 时膨胀算子迭代 $\|K^n x_0\|\to\infty$（不动点不可达） | `expanding_diverges` | §3.10.4 |
+| 串行深度：扫描 `scanDepth(2T)=scanDepth(T)+1`（对数）vs 展开 `unrolledDepth(2T)=2·unrolledDepth(T)`（线性）；`scanDepth≤unrolledDepth` | `scanDepth_double` / `scanDepth_le_unrolled` / `scanDepth_isBigO_unrolled` | §3.10.3 |
+| DEQ 极限：$\|M\|<1$ 时从任意初值 $Z_{\text{in}}$ 迭代 $\to$ 不动点 $Z^*$（推广 §2.10 `mrLoop_tendsTo_fixedPoint`） | `reasoner_tendsTo_fixedPoint` | §3.10.2 |
+
+> **形式化边界（诚实）**：Lean 证明的是**表达力包含（函数代数）、参数计数不等式、不动点对偏移的单射性、算子范数幂次界、Neumann 级数极限、膨胀发散、串行深度递推对比、big-O 与不动点收敛**——代数结论对任意域 $K$ / 任意模 $V$ 成立；分析结论（极限、big-O）对 $T\to\infty$ / $k\to\infty$ 的 `Filter.atTop` 成立。**未形式化**：常数因子与真实墙钟 / 访存 / kernel 融合、非线性 $\Psi_h$ 表达力与「同参更深」泛化、DEQ 数值稳定性与求解精度、状态依赖段 $m$ 的最优取值、$\operatorname{im}\Psi$ 逼近全独立的程度——均为设计分析，依赖实测，见 [lean-math/README.md](file:///home/simon-ma/JEPA/lean-math/README.md)「问题 12」。线性化骨架（LZR-3）是数学分析对象，真实块的非线性行为需实验验证（同 §2.9 / §2.10 / §3.7.3 的边界声明）。
 
 ---
 
