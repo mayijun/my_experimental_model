@@ -145,7 +145,9 @@ def _looks_like_class_dir(path):
     if len(subs) < 10:
         return False
     wnids = sum(bool(re.fullmatch(r"n\d{8}", s)) for s in subs)
-    return wnids >= max(5, len(subs) // 2)
+    # ImageNet-100 等子集的类别目录也可能是数字序号（000 ~ 099）
+    numeric = sum(bool(re.fullmatch(r"\d+", s)) for s in subs)
+    return max(wnids, numeric) >= max(5, len(subs) // 2)
 
 
 def _layout(path):

@@ -105,3 +105,6 @@ Thumbs.db
 # lean-toolchain / README.md 需纳入 git 追踪，是形式化验证的交付物。
 lean-math/.lake/
 .lake/
+
+#======AI 相关 ======
+.archify/
