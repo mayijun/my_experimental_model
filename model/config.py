@@ -66,7 +66,7 @@ class MJEPAConfig:
     cross_mask_ratio_end: float = 0.8    # ρ_mask(t) 终点掩码比
 
     # —— 渐进锚定课程 PAC（§3.4 式 21）：锚模态先定 Z，其余向锚对齐 ——
-    pac_enabled: bool = False        # 启用 PAC（冒烟档默认关，无多模态收益）
+    pac_enabled: bool = True         # 启用 PAC（默认开启；`--pac 0` 可关闭，退回普通参数分组）
     anchor_modality: str = "image"   # 锚模态：image / text
     pac_anchor_p0: float = 1.0       # 锚概率初值
     pac_anchor_pinf: float = 0.5     # 锚概率终值（1/K，K=2）
@@ -98,6 +98,20 @@ class MJEPAConfig:
     flow_cond_weight: float = 0.1    # 条件流损失权重
     flow_adaln: bool = False         # 速度场主干：True=DiT AdaLN-Zero 条件（规模化档），False=加法注入（冒烟档）
     grad_checkpoint: bool = False    # 梯度检查点（显存优化）：重计算各层激活，省激活显存（规模档开）
+
+    # —— 平稳性门控的多阶段课程（§3.4.2：上游 ε-平稳是下游适定的必要条件）——
+    # 阶段偏序 S1 写/建 Z → S2 压/ρ → S3 推理/Ψ 改端 → S4 生成/Flow，
+    # 由 Curriculum.lean 定理 5（stage_chain_well_posedness）给出必要性排序。
+    # 全部带默认值，tiny/CPU 冒烟可直接跑；curriculum_enabled=False 时旁路，等价旧行为。
+    curriculum_enabled: bool = True        # 总开关；False ⇒ 所有门控旁路（向后兼容）
+    curriculum_s1_end: float = 0.45        # S1→S2 边界（归一化步数）：S1 只写/建 Z
+    curriculum_s3_start: float = 0.55      # S3 起始（归一化步数）：Ψ 改端 L_consist/L_gen 从 0 拉起
+    curriculum_rho_start: float = 0.45     # 码率损失 warmup 结束点：t<该点时 rho_rate_weight 门控为 0
+    flow_in_pretrain: bool = False         # 主预训是否计算 flow 损失；False ⇒ Flow 仅在冻结 E 的 train_flow_stage
+    curriculum_psi_read_scale: float = 0.3 # S1/S2 期间 Ψ 读端（readout/stop/var）权重缩放（薄接口先接入，低权重）
+    curriculum_psi_change_scale: float = 1.0  # S3 起 Ψ 改端（consist/gen）权重缩放（Z_tgt 已 ε-平稳后拉起）
+    curriculum_eps: float = 0.02           # ε-平稳代理阈值（设计断言，见 README 问题 14）：未实装在线 EMA 漂移检测时仅文档化
+    curriculum_stationary_window: int = 200  # 平稳性滑窗步数（设计断言）
 
     @property
     def vision_patch(self) -> int:

@@ -85,6 +85,10 @@
 | 命题 7 / 8 / 9（设计 / 诊断断言） | — | ⚠️ 非可形式化定理，见 README 问题 7 |
 | §3.7.3 谱夹层 vs §3.7.1 $\rho<1$ | `Contractive.lean` / `Affine.lean` | ⚠️ 谱夹层**强于** $\rho<1$，见 README 问题 6 |
 | §2.9 复杂度 $O(\cdot)$ 表 / 「超越 Mamba」经验断言 | — | ⚠️ 设计分析，非 Lean 可形式化（复杂度未机械化），见 §2.9.6 与 README 问题 10 |
+| §3.4.2 引理 1 / 定理 1：仿射回归最优解追踪目标；目标漂移 ⟹ 最优解非 Cauchy 不收敛 | `Curriculum.lean` : `minimizer_tracks_target` / `minimizer_drift_lower_bound` / `minimizer_not_cauchy_of_target_drifts` / `not_cauchy_of_step_ge_eps` | ✅ 已证 |
+| §3.4.2 实例化：$\Psi$ 改端 / Flow / $\rho$ 记忆的回归目标追踪上游表征 | `Curriculum.lean` : `psi_change_side_tracks_target` / `flow_target_tracks_encoder` / `rho_memory_tracks_feature` + 各 `_not_cauchy` 推论 | ✅ 已证 |
+| §3.4.2 定理 5：阶段适定性链 S1→S2→S3→S4（上游非平稳 ⟹ 下游不适定） | `Curriculum.lean` : `stage_chain_well_posedness` / `four_stage_chain_nonstationary_breaks_downstream` | ✅ 已证 |
+| §3.4.2 $\varepsilon$ 阈值 / 滑窗 / 阶段比例 / 梯度方差 / 门控等价性 | — | ⚠️ 设计断言，非 Lean 可形式化，见 §3.4.2 与 README 问题 14 |
 
 **成熟要点（直接引用，不重证）**：
 
@@ -747,6 +751,23 @@ $\rho$ 是 delta rule 的中间量，零额外前向。**压缩率内生自平�
 
 **码率正则闭环（$R+\lambda D$）。** $b_t$ 不只是诊断量——把它作为码率正则项加进总损失：$\mathcal L_{\text{total}}\leftarrow\mathcal L_{\text{total}}+\lambda_\rho\,\frac1{BL}\sum_t b_t$（`rho_rate_weight`，默认 0 关闭，取在线编码器干净输入的 $b_t$ 均值）。最小化平均码率 $R$ 与重建失真 $D$ 构成经典率失真权衡，梯度经 $b_t\to\rho\to$ 记忆投影 $(k_q,k_v)$ 回传，使记忆学得更会吸收冗余（$\rho\downarrow\Rightarrow b_t\downarrow\Rightarrow$ 更省比特）。与「压缩率内生自平衡」互补：`keep` 门控决定**丢哪些**（salience），码率正则决定**留多少比特**（rate），二者合起来兑现式 665 的完整「可变码率」语义。
 
+**自适应码率控制：$\lambda$ 的拉格朗日对偶上升（让 $\lambda$ 自调到命中 $R^*$）。** 上文把 $\lambda_\rho$ 当作固定超参（默认 0 关闭），这是「手动选一个码率权重」的特例。更原则的做法是把 $\lambda$ 视为率失真约束的拉格朗日对偶乘子，让它在线自收敛到命中目标码率 $R^*$：
+
+$$\min_{x}\ D(x)\quad \text{s.t.}\quad R(x)\le R^*,\qquad \mathcal L(x,\lambda)=D(x)+\lambda\,(R(x)-R^*),\ \lambda\ge 0.$$
+
+这里 $x$ 泛指编码器参数与记忆状态，$D$ 是下游失真、$R=\frac1{BL}\sum_t b_t$ 是平均码率。四条被 Lean 机械化的代数事实（[`lean-math/LeanMath/RhoCompress.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/RhoCompress.lean)，`RhoCompress` 命名空间，全部无 `sorry`、无新增公理、纯实内积/代数）保证这条路线自洽：
+
+1. **KKT 充分性**（`kkt_sufficient`）：若 $(x^*,\lambda^*)$ 满足「$x^*$ 极小化 $\mathcal L(\cdot,\lambda^*)$」$\wedge\,\lambda^*\ge0\,\wedge\,R(x^*)\le R^*\,\wedge\,$互补松弛 $\lambda^*(R(x^*)-R^*)=0$，则 $x^*$ 是 $\min\{D:R\le R^*\}$ 的最优解。这是「让 $\lambda$ 自调到命中 $R^*$」合法性的根基——只要内循环在当前 $\lambda$ 下把 $\mathcal L$ 压到最小，外循环把 $\lambda$ 调到让约束取等，最终解就是率失真最优。
+2. **对偶超梯度方向正确**（`dual_supergradient`）：若 $x_\lambda$ 极小化 $\mathcal L(\cdot,\lambda)$，则 $(R(x_\lambda)-R^*)$ 是凹对偶 $q(\lambda)=\min_x\mathcal L(x,\lambda)$ 的超梯度：$q(\lambda')\le q(\lambda)+(\lambda'-\lambda)(R(x_\lambda)-R^*)$。因此「$R>R^*\Rightarrow$ 增大 $\lambda$、$R<R^*\Rightarrow$ 减小 $\lambda$」是正确的上升方向。
+3. **投影更新的不动点 $=$ KKT 互补松弛**（`update_fixedpoint_implies_cs`）：用投影超梯度上升
+   $$\lambda\leftarrow \max\!\big(0,\ \lambda+\eta\,(R(x_\lambda)-R^*)\big),\qquad \eta>0,$$
+   则任何不动点 $\lambda^*$ 自动满足 $R(x^*)\le R^*$ 且 $\lambda^*(R(x^*)-R^*)=0$；再由 `kkt_sufficient` 即得最优。迭代收敛到不动点是投影超梯度上升的标准结论（凹对偶 $+$ Lipschitz 超梯度，列为已知标准结果，未在 Lean 中形式化收敛速率）。
+4. **鞍点刻画**（`saddle_implies_kkt`、`saddle_implies_primal_optimal`）：$\mathcal L$ 的鞍点恰是约束问题的解——原极小 / 对偶极大同时成立。
+
+单调性根基（梯度方向确实指向「省比特」）由同文件的实现侧定理保证：`keep_antitone_in_z`（$z\uparrow\Rightarrow$ keep 更难满足，$z$ 是有效压缩旋钮）、`b_monotone_in_rho` 与 `meanRate_monotone_in_rho`（$\rho\downarrow\Rightarrow b\downarrow\Rightarrow R\downarrow$，记忆吸收冗余则码率下降）。残差几何侧 `rho_nonneg` / `rho_zero_iff` / `rho_pythagorean`（$\rho=0\Leftrightarrow v$ 被精确重建；预测与残差正交时 $\|v\|^2=\|p\|^2+\rho$）给出 $\rho$ 作为冗余度的语义正当性。
+
+**与本契约的兼容性**：自适应 $\lambda$ 只调整码率正则项的权重（标量 $\lambda_\rho$ 从常数变成在线更新量），**不改动 token 层的丢/留机制（式 665）、不改动 $b_t$ 的标定、不对潜空间 $Z$ 施加任何量化瓶颈**。因此 $Z$ 全程连续、反塌缩约束（§2.1）与 §3/§4 的连续可微要求均不受影响——$\lambda$ 是损失函数上的一维旋钮，不是表征路径上的结构改动。固定 $\lambda$（当前实现，`rho_rate_weight` 默认 0）是该方案 $\lambda$ 取常数的退化情形；将其升级为在线更新只需在 `training/losses.py` 的码率正则处用批内 $R$ 的滑动均值驱动上式，属后续可选实现，本轮仅固化数学契约与形式化验证。
+
 **记忆维度 $D$ 的扩展策略。** 记忆矩阵 $M$ 的 k/v 维度 $D$（=`rho_head_dim`，默认 64）类比 Transformer 的 head_dim：它是**冻结的单头宽度**，不随主干宽度 $d_{\text{hidden}}$ 缩放（中型 0.3b–7b 全程 $D=64$）。$M$ 是 $D\times D$ 方阵、秩 $\le D$，故 $D$ 决定「单头容量」。$D$ 太小只降低压缩率（$M$ 易满 → $\rho$ 上升 → 多保留），不损害正确性；需要扩展的是「总容量」，靠**加 head**（多份独立 $M$，各 $D=64$）而非放大 $D$——放大 $D$ 是 $O(D^2)$ 显存平方增长，加 head 是线性。
 
 **并行路径选择。** 因 $D=64$ 冻结，精度优先路径（矩阵仿射并行扫描，直接矩阵连乘、无求逆，显存 $O(BLD^2)$）在 $D=64$ 下可接受，故为默认实现（`psco.associative_scan_mat`）。显存优先路径（DeltaNet chunked / WY 低秩，$O(BLD)$）仅在 $D$ 需放大时才有必要，现仅记录不实现。
@@ -1199,6 +1220,53 @@ p_m(t)=\tfrac{1-p_{\text{anchor}}(t)}{K-1}. \tag{21}$$
 3. **软标签混合**：$\mathcal L=\mathcal L_{\text{recon}}+\beta\,\mathcal L_{\text{distill}}$，$\beta$ 随训练衰减。
 
 主损失始终是双向重建（§3.2 式 17）——蒸馏只做预热，双向重建压实成可还原 $Z$。
+
+#### 3.4.1 与当前实现的偏离（文档审计）
+
+上述 PAC 方案写于「各模态独立编码器 + 独立 $Z$ 生产者」的假设下；模型结构经历共享主干 `share_trunk`、$\Psi_h$ 收缩算子融合进 $Z$、Flow 速度场、私有 $\rho$ 压缩等多次修改后，实现已与本节描述显著偏离。逐条记录（带代码引用）：
+
+1. **`pac_anchor_prob` 仅写日志、不门控批次。** [`training/train.py`](file:///home/simon-ma/JEPA/training/train.py) 计算 $p_{\text{anchor}}(t)$ 后只用于 `writer.add_scalar("pac/p_anchor", ...)` 与打印字符串；训练循环每步恒以 `img, txt = batch_fn()` 取两模态同时前向，锚概率从未决定当步训练哪个模态——S0/S1 的「锚先建 $Z$」在实现中是名义的。
+2. **全部损失从第 1 步同时激活，无阶段门控。** [`training/losses.py:forward_losses`](file:///home/simon-ma/JEPA/training/losses.py) 把 JEPA、4 项重建、软对齐、方差、码率、交叉掩码、$\Psi$ 算子 5 项（readout/var/stop/consist/gen）、Flow×2 共 13 项加权求和，无按阶段启用；$\Psi$ 改端（`psi_consist`/`psi_gen`）从第 1 步就对着尚未收敛的目标编码器输出 $Z_{\text{tgt}}$ 回归。
+3. **Flow 在主预训与独立阶段双重训练。** `flow_enabled` 时主预训 `forward_losses` 计算并累加 `flow`/`flow_cond` 损失（此时目标编码器 EMA 每步更新、仍在漂移），而 [`train.py:train_flow_stage`](file:///home/simon-ma/JEPA/training/train.py) 又在冻结 $E$ 后单独训 $v_\psi$——同一回归目标被训练两次，且主预训段目标非平稳（适定性问题，见下）。
+4. **`rho_compress` 是静态开关，「先写后压」非调度跃迁。** [`model/config.py`](file:///home/simon-ma/JEPA/model/config.py) 中 `rho_compress` 默认 `False`，是一次性布尔配置，无法在训练中按「特征空间成型后开启」自动切换；本节描述的 warmup 需手工改配置重启。
+5. **共享主干与 PAC 非对称假设冲突。** 中型档默认 `share_trunk=True`（`model/config.py` PRESETS），图文共享同一条产生 $Z$ 的主干；PAC「冻结已有 $Z$ / 锚编码器低 lr 新编码器高 lr」假设锚与新模态各有独立 $Z$ 生产者，共享主干下 $Z$ 的生产者是同一个，只有薄前端接口私有——「冻结 $Z$」在共享主干下退化为「已有薄接口低 lr、新薄接口高 lr」。
+
+#### 3.4.2 平稳性门控的多阶段课程（Stationarity-Gated Curriculum）
+
+上述偏离的共性是：把**依赖「上游表征已平稳」的回归目标**与上游表征的训练同时进行。这在优化适定性上有问题——可由一条初等引理统一刻画，已 Lean 形式化（见 [`lean-math/LeanMath/Curriculum.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/Curriculum.lean)，命名空间 `Curriculum`，`lake build` 通过、无 sorry/axiom）：
+
+> **引理 1（最优解追踪目标，`Curriculum.minimizer_tracks_target`）。** 仿射回归 $f_\theta(x)=\theta\cdot x$ 的最小二乘最优解 $\theta^*(y)=y/x$，其变化量满足
+> $$\|\theta^*(y_2)-\theta^*(y_1)\|=\frac{\|y_2-y_1\|}{\|x\|}.$$
+> 即「目标怎么动，最优解就怎么动」，输入系数 $x$ 起杠杆作用。
+
+> **定理 1（目标漂移 ⟹ 最优解不收敛，`Curriculum.minimizer_not_cauchy_of_target_drifts`）。** 若回归目标序列 $y_t$ 步间漂移恒 $\ge\delta>0$，则最优解序列 $\theta^*(y_t)$ 步间差恒 $\ge\delta/\|x\|>0$，故非 Cauchy、不收敛（`Curriculum.not_cauchy_of_step_ge_eps`）。
+
+核心结论：**对着持续漂移的回归目标训练，参数没有稳定不动点**。据此检查当前架构中各损失的回归目标：
+
+- **$\Psi$ 改端（$L_{\text{consist}}$ / $L_{\text{gen}}$）。** $\Psi_h$ 的仿射骨架 $z\mapsto a\odot z+b$（[`model/operator.py`](file:///home/simon-ma/JEPA/model/operator.py)，对应 §3.7.3），固定 $a$ 与输入 $z$ 时最优偏移 $b^*=z_{\text{tgt}}-a\odot z$。`Curriculum.psi_change_side_tracks_target` 证 $\|b^*_2-b^*_1\|=\|z_{\text{tgt},2}-z_{\text{tgt},1}\|$：改端最优解随目标编码器输出 $z_{\text{tgt}}$ 同步漂移。故 **$z_{\text{tgt}}$ 非平稳时 $L_{\text{consist}}$/$L_{\text{gen}}$ 无稳定最优解**（`Curriculum.psi_change_not_cauchy_of_target_drifts`）。注意 $\Psi$ **读端**（$L_{\text{stop}}$/$L_{\text{readout}}$/$L_{\text{var}}$）锚定 $\Psi(Z_{\text{clean}})\approx Z_{\text{clean}}$，目标是 $Z$ 自身（只需 $Z$ 非退化，由方差正则保证），不受此影响——可从早期低权重启用。
+- **Flow 速度场 $v_\psi$。** 回归目标是 $z_1-z_0$（$z_1=E_\xi(x)$ 为目标编码器输出，$z_0$ 为噪声）。`Curriculum.flow_target_tracks_encoder` 证固定 $z_0$ 时目标漂移 $=\|z_{1,2}-z_{1,1}\|$：$E$ 未冻结时 $v_\psi$ 无稳定最优解（`Curriculum.flow_target_drifts_of_encoder_drifts`）。故 **Flow 应在主训练结束、$E$ 冻结后单独训练（`train_flow_stage`），主预训不应累加 flow 损失**。
+- **$\rho$ 记忆 $M$。** $M^*=\arg\min\|Mk-v\|$ 追踪前端输出 $v$（`Curriculum.rho_memory_tracks_feature`）；结合 `AssociativeMemory` 的 delta-rule 不动点（收敛要求 $(k,v)$ 平稳，见 `AssocMem.iterAff_error` / `AssocMem.real_pow_tendsto_zero`），前端/主干非平稳时 $M$ 追逐移动目标、$\rho$ 判据无意义（`Curriculum.rho_memory_convergence_requires_stationary_input`）。故 **「先写后压」：特征空间 $\varepsilon$-平稳后再开 `rho_compress`**。
+
+> **定理 5（阶段适定性链，`Curriculum.stage_chain_well_posedness` / `Curriculum.four_stage_chain_nonstationary_breaks_downstream`）。** 阶段偏序 S1→S2→S3→S4 中，后一阶段的回归目标是前一阶段输出的函数；由定理 1，**上游 $\varepsilon$-平稳是下游适定的必要条件**——任一上游非平稳，所有下游目标均无稳定最优解。
+
+据此给出修正后的四阶段课程（阶段比例为超参，可在 `model/config.py` 调）：
+
+| 阶段 | 步数比例 | 启用损失（相对主损失） | 模态采样 | $\rho$ 状态 | Flow 状态 | EMA / 冻结策略 | 依据 |
+|---|---|---|---|---|---|---|---|
+| **S1 写 / 建 $Z$** | 0–45% | JEPA + 自重建×2 + 交叉重建×2（硬对齐）+ 软对齐 + 方差 + $\Psi$ 读端（$L_{\text{stop}}$/$L_{\text{readout}}$/$L_{\text{var}}$，×0.3 低权重） | 锚薄接口先接入，$p_{\text{anchor}}$ 1→0.5 缓降（**实际门控**） | 关 | 主预训关 | EMA $\mu=0.99$ 正常更新，目标编码器随在线收敛 | 定理 1：此时仅需 $Z$ 非退化（方差正则），不需 $Z_{\text{tgt}}$ 平稳 |
+| **S2 压 / $\rho$** | 45–75% | S1 全部 + 码率（开启 $\rho$） | $p_{\text{anchor}}\to 1/K$ 均衡 | **开**（特征已 $\varepsilon$-平稳） | 主预训关 | EMA 继续 | `Curriculum.rho_memory_tracks_feature`：$v$ 平稳后 $M$ 才有意义 |
+| **S3 推理 / $\Psi$ 改端** | 55–100% | S2 全部 + $\Psi$ 改端（$L_{\text{consist}}$/$L_{\text{gen}}$，×1.0） | 均衡 | 开 | 主预训关 | EMA 趋近冻结（$\mu\to 0.999$），$Z_{\text{tgt}}$ 近 $\varepsilon$-平稳 | `Curriculum.psi_change_not_cauchy_of_target_drifts`：$Z_{\text{tgt}}$ 平稳后改端才适定（与 S2 重叠，因二者都需平稳 $Z$ 可联训） |
+| **S4 生成 / Flow** | 主训练结束后（独立 `train_flow_stage`） | 仅 flow + flow_cond | 均衡 | 开 | **开** | **冻结 $E_\xi$ 与 $E_\theta$**，只训 $v_\psi$ | `Curriculum.flow_target_drifts_of_encoder_drifts`：$E$ 冻结后 $v_\psi$ 才适定 |
+
+**门控判据（可计算代理）。** 「$Z_{\text{tgt}}$ $\varepsilon$-平稳」用目标编码器输出的 EMA 漂移量代理：$\text{drift}_t=\|\text{EMA}(Z_{\text{tgt}},t)-\text{EMA}(Z_{\text{tgt}},t-w)\|$（滑窗 $w$，如 100 步），或在线/目标 $Z$ 的余弦 $\cos(Z_{\text{online}},Z_{\text{target}})$ 接近 1；当 $\text{drift}_t<\varepsilon$（如 $10^{-3}$）判定进入下一阶段。**〔设计断言〕** 精确阈值、滑窗长度、是否用余弦替代漂移量，均为工程超参，未形式化；定理 1–5 只保证「非平稳 ⟹ 不适定」的必要性方向，不给出阈值。
+
+**共享主干下的适配。** `share_trunk=True` 时锚/新模态共享产生 $Z$ 的主干，只有薄前端接口私有。因此 PAC「冻结已有 $Z$」退化为：新模态接入时只新增薄前端接口（高 lr），共享主干与已有薄接口保持低 lr（软锚定），$Z$ 不硬冻结——与「锚定 ≠ 冻结」（§3.2）一致。**〔设计断言〕** 此适配的最优 lr 比例需实验确定。
+
+**模态门控的近似实现。** 真正的单模态前向（按 $p_{\text{anchor}}$ 跳模态）会破坏 `forward_losses` 的张量形状约定；实现上**以 $p_{\text{anchor}}$ 缩放锚/新模态的损失权重**（$w_{\text{anchor}}=p_{\text{anchor}}$、$w_{\text{new}}=(1-p_{\text{anchor}})/(K-1)$）达到「锚梯度主导」的同等效果，不跳前向。**〔设计断言〕** 损失权重缩放与真正跳前向在梯度上的等价性未形式化。
+
+**与既有契约的兼容性。** 本课程只调整训练目标的**启用顺序与权重门控**，不改变模型结构：$Z$ 全程连续（$\rho$ 压缩作用于 token 层，不触及潜空间，§2.6）、不引入语义量化瓶颈、反塌缩约束（方差正则从 S1 即启用）保持不变。$\Psi$ 的收缩性（`Contractive.contraction_comp`）与读端锚定（$L_{\text{stop}}$）保证 S3 开启改端时不动点不漂移出界。**实现注记**：$\rho$ warmup 采用**码率损失权重门控**（`curriculum_rho_start` 前把 `rho_rate_weight` 项置 0）而非运行时切换 `rho_compress` 开关，避免改变 checkpoint 结构；`rho_compress` 仍由 config 静态决定是否启用记忆（[`training/losses.py`](file:///home/simon-ma/JEPA/training/losses.py) `curriculum_gates` 的 `rate` 门控）。
+
+> **形式化边界（诚实）。** 已 Lean 形式化：引理 1、定理 1、$\Psi$/Flow/$\rho$ 三实例化、阶段链定理 5（见 `Curriculum.lean`，对照表见 §1.0）。**未形式化（设计断言）**：$\varepsilon$ 阈值与滑窗选取、梯度方差收敛速率、平稳性代理的统计估计误差、阶段比例最优值、损失权重门控与跳前向的梯度等价性、共享主干下 lr 比例——均依赖实测，见 [lean-math/README.md](file:///home/simon-ma/JEPA/lean-math/README.md)「问题」。
 
 §3.1–3.4 讨论多模态如何对齐到同一 $Z$；从本节起讨论 $Z$ 内的转换与计算。二者并置在同一阶段的原因见 §1——文字把「描述（对齐）」与「推理（预测）」用同一种符号混写，靠网络自推断的隐含模式 $h$ 分辨，故对齐目标与推理目标在表征空间上交织、不可切分。
 

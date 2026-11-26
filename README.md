@@ -77,7 +77,7 @@ evaluation/      评测
 | S2 均衡软化 | 全模态联合 | 全放开，Z 低 lr | 均衡、纳新、防漂移 |
 | S3 收尾 | 微调 + 下游 | 全模态微调 | 收敛 |
 
-私有 M 需「先写后压」warmup：每模态接入先关 `rho_compress` 让主干学特征，再开让 M 学 ρ 判据。冒烟档默认关闭 PAC（`pac_enabled=False`），用 `--pac 1` 打开。
+私有 M 需「先写后压」warmup：每模态接入先关 `rho_compress` 让主干学特征，再开让 M 学 ρ 判据。PAC 默认开启（`pac_enabled=True`），冒烟档可用 `--pac 0` 关闭。
 
 ### 生成阶段（主训练 → Flow 阶段 → 自反馈，math.md §4.2(e)/§5）
 

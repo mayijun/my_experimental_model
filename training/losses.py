@@ -96,6 +96,70 @@ def cross_mask_ratio(step, total_steps, start, end):
     return min(end, start + (end - start) * t)
 
 
+def pac_anchor_prob(step, total_steps, cfg):
+    """PAC 锚模态采样概率（§3.4 式 21）：p_anchor(t)=p_inf+(p_0-p_inf)·σ(-(t-t0)/τ)。
+
+    单一事实源（train.py 日志与 losses.py 课程门控共用）：t<t0 时锚概率≈p0
+    （先由锚模态定 Z），t→1 时降到 pinf=1/K（两模态均衡）。
+    """
+    t = step / max(1, total_steps)
+    p0, pinf, tau, t0 = cfg.pac_anchor_p0, cfg.pac_anchor_pinf, cfg.pac_tau, cfg.pac_t0
+    return pinf + (p0 - pinf) * float(torch.sigmoid(torch.tensor(-(t - t0) / tau)))
+
+
+def curriculum_stage(step, total_steps, cfg):
+    """§3.4.2 阶段标签：S1 写/建 Z → S2 压/ρ → S3 推理/Ψ 改端。
+
+    S4（生成/Flow）是主训练结束后独立的 train_flow_stage，不在此主预训阶段内。
+    curriculum_enabled=False 时返回 "off"（旁路，等价旧行为）；缺步数信息时按后期处理。
+    """
+    if not cfg.curriculum_enabled:
+        return "off"
+    if step is None or total_steps is None:
+        return "S3"
+    t = step / max(1, total_steps)
+    if t < cfg.curriculum_s1_end:
+        return "S1"
+    if t < cfg.curriculum_s3_start:
+        return "S2"
+    return "S3"
+
+
+def curriculum_gates(step, total_steps, cfg):
+    """§3.4.2 平稳性门控：返回各损失项的门控系数（curriculum_enabled=False 时全 1.0）。
+
+    数学根基：Curriculum.lean 定理 1（目标漂移 ⟹ 最优解非 Cauchy 不收敛）
+    + 定理 5（阶段适定性链 S1→S2→S3→S4）：在上游表征 ε-平稳前，把依赖它的下游目标门控为 0。
+      - flow：flow_in_pretrain=False 时主预训不计 flow（Flow 仅在冻结 E 的 S4 训练）；
+      - psi_change（L_consist/L_gen）：t<s3_start 时为 0（Z_tgt 未平稳，改端无稳定最优解）；
+      - psi_read（readout/stop/var）：S1/S2 低权重 curriculum_psi_read_scale（薄接口先接入）；
+      - rate：t<rho_start 时码率损失权重 0（前端/主干未平稳时 ρ 记忆不适定，warmup）；
+      - anchor/new：PAC p_anchor 缩放锚/新模态损失权重（损失权重门控近似单模态投喂，见 README 问题 14）。
+    """
+    if not cfg.curriculum_enabled:
+        return dict(flow=1.0, psi_read=1.0, psi_change=1.0, rate=1.0, anchor=1.0, new=1.0)
+    if step is None or total_steps is None:
+        t = 1.0  # 评估/缺步数：按已收敛处理，不门控
+    else:
+        t = step / max(1, total_steps)
+    flow_gate = 1.0 if cfg.flow_in_pretrain else 0.0
+    before_s3 = t < cfg.curriculum_s3_start
+    psi_read = cfg.curriculum_psi_read_scale if before_s3 else 1.0
+    psi_change = 0.0 if before_s3 else cfg.curriculum_psi_change_scale
+    rate_gate = 0.0 if t < cfg.curriculum_rho_start else 1.0
+    if cfg.pac_enabled:
+        if step is None or total_steps is None:
+            p = cfg.pac_anchor_pinf
+        else:
+            p = pac_anchor_prob(step, total_steps, cfg)
+        # 期望梯度：锚模态项 ×p、新模态项 ×(1-p)；p→1 时新模态梯度消失（先定 Z），p→0.5 时均衡。
+        anchor_gate, new_gate = p, 1.0 - p
+    else:
+        anchor_gate = new_gate = 1.0
+    return dict(flow=flow_gate, psi_read=psi_read, psi_change=psi_change,
+                rate=rate_gate, anchor=anchor_gate, new=new_gate)
+
+
 def psi_losses(model, img_z, txt_z, img_ctx, txt_ctx, img_tgt, txt_tgt):
     """PSCO 算子（§3.7.3 + §3.7）损失：防塌缩三道 + 推理两目标。
 
@@ -104,22 +168,26 @@ def psi_losses(model, img_z, txt_z, img_ctx, txt_ctx, img_tgt, txt_tgt):
     - stop（§3.7 L_stop）：不动点/停止正则，Ψ_h(Z_clean)≈Z_clean，读端 g_change→0 退化为恒等；
     - consist（§3.7 L_consist）：路径无关一致性，Ψ_h(Z_ctx)≈Z_tgt，改端把上下文变换到目标。
 
-    返回 (readout, var, stop, consist, img_ctx_star, txt_ctx_star)；后两者供 §3.9 生成 = D(Ψ(Z)) 解码。
+    返回按模态拆分的 (readout_i, readout_t, var_i, var_t, stop_i, stop_t,
+    consist_i, consist_t, img_ctx_star, txt_ctx_star)；供 forward_losses 做 PAC 模态门控与
+    课程阶段门控（改端 consist/gen 在 S1/S2 置 0）。
     """
     img_star = model.psi_layer(img_z)
     txt_star = model.psi_layer(txt_z)
-    readout = (
-        (model.psi_layer.readout(img_star) - img_z).pow(2).mean()
-        + (model.psi_layer.readout(txt_star) - txt_z).pow(2).mean()
-    )
-    var = variance_loss(img_star) + variance_loss(txt_star)
+    readout_i = (model.psi_layer.readout(img_star) - img_z).pow(2).mean()
+    readout_t = (model.psi_layer.readout(txt_star) - txt_z).pow(2).mean()
+    var_i = variance_loss(img_star)
+    var_t = variance_loss(txt_star)
     # §3.7 L_stop：干净 Z 已是不动点（读端恒等，改分量 g_change→0）
-    stop = (img_star - img_z).pow(2).mean() + (txt_star - txt_z).pow(2).mean()
+    stop_i = (img_star - img_z).pow(2).mean()
+    stop_t = (txt_star - txt_z).pow(2).mean()
     # §3.7 L_consist：算子把掩码上下文变换到干净目标（改端，改分量 g_change→1）
     img_ctx_star = model.psi_layer(img_ctx)
     txt_ctx_star = model.psi_layer(txt_ctx)
-    consist = (img_ctx_star - img_tgt).pow(2).mean() + (txt_ctx_star - txt_tgt).pow(2).mean()
-    return readout, var, stop, consist, img_ctx_star, txt_ctx_star
+    consist_i = (img_ctx_star - img_tgt).pow(2).mean()
+    consist_t = (txt_ctx_star - txt_tgt).pow(2).mean()
+    return (readout_i, readout_t, var_i, var_t, stop_i, stop_t,
+            consist_i, consist_t, img_ctx_star, txt_ctx_star)
 
 
 def maybe_autocast(device):
@@ -155,35 +223,49 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         _, img_tgt = model.image_target(img)
         _, txt_tgt = model.text_target(txt)
 
-    # —— 推理：JEPA 潜预测 ——
+    # —— 课程门控（§3.4.2）：上游 ε-平稳前下游目标权重置 0；curriculum_enabled=False 时全 1 ——
+    gates = curriculum_gates(step, total_steps, cfg)
+    anchor_is_img = cfg.anchor_modality == "image"
+
+    def mscale(img_term, txt_term):
+        """按 PAC p_anchor 缩放锚/新模态损失（损失权重门控近似单模态投喂，README 问题 14）。"""
+        a = gates["anchor"] if anchor_is_img else gates["new"]
+        n = gates["new"] if anchor_is_img else gates["anchor"]
+        return a * img_term + n * txt_term
+
+    # —— 推理：JEPA 潜预测（按模态拆分，供 mscale 门控）——
     img_pred = model.image_predictor(img_ctx)
     txt_pred = model.text_predictor(txt_ctx)
+    jepa_i = cosine_loss(img_pred, img_tgt)
+    jepa_t = cosine_loss(txt_pred, txt_tgt)
 
     # —— 解码：自重建 ——
     img_self = model.image_decoder(img_tokens)
     txt_self = model.text_decoder(txt_tokens)
-
-    # —— 解码：硬对齐（双向重建，穿过同一个 Z）——
-    img_cross = model.image_decoder(txt_tokens)   # 文本 token → 图像
-    txt_cross = model.text_decoder(img_tokens)    # 图像 token → 文本
-
-    jepa = cosine_loss(img_pred, img_tgt) + cosine_loss(txt_pred, txt_tgt)
     recon_img_self = F.mse_loss(img_self, img)
     recon_txt_self = F.cross_entropy(
         txt_self.reshape(-1, txt_self.size(-1)), txt.reshape(-1), ignore_index=pad_id
     )
+
+    # —— 解码：硬对齐（双向重建，穿过同一个 Z）；按目标模态归属 ——
+    img_cross = model.image_decoder(txt_tokens)   # 文本 token → 图像
+    txt_cross = model.text_decoder(img_tokens)    # 图像 token → 文本
     recon_img_cross = F.mse_loss(img_cross, img)
     recon_txt_cross = F.cross_entropy(
         txt_cross.reshape(-1, txt_cross.size(-1)), txt.reshape(-1), ignore_index=pad_id
     )
+
+    # 跨模态软对齐：锚/新共同参与（正是「新模态向锚对齐」的信号），不按 p_anchor 门控
     align = alignment_loss(model, img_cls, txt_cls)
-    var = variance_loss(img_tokens) + variance_loss(txt_tokens)
+    var_i = variance_loss(img_tokens)
+    var_t = variance_loss(txt_tokens)
     rate = torch.zeros((), device=device)
     if cfg.rho_compress and img_b is not None and txt_b is not None:
         rate = 0.5 * (img_b.mean() + txt_b.mean())
 
     # —— 交叉掩码（§3.2 式 18）：本模态剩余 + 其他模态联合预测被掩部分，防模态坍缩 ——
-    cross_pred = torch.zeros((), device=device)
+    cross_pred_i = torch.zeros((), device=device)
+    cross_pred_t = torch.zeros((), device=device)
     if cfg.cross_mask and model.cross_mask_predictor is not None:
         ratio = cross_mask_ratio(
             step, total_steps, cfg.cross_mask_ratio_start, cfg.cross_mask_ratio_end
@@ -193,59 +275,69 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         _, cm_img_ctx = model.image_online(img, mask=cm_img_mask)
         _, cm_txt_ctx = model.text_online(cm_txt_masked)
         cm_pred_img, cm_pred_txt = model.cross_mask_predictor(cm_img_ctx, cm_txt_ctx)
-        cross_pred = cosine_loss(cm_pred_img, img_tgt) + cosine_loss(cm_pred_txt, txt_tgt)
+        cross_pred_i = cosine_loss(cm_pred_img, img_tgt)
+        cross_pred_t = cosine_loss(cm_pred_txt, txt_tgt)
 
     # —— PSCO 算子（§3.7.3 + §3.7）：防塌缩三道 + 推理两目标（L_stop / L_consist）——
-    psi_readout = torch.zeros((), device=device)
-    psi_var = torch.zeros((), device=device)
-    psi_stop = torch.zeros((), device=device)
-    psi_consist = torch.zeros((), device=device)
-    psi_gen = torch.zeros((), device=device)
+    psi_readout_i = psi_readout_t = torch.zeros((), device=device)
+    psi_var_i = psi_var_t = torch.zeros((), device=device)
+    psi_stop_i = psi_stop_t = torch.zeros((), device=device)
+    psi_consist_i = psi_consist_t = torch.zeros((), device=device)
+    psi_gen_i = psi_gen_t = torch.zeros((), device=device)
     if cfg.psi_enabled and model.psi_layer is not None:
-        psi_readout, psi_var, psi_stop, psi_consist, img_ctx_star, txt_ctx_star = psi_losses(
+        (psi_readout_i, psi_readout_t, psi_var_i, psi_var_t,
+         psi_stop_i, psi_stop_t, psi_consist_i, psi_consist_t,
+         img_ctx_star, txt_ctx_star) = psi_losses(
             model, img_tokens, txt_tokens, img_ctx, txt_ctx, img_tgt, txt_tgt
         )
-        # §3.9 生成 = D(Ψ(Z))：把算子不动点 Z*=Ψ(Z_ctx)（掩码上下文的完成）解码回目标，接通「算子→不动点→解码→生成」
+        # §3.9 生成 = D(Ψ(Z))：把算子不动点 Z*=Ψ(Z_ctx)（掩码上下文的完成）解码回目标
         img_gen = model.image_decoder(img_ctx_star)
         txt_gen = model.text_decoder(txt_ctx_star)
-        psi_gen = F.mse_loss(img_gen, img) + F.cross_entropy(
+        psi_gen_i = F.mse_loss(img_gen, img)
+        psi_gen_t = F.cross_entropy(
             txt_gen.reshape(-1, txt_gen.size(-1)), txt.reshape(-1), ignore_index=pad_id
         )
 
-    # —— Flow Matching（§4.1.2 + §4.1.8）：无条件欧氏 OT + 条件流（跨模态）——
-    flow = torch.zeros((), device=device)
-    flow_cond = torch.zeros((), device=device)
-    if cfg.flow_enabled and model.velocity is not None:
-        flow = flow_loss(model.velocity, img_tgt) + flow_loss(model.velocity, txt_tgt)
+    # —— Flow Matching（§4.1.2 + §4.1.8）：curriculum 门控（flow_in_pretrain=False 时主预训不计）——
+    flow_i = flow_t = torch.zeros((), device=device)
+    flow_cond_i = flow_cond_t = torch.zeros((), device=device)
+    if cfg.flow_enabled and model.velocity is not None and gates["flow"] > 0:
+        flow_i = flow_loss(model.velocity, img_tgt)
+        flow_t = flow_loss(model.velocity, txt_tgt)
         if cfg.flow_cond_enabled:
-            # 条件流（§4.1.8）：text→image（c=文本目标 Z，z_1=图像目标 Z）+ image→text 双向
-            flow_cond = (
-                conditional_flow_loss(model.velocity, txt_tgt, img_tgt)
-                + conditional_flow_loss(model.velocity, img_tgt, txt_tgt)
-            )
+            # 条件流（§4.1.8）：text→image（目标=图像）+ image→text（目标=文本），按目标模态归属
+            flow_cond_i = conditional_flow_loss(model.velocity, txt_tgt, img_tgt)
+            flow_cond_t = conditional_flow_loss(model.velocity, img_tgt, txt_tgt)
 
+    # —— 组装总损失：PAC 模态门控（mscale）× 课程阶段门控（gates）——
     total = (
-        cfg.jepa_weight * jepa
-        + cfg.recon_weight * (recon_img_self + recon_txt_self)
-        + cfg.cross_weight * (recon_img_cross + recon_txt_cross)
+        cfg.jepa_weight * mscale(jepa_i, jepa_t)
+        + cfg.recon_weight * mscale(recon_img_self, recon_txt_self)
+        + cfg.cross_weight * mscale(recon_img_cross, recon_txt_cross)
         + cfg.align_weight * align
-        + cfg.var_weight * var
-        + cfg.rho_rate_weight * rate
-        + cfg.cross_mask_weight * cross_pred
-        + cfg.psi_readout_weight * psi_readout
-        + cfg.psi_var_weight * psi_var
-        + cfg.psi_stop_weight * psi_stop
-        + cfg.psi_consist_weight * psi_consist
-        + cfg.psi_gen_weight * psi_gen
-        + cfg.flow_weight * flow
-        + cfg.flow_cond_weight * flow_cond
+        + cfg.var_weight * mscale(var_i, var_t)
+        + cfg.rho_rate_weight * rate * gates["rate"]
+        + cfg.cross_mask_weight * mscale(cross_pred_i, cross_pred_t)
+        + cfg.psi_readout_weight * mscale(psi_readout_i, psi_readout_t) * gates["psi_read"]
+        + cfg.psi_var_weight * mscale(psi_var_i, psi_var_t) * gates["psi_read"]
+        + cfg.psi_stop_weight * mscale(psi_stop_i, psi_stop_t) * gates["psi_read"]
+        + cfg.psi_consist_weight * mscale(psi_consist_i, psi_consist_t) * gates["psi_change"]
+        + cfg.psi_gen_weight * mscale(psi_gen_i, psi_gen_t) * gates["psi_change"]
+        + cfg.flow_weight * mscale(flow_i, flow_t)
+        + cfg.flow_cond_weight * mscale(flow_cond_i, flow_cond_t)
     )
     parts = {
-        "jepa": jepa, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
+        "jepa": jepa_i + jepa_t, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
-        "align": align, "var": var, "rate": rate, "cross_pred": cross_pred,
-        "psi_readout": psi_readout, "psi_var": psi_var,
-        "psi_stop": psi_stop, "psi_consist": psi_consist, "psi_gen": psi_gen,
-        "flow": flow, "flow_cond": flow_cond,
+        "align": align, "var": var_i + var_t, "rate": rate,
+        "cross_pred": cross_pred_i + cross_pred_t,
+        "psi_readout": psi_readout_i + psi_readout_t,
+        "psi_var": psi_var_i + psi_var_t,
+        "psi_stop": psi_stop_i + psi_stop_t,
+        # 改端（consist/gen）记入阶段门控后的值：S1/S2 为 0，S3 起非 0（课程可观测）
+        "psi_consist": (psi_consist_i + psi_consist_t) * gates["psi_change"],
+        "psi_gen": (psi_gen_i + psi_gen_t) * gates["psi_change"],
+        "flow": (flow_i + flow_t) * gates["flow"],
+        "flow_cond": (flow_cond_i + flow_cond_t) * gates["flow"],
     }
     return total, parts

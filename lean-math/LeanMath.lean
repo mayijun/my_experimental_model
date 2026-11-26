@@ -10,3 +10,5 @@ import LeanMath.Semigroup
 import LeanMath.Retraction
 import LeanMath.LoopedEncoder
 import LeanMath.LoopedZReasoner
+import LeanMath.RhoCompress
+import LeanMath.Curriculum

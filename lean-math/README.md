@@ -1,6 +1,7 @@
 # Lean 形式化：math.md 信息论论证的推导与检查
 
-本目录用 Lean 4 + mathlib 形式化了 [math.md](../math.md) 中 §3.2–§3.4 的核心信息论命题，
+本目录用 Lean 4 + mathlib 形式化了 [math.md](../math.md) 中 §2.6、§2.9–§2.10、§3.2–§3.4、
+§3.7、§3.9–§3.10、§4.1.7 的核心命题（信息论、率失真、算子不动点与替代结构），
 并据此检查文档中的数值与表述。所有定理均通过 `lake build` 编译验证（无 `sorry`/`axiom`）。
 
 ## 文件结构
@@ -19,6 +20,8 @@
 | `LeanMath/AssociativeMemory.lean` | §2.9 CARO 替代结构（门控结合扫描态）的代数核心：更新是仿射（复用 `PSCO.Aff` 幺半群 ⇒ 并行扫描）、内容可寻址读出恒等式、残差⇔被历史重建、不动点/误差/收敛、反塌缩 |
 | `LeanMath/LoopedEncoder.lean` | §2.10 Looped Encoder 替代结构：把 $E$ 主干→$Z$ 的前馈链折叠为权重共享循环；形式化表达力包含（回环=同深度前馈的权重绑定对角）、参数计数、仿射误差恒等式、反输入塌缩、梯度衰减界 |
 | `LeanMath/LoopedZReasoner.lean` | §3.10 Looped Z-Reasoner 替代结构：把 Z 内 N 步算子复合折叠为单一权重共享算子迭代到不动点；形式化表达力三层包含、参数计数、反算子塌缩、Neumann 级数极限、收缩约束代价、串行深度 big-O、DEQ 极限 |
+| `LeanMath/RhoCompress.lean` | §2.6 token 层 ρ 残差压缩与自适应码率控制：ρ 的几何（非负/零⇔重建/正交能量分解）、keep 与码率 R 关于 z/ρ 的单调性、率失真约束 min{D:R≤R*} 的拉格朗日 KKT 充分性、对偶超梯度方向、投影更新 λ←max(0,λ+η(R−R*)) 的不动点 ⟹ 互补松弛 |
+| `LeanMath/Curriculum.lean` | §3.4.2 平稳性门控的多阶段课程：仿射回归最优解追踪目标（引理 1）、目标漂移 ⟹ 最优解非 Cauchy 不收敛（定理 1）、实例化到 Ψ 改端 / Flow / ρ 记忆、阶段适定性链 S1→S2→S3→S4（定理 5） |
 
 ## 形式化结果 ↔ math.md 命题对照
 
@@ -239,6 +242,53 @@ Z-Reasoner——把 §3.5 / §3.7 中 Z 内的 N 步算子复合 $\Psi^{(N)}$ �
 极限**（BPTT vs DEQ）、**收缩约束代价**（膨胀发散划定算法类边界）、以及本节独有的**串行深度
 big-O 对比**（并行扫描把关键路径从 $O(N)$ 降到 $O(\log T)$，编码器回环无此收益）。详见
 math.md §3.10。仍未形式化的部分见「问题 12」。
+
+### 11. §2.6 token 层 ρ 残差压缩与自适应码率控制（率失真的拉格朗日对偶上升）
+
+`LeanMath/RhoCompress.lean`（命名空间 `RhoCompress`）形式化了 §2.6 式 (665) 的数学核心——
+token 层按冗余度 $\rho=\|v-Mk\|^2$ 丢/留、比特门控 $b_t$、平均码率 $R=\frac1{BL}\sum_t b_t$，
+以及「把 $\lambda$（`rho_rate_weight`）当作拉格朗日对偶乘子、在线自调到命中目标码率 $R^*$」
+的合法性根基。在实内积空间 $F$ 与任意决策集 $X$ 上机械化以下断言（全部无 `sorry` / 无新增公理，
+`lake build` 通过，纯代数/实内积，不依赖测度论）：
+
+| 断言 | 定理 | math.md |
+|------|------|---------|
+| $\rho=\|v-p\|^2\ge 0$（冗余度恒非负） | `rho_nonneg` | §2.6 残差几何 |
+| $\rho=0\Leftrightarrow v=p$（残差为零 ⇔ token 被精确重建 ⇔ 可压） | `rho_zero_iff` | 式 (665) keep 判据 |
+| 预测与残差正交时 $\|v\|^2=\|p\|^2+\rho$（能量分解：被吸收能量 + 新奇能量） | `rho_pythagorean` | §2.6 正交性原理 |
+| $z\uparrow\Rightarrow$ keep 更难满足（$z$ 是有效压缩强度旋钮） | `keep_antitone_in_z` | 式 (665) keep / 标定 $z$ |
+| $b_t$ 关于 $\rho$ 单调不减（记忆吸收冗余 ⇒ $\rho\downarrow\Rightarrow b\downarrow$） | `b_monotone_in_rho` | 式 (665) $b_t$ |
+| 平均码率 $R=\mathrm{mean}\,b$ 关于每个 $\rho_t$ 单调不减（梯度方向指向省比特） | `meanRate_monotone_in_rho` | 码率正则 $R+\lambda D$ |
+| **KKT 充分性**：$x^*$ 极小化 $L(\cdot,\lambda^*)\wedge\lambda^*\ge0\wedge$ 可行 $\wedge$ 互补松弛 $\Rightarrow$ $x^*$ 是 $\min\{D:R\le R^*\}$ 最优解 | `kkt_sufficient` | 自适应 $\lambda$ 根基 |
+| **对偶超梯度**：$(R(x_\lambda)-R^*)$ 是凹对偶 $q(\lambda)=\min_x L(x,\lambda)$ 的超梯度 | `dual_supergradient` | 投影超梯度上升方向 |
+| 鞍点 $\Rightarrow$ KKT $\Rightarrow$ 原始最优（$L$ 的鞍点恰是约束问题的解） | `saddle_implies_kkt` / `saddle_implies_primal_optimal` | 鞍点刻画 |
+| 投影更新 $\lambda\leftarrow\max(0,\lambda+\eta(R-R^*))$ 的不动点 $\Rightarrow$ 互补松弛（约束紧或 $\lambda=0$） | `update_fixedpoint_implies_cs` | 自适应 $\lambda$ 不动点 = KKT |
+
+关键：`kkt_sufficient` 与 `update_fixedpoint_implies_cs` 合起来给出「让 $\lambda$ 按投影超梯度上升
+自调、其稳定点恰好命中 KKT 条件 ⇒ 率失真最优」的完整代数闭环；`b_monotone_in_rho` /
+`meanRate_monotone_in_rho` 保证码率正则的梯度方向确实指向「记忆吸收冗余则省比特」（$\rho\downarrow
+\Rightarrow R\downarrow$），是「梯度信号正确」的根基。与 `AssociativeMemory.lean` 的关系：后者在
+任意域/模上已证 $\rho=0\Leftrightarrow$ 被历史重建（`residual_zero_iff_reconstructed`），本文件在
+$\mathbb R$ 内积空间补充 $\rho$ 的**几何**与**率失真优化 / 自适应 $\lambda$** 的代数核心，二者不重叠。
+详见 math.md §2.6 新增小节「自适应码率控制：$\lambda$ 的拉格朗日对偶上升」。仍未形式化的部分
+（投影超梯度上升的收敛速率、$\eta$ 的选择、批内滑动均值的稳定性）见「问题 13」。
+
+### 12. §3.4.2 平稳性门控的多阶段课程：目标漂移 ⟹ 最优解不收敛 ⟹ 阶段适定性链
+
+`LeanMath/Curriculum.lean`（命名空间 `Curriculum`）形式化了 math.md §3.4.2 重写后的多阶段训练课程的数学根基——一条统一的初等引理「回归目标漂移 ⟹ 最优解漂移 ⟹ 不收敛」，并实例化到当前架构里三个依赖上游表征平稳的目标（$\Psi$ 改端、Flow、$\rho$ 记忆），给出阶段排序的适定性链。在实数域上机械化（`lake build` 通过、无 `sorry` / 无新增公理；import Mathlib 用 abs / Cauchy，不依赖测度论）：
+
+| 断言 | 定理 | math.md |
+|------|------|---------|
+| 引理 1：仿射回归最优解 $\theta^*(y)=y/x$ 追踪目标，$\|\theta^*(y_2)-\theta^*(y_1)\|=\|y_2-y_1\|/\|x\|$ | `minimizer_tracks_target` / `minimizer_tracks_target_abs` | §3.4.2 引理 1 |
+| 漂移下界：$\|y_2-y_1\|\ge\delta\Rightarrow\|\theta^*(y_2)-\theta^*(y_1)\|\ge\delta/\|x\|$ | `minimizer_drift_lower_bound` | §3.4.2 |
+| 步间差恒 $\ge\varepsilon>0$ 的序列非 Cauchy | `not_cauchy_of_step_ge_eps` | §3.4.2 |
+| 定理 1：目标持续漂移 ⟹ 最优解序列非 Cauchy（不收敛） | `minimizer_not_cauchy_of_target_drifts` | §3.4.2 定理 1 |
+| $\Psi$ 改端最优偏移 $b^*=z_{\text{tgt}}-az$ 漂移 $=z_{\text{tgt}}$ 漂移 | `psi_change_side_tracks_target` / `psi_change_not_cauchy_of_target_drifts` | §3.4.2 $\Psi$ 实例化 |
+| Flow 目标 $z_1-z_0$ 漂移 $=z_1$ 漂移 | `flow_target_tracks_encoder` / `flow_target_drifts_of_encoder_drifts` | §3.4.2 Flow 实例化 |
+| $\rho$ 记忆 $M^*=v/k$ 追踪特征 $v$（结合 `AssociativeMemory` delta-rule 收敛要求输入平稳） | `rho_memory_tracks_feature` / `rho_memory_convergence_requires_stationary_input` | §3.4.2 $\rho$ 实例化 |
+| 定理 5：阶段偏序 S1→S2→S3→S4，上游非平稳 ⟹ 下游目标最优解非 Cauchy | `stage_chain_well_posedness` / `four_stage_chain_nonstationary_breaks_downstream` | §3.4.2 定理 5 |
+
+关键：定理 1 给出「对着持续漂移的回归目标训练，参数没有稳定不动点」的统一判据；$\Psi$/Flow/$\rho$ 三实例化把它落到当前架构的具体损失上；定理 5 把单实例化串成阶段链，证明阶段排序 S1→S2→S3→S4 不是经验拍脑袋，而是优化适定性的必要顺序。仍未形式化的部分（$\varepsilon$ 阈值与滑窗、梯度方差收敛速率、平稳性代理的统计估计误差、阶段比例最优值、损失权重门控与跳前向的梯度等价性、共享主干下 lr 比例）见「问题 14」。
 
 ## 数值校验结果
 
@@ -486,11 +536,43 @@ $H(T)=I(T;Y)+H(T\mid Y)$——指向以下效率方向：
 
 形式化与未形式化的边界在 math.md §3.10.7 与 §1.0 对照表中如实标注，不把设计断言伪装成定理。
 
+### 问题 13（§2.6 自适应 λ：投影超梯度上升的收敛速率 / 步长 / 批内稳定性为设计断言，未形式化）
+
+`RhoCompress.lean` 机械化的是自适应码率控制的**代数不动点根基**——KKT 充分性、对偶超梯度方向、
+投影更新不动点 ⟹ 互补松弛（纯实内积/代数，对任意决策集 $X$ 成立）。但以下断言**未在 Lean 中形式化**，
+属优化动力学 / 工程实现，需实测或额外理论：
+
+1. **投影超梯度上升的收敛速率**：$\lambda_t\leftarrow\max(0,\lambda_t+\eta(R(x_{\lambda_t})-R^*))$
+   收敛到不动点的速率依赖凹对偶 $q(\lambda)$ 的 Lipschitz 常数与强凹性，是投影梯度法的标准结论，
+   但 mathlib 暂无凸优化收敛库，未形式化（`update_fixedpoint_implies_cs` 只证「不动点满足 KKT」，
+   不证「迭代到达不动点」）。
+2. **步长 $\eta$ 与初值 $\lambda_0$ 的选择**：$\eta$ 过大震荡、过小收敛慢；$\lambda_0$ 影响暂态，
+   均为超参，需在线标定。
+3. **批内滑动均值的稳定性**：$R$ 用批内 $b_t$ 均值估计，小 batch 下方差大，需 EMA 平滑；平滑窗口
+   与 $\eta$ 的耦合影响闭环稳定性，属工程问题。
+4. **$\lambda$ 在线更新与 SGD 梯度的耦合**：内循环（极小化 $L(\cdot,\lambda)$）用 SGD 而非精确极小化，
+   `IsMinimizer` 假设的是精确极小元；近似极小元下 KKT 充分性仍近似成立，但误差界未形式化。
+
+形式化与未形式化的边界在 math.md §2.6 新增小节中如实标注（固定 $\lambda$ 是已实现的退化情形，
+自适应 $\lambda$ 是本轮仅固化数学契约、后续可选实现），不把设计断言伪装成定理。
+
+### 问题 14（§3.4.2 平稳性门控课程：$\varepsilon$ 阈值 / 阶段比例 / 梯度方差 / 门控等价性为设计断言，未形式化）
+
+`Curriculum.lean` 机械化的是多阶段课程的**代数适定性根基**——目标漂移 ⟹ 最优解漂移 ⟹ 非 Cauchy（定理 1），及其对 $\Psi$ 改端 / Flow / $\rho$ 记忆的实例化和阶段链（定理 5），纯实代数，对任意漂移量 $\delta>0$ 成立。但以下断言**未在 Lean 中形式化**，属统计估计 / 优化动力学 / 工程实现，需实测：
+
+1. **$\varepsilon$ 平稳阈值与滑窗**：用 EMA 漂移量 $\|\text{EMA}(Z_{\text{tgt}},t)-\text{EMA}(Z_{\text{tgt}},t-w)\|<\varepsilon$ 判定「$Z_{\text{tgt}}$ 已平稳」，$\varepsilon$ 与 $w$ 是超参；统计估计误差与有限样本下方差未形式化。
+2. **阶段比例最优值**：S1/S2/S3 的步数比例（默认 45% / 75% / 55%–100%）是经验设定，最优比例依赖数据规模与收敛速度，未形式化。
+3. **梯度方差与收敛速率**：定理 1 只证「非平稳 ⟹ 不适定（不收敛）」的必要性，不给出平稳后门控目标的收敛速率或梯度方差界；同时训练 vs 分阶段训练的 sample complexity 对比未形式化。
+4. **损失权重门控与跳前向的梯度等价性**：实现上用 $p_{\text{anchor}}$ 缩放损失权重近似「单模态投喂」，与真正跳过某模态前向在梯度上的等价性未形式化（张量形状约束下的工程妥协）。
+5. **共享主干下的 lr 比例**：`share_trunk=True` 时「锚低 lr / 新薄接口高 lr」的最优比例依赖实验，未形式化。
+
+形式化与未形式化的边界在 math.md §3.4.2 与 §1.0 对照表中如实标注（定理 1–5 与三实例化是已证结论；阈值 / 比例 / 方差 / 等价性均标为〔设计断言〕），不把设计断言伪装成定理。
+
 ## 复现
 
 ```bash
 cd lean-math && lake build
 ```
 
-（Lean 4.36.0 + mathlib，见 `lean-toolchain`。全部 12 个模块——含纯 Lean 的
+（Lean 4.36.0 + mathlib，见 `lean-toolchain`。全部 13 个模块——含纯 Lean 的
 `FixedPoint` / `Semigroup`——均由 `lake build` 一次编译验证，无 `sorry`/`axiom`。）

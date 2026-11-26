@@ -32,7 +32,7 @@ from data_prepare.synthetic import CharTokenizer, build_dataset, synthetic_batch
 from evaluation.metrics import evaluate, evaluate_real
 from model import MJEPAConfig, PRESETS, MultimodalJEPA, build_config
 from model.representation import update_target
-from training.losses import maybe_autocast
+from training.losses import curriculum_stage, maybe_autocast, pac_anchor_prob
 
 
 def setup_distributed():
@@ -92,13 +92,6 @@ def build_param_groups(model, lr):
          "base_lr": lr * cfg.pac_new_lr_scale},
         {"name": "shared", "params": rest, "lr": lr, "base_lr": lr},
     ]
-
-
-def pac_anchor_prob(step, total_steps, cfg):
-    """PAC 锚模态采样概率（§3.4 式 21）：p_anchor(t)=p_inf+(p_0-p_inf)·σ(-(t-t0)/τ)。"""
-    t = step / max(1, total_steps)
-    p0, pinf, tau, t0 = cfg.pac_anchor_p0, cfg.pac_anchor_pinf, cfg.pac_tau, cfg.pac_t0
-    return pinf + (p0 - pinf) * float(torch.sigmoid(torch.tensor(-(t - t0) / tau)))
 
 
 def apply_pac_schedule(optimizer, step, total_steps, cfg):
@@ -273,6 +266,12 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
                 writer.add_scalar("train/lr", cur_lr, step)
             if cfg.pac_enabled:
                 writer.add_scalar("train/p_anchor", pac_anchor_prob(step, steps, cfg), step)
+            if cfg.curriculum_enabled:
+                writer.add_scalar(
+                    "train/stage",
+                    {"S1": 1, "S2": 2, "S3": 3}.get(curriculum_stage(step, steps, cfg), 0),
+                    step,
+                )
 
         # 周期性原子落盘：写 .tmp 后 os.replace，存盘中途崩溃也不会损坏旧 checkpoint。
         if rank == 0 and save_path and save_every > 0 and step % save_every == 0 and step < steps:
@@ -286,7 +285,8 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
         if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
             detail = " ".join(f"{k}={v.item():.3f}" for k, v in parts.items())
             extra = f" | p_anchor={pac_anchor_prob(step, steps, cfg):.3f}" if cfg.pac_enabled else ""
-            print(f"step {step:4d} | loss {loss.item():.4f} | {detail}{extra}", flush=True)
+            stage_str = f" stage={curriculum_stage(step, steps, cfg)}" if cfg.curriculum_enabled else ""
+            print(f"step {step:4d} | loss {loss.item():.4f} | {detail}{extra}{stage_str}", flush=True)
     return model
 
 
@@ -427,7 +427,8 @@ def main():
     parser.add_argument("--alignment-method", choices=["infonce", "byol", "dino"], default=None)
     # 交叉掩码（§3.2 式 18）与 PAC（§3.4 式 21）
     parser.add_argument("--cross-mask", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
-    parser.add_argument("--pac", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
+    parser.add_argument("--pac", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
+                        help="覆盖 PAC 开关（默认开启；传 0 关闭）")
     parser.add_argument("--anchor-modality", choices=["image", "text"], default=None)
     # PSCO 状态依赖收缩算子（§3.7.3）
     parser.add_argument("--psi", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
@@ -451,6 +452,11 @@ def main():
     parser.add_argument("--share-trunk", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--embed-factor", type=int, default=None)  # 文本词嵌入低秩分解维 F（0=关闭）
     parser.add_argument("--grad-checkpoint", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)  # 梯度检查点（省激活显存）
+    # 平稳性门控多阶段课程（§3.4.2；默认开启，传 0 退回旧行为）
+    parser.add_argument("--curriculum-enabled", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
+                        help="平稳性门控多阶段课程（默认开启；传 0 关闭，退回旧行为）")
+    parser.add_argument("--flow-in-pretrain", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
+                        help="主预训是否计 flow 损失（默认 False：Flow 仅在 --flow-stage-steps 冻结 E 阶段）")
     parser.add_argument("--flow-stage-steps", type=int, default=0)  # >0 时主训练后进入 Flow 阶段（§4.2(e)）
     parser.add_argument("--dataset-size", type=int, default=2048)
     parser.add_argument("--eval-samples", type=int, default=16)
@@ -551,6 +557,8 @@ def main():
         share_trunk=args.share_trunk,
         embed_factor=args.embed_factor,
         grad_checkpoint=args.grad_checkpoint,
+        curriculum_enabled=args.curriculum_enabled,
+        flow_in_pretrain=args.flow_in_pretrain,
     )
     if resume_blob is not None:
         # resume：cfg 以 checkpoint 为准，忽略本次 CLI 覆盖项（保证权重形状一致）。
