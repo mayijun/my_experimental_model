@@ -84,7 +84,7 @@ def load_checkpoint(path, device):
     blob = torch.load(path, map_location=device, weights_only=False)
     cfg = MJEPAConfig(**blob["cfg"])
     model = MultimodalJEPA(cfg, blob["vocab_size"]).to(device)
-    model.load_state_dict(blob["model"])
+    model.load_state_dict(blob["model"], strict=False)
     model.eval()
     for attr in ("image_target", "text_target", "shared_target"):
         if getattr(model, attr, None) is not None:

@@ -319,6 +319,17 @@ def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, 
     return model
 
 
+def _cast_floating(obj, dtype):
+    """递归把 state_dict 中的浮点张量转成 dtype 并移回 CPU（非浮点张量与 python 标量原样保留）。"""
+    if torch.is_tensor(obj):
+        return obj.detach().to("cpu", dtype) if torch.is_floating_point(obj) else obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: _cast_floating(v, dtype) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_cast_floating(v, dtype) for v in obj)
+    return obj
+
+
 def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None, save_dtype="fp32",
                     optimizer=None, step=0, rng_state=None):
     """落盘模型权重 + 续训所需完整状态（供 inference 加载与 training --resume 续训）。
@@ -330,14 +341,26 @@ def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None, save_dtyp
     optimizer / step / rng_state 为续训状态（--resume 恢复）；inference 忽略这些键。
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    state = model.state_dict()
+    # 统一落盘 dtype：save_dtype="bf16" 时，model 权重与 optimizer moments 降到 bf16；
+    # step 保持 fp32（Adafactor bias correction 依赖整数步数精度）；rng 的 uint8 非浮点原样保留。
+    state = model.state_dict_for_save()
+    optimizer_state = optimizer.state_dict() if optimizer is not None else None
     if save_dtype == "bf16":
-        # 逐张量转到 CPU 再降精度，避免在 GPU 上额外驻留一份 13.7GB 权重。
-        state = {
-            k: (v.detach().to("cpu", torch.bfloat16) if torch.is_floating_point(v)
-                else v.detach().cpu())
-            for k, v in state.items()
-        }
+        # 逐张量转到 CPU 再降精度，避免在 GPU 上额外驻留一份权重。
+        state = _cast_floating(state, torch.bfloat16)
+        if optimizer_state is not None:
+            # moments（row_var/col_var）降 bf16，load_state_dict 会按 param dtype 自动 cast 回 fp32；
+            # step 保持 fp32，避免步数 >256 后 bf16 无法精确表示整数导致的精度损失。
+            optimizer_state = {
+                "state": {
+                    pid: {
+                        name: (val if name == "step" else _cast_floating(val, torch.bfloat16))
+                        for name, val in pstate.items()
+                    }
+                    for pid, pstate in optimizer_state["state"].items()
+                },
+                "param_groups": optimizer_state["param_groups"],
+            }
     torch.save(
         {
             "model": state,
@@ -345,7 +368,7 @@ def save_checkpoint(path, model, cfg, vocab_size, tokenizer_meta=None, save_dtyp
             "vocab_size": vocab_size,
             "tokenizer_meta": tokenizer_meta,
             "step": step,
-            "optimizer": optimizer.state_dict() if optimizer is not None else None,
+            "optimizer": optimizer_state,
             "rng_state": rng_state,
         },
         path,
@@ -602,7 +625,9 @@ def main():
         vocab_size = resume_blob["vocab_size"]  # 词表大小以 checkpoint 为准
     model = MultimodalJEPA(cfg, vocab_size).to(device)
     if resume_blob is not None:
-        _unwrap(model).load_state_dict(resume_blob["model"])
+        raw = _unwrap(model)
+        raw.load_state_dict(resume_blob["model"], strict=False)
+        raw.init_target_from_online()
     if world_size > 1:
         # find_unused_parameters=True：默认 BYOL 下 proj 等分支本步不参与 loss，
         # 需遍历图跳过未用参数，否则 DDP 报「未参与反向」错。代价是一次图遍历。

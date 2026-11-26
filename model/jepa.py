@@ -165,3 +165,27 @@ class MultimodalJEPA(nn.Module):
             )
         loss = self.cfg.flow_weight * flow + self.cfg.flow_cond_weight * flow_cond
         return loss, {"flow": flow, "flow_cond": flow_cond}
+
+    def state_dict_for_save(self):
+        """去重后的落盘 state_dict（§2.8 共享 E）。
+
+        share_trunk 下 `image_online.encoder` / `text_online.encoder` 与 `shared_online`
+        是同一主干对象，`state_dict()` 会把主干参数序列化三份；目标编码器
+        （shared_target/image_target/text_target）是 EMA 副本，落盘也属重复。
+        这里只保留唯一在线参数：共享主干一份 + 各模态薄接口 + 解码器/速度场/对齐/预测器。
+        目标编码器 resume 时由 init_target_from_online() 从在线重新初始化。
+        """
+        full = self.state_dict()
+        skip = ("shared_target.", "image_target.", "text_target.")
+        if self.cfg.share_trunk:
+            skip += ("image_online.encoder.", "text_online.encoder.")
+        return {k: v for k, v in full.items() if not k.startswith(skip)}
+
+    def init_target_from_online(self):
+        """目标编码器从在线编码器重新初始化（EMA 冷启动），resume 时恢复被省略的目标副本。
+
+        image_target.load_state_dict(image_online.state_dict()) 会把在线共享主干
+        一并复制进 shared_target（经 image_target.encoder 引用），故无需单独处理 shared_target。
+        """
+        self.image_target.load_state_dict(self.image_online.state_dict())
+        self.text_target.load_state_dict(self.text_online.state_dict())
