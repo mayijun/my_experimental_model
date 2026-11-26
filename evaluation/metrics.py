@@ -56,7 +56,9 @@ def evaluate_real(model, gen, tokenizer, pad_id, device, num=16):
         ids.append(tids)
     if not imgs:
         return 0.0, 0.0
-    img = torch.stack(imgs).to(device)
+    # load_checkpoint 在 CUDA 下会把权重转 bf16，输入需对齐到同一 dtype
+    dtype = next(model.parameters()).dtype
+    img = torch.stack(imgs).to(device=device, dtype=dtype)
     txt = torch.tensor(ids, dtype=torch.long).to(device)
 
     img_cls, img_tokens = model.image_online(img)
