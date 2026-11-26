@@ -62,6 +62,18 @@
 | §2.9 (CARO-2) 残差 $\rho=0\iff v_t$ 被历史精确重建 | `AssociativeMemory.lean` : `prediction_is_content_sum` / `residual_zero_iff_reconstructed` | ✅ 已证 |
 | §2.9 (CARO-4) 不动点 $S^*=(1-a)^{-1}b$ + 误差恒等式 + $a^n\to0$ 收敛 | `AssociativeMemory.lean` : `fixedPoint_is_fixed` / `iterAff_error` / `real_pow_tendsto_zero` | ✅ 已证 |
 | §2.9 反塌缩：不同输入 $b$ ⇒ 不同不动点（输入依赖） | `AssociativeMemory.lean` : `no_collapse` | ✅ 已证 |
+| §2.10 (LE-8) 回环 = 同深度前馈的权重绑定特例 ⇒ 表达力包含 (LE-9) | `LoopedEncoder.lean` : `looped_eq_feedforward_tied` / `looped_realized_by_feedforward` | ✅ 已证 |
+| §2.10 参数量：同有效深度下回环 $\le$ 前馈；$N\ge2,p>0$ 时严格省 | `LoopedEncoder.lean` : `loop_uses_no_more_params` / `loop_uses_fewer_params` | ✅ 已证 |
+| §2.10 (LE-5) 仿射迭代误差恒等式（线性推广 AssocMem） | `LoopedEncoder.lean` : `affine_iter_error` / `mrLoop_error` | ✅ 已证 |
+| §2.10 反输入塌缩：$M$ 单射 $\Rightarrow e_1\neq e_2\Rightarrow$ 不动点不同 | `LoopedEncoder.lean` : `mrLoop_no_input_collapse` | ✅ 已证 |
+| §2.10 (LE-7) 梯度衰减 $\|M^n v\|\le\|M\|^n\|v\|\le K^n\|v\|$ | `LoopedEncoder.lean` : `gradient_decay` / `gradient_decay_with_K` | ✅ 已证 |
+| §2.10 留存激活轨迹长度 $=T+1$（精确，朴素反传线性增长） | `LoopedEncoder.lean` : `length_trajectory` | ✅ 已证 |
+| §2.10 朴素激活显存 $=O(T)$；检查点 / DEQ 显存 $=O(1)$（`IsBigO`） | `LoopedEncoder.lean` : `baseline_memory_isBigO_T` / `checkpoint_memory_isBigO_one` / `deq_memory_isBigO_one` | ✅ 已证 |
+| §2.10 朴素显存无界（$\to\mathtt{atTop}$）⇒ 非 $O(1)$，线性 vs 常数对比严格 | `LoopedEncoder.lean` : `baseline_memory_unbounded` | ✅ 已证 |
+| §2.10 前向算力 $=O(T)$；检查点总 $2T=O(T)$（常数 2 重算换显存，渐进持平） | `LoopedEncoder.lean` : `eval_isBigO_T` / `checkpoint_eval_isBigO_T` | ✅ 已证 |
+| §2.10 轨迹由 $(f,h_0,T)$ 唯一确定 ⇒ 检查点不丢信息（代数根因） | `LoopedEncoder.lean` : `trajectory_determined` | ✅ 已证 |
+| §2.10 DEQ 极限：$\|M\|<1$ 时迭代态按范数 $\to fp$（极限只需留存不动点） | `LoopedEncoder.lean` : `mrLoop_tendsTo_fixedPoint` | ✅ 已证 |
+| §2.10 非线性块表达力 / 「同参更深」泛化 / DEQ 数值稳定 / 墙钟访存 | — | ⚠️ 设计分析，非 Lean 可形式化，见 §2.10.7 与 README |
 | 命题 11（重建 $L_0$ vs 生成 $L_{\ge1}$） | `Semigroup.lean` : `generation_iff_not_reconstruction` / `generation_iff_moves_some_point` | ✅ 已证 |
 | 命题 7 / 8 / 9（设计 / 诊断断言） | — | ⚠️ 非可形式化定理，见 README 问题 7 |
 | §3.7.3 谱夹层 vs §3.7.1 $\rho<1$ | `Contractive.lean` / `Affine.lean` | ⚠️ 谱夹层**强于** $\rho<1$，见 README 问题 6 |
@@ -917,6 +929,147 @@ $$
 | 反塌缩：不同输入 $b$ ⇒ 不同不动点 | `no_collapse` |
 
 > **形式化边界（诚实）**：Lean 证明的是**代数恒等式与收敛性**（任意域 $K$、任意模 $V$、任意双线性型 $B$）。**未形式化**的部分：复杂度 $O(\cdot)$、GPU 友好性、softmax 核近似质量、「超越 Mamba」的经验断言——这些是设计分析，见 [lean-math/README.md](file:///home/simon-ma/JEPA/lean-math/README.md)「发现的问题」。
+
+---
+
+### 2.10 替代结构：Looped Encoder——把「$E$ 主干 $\to$ $Z$」的前馈链折叠为权重共享的内部循环
+
+> **动机**。§3.7.1 已把 Loop Transformer / DEQ 作为 **$Z$ 空间推理算子 $\Psi_h$** 的参考锚点：编码完成后，在 $Z$ 上把同一算子迭代到不动点。本节讨论一个**正交**的替换：把**编码器主干 $E\to Z$ 本身**（§2.2 中 $N$ 个互不相同的 Transformer/Mamba 块 $B_N\circ\cdots\circ B_1$ 加读出头投影到 $Z$）折叠为**权重共享的内部循环**——同一块 $B_\theta$ 迭代 $T$ 次再读出。这是现实中已有的结构：ALBERT（Lan et al. 2020，跨层参数共享）、Universal Transformer（Dehghani et al. 2019，自适应停步 ACT）、MR-Loop / Looped Transformer（Fan et al. 2025, ICLR 2025，输入注入的循环）、DEQ（Bai et al. 2019，不动点 + 隐式微分）。用户问的「在内部建立计算循环以优化空间使用或计算」正是这一类；本节给出其收益/代价的数学推导，并把核心断言形式化到 Lean（[`lean-math/LeanMath/LoopedEncoder.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/LoopedEncoder.lean)）。
+>
+> **与 §3.7.1 的关键区别（勿混）**：§3.7.1 循环的是**推理算子 $\Psi_h$**（在 $Z$ 上、输入依赖、$h$ 自推断）；本节循环的是**编码器主干**（$\text{输入}\to Z$、对每个样本权重固定）。二者可叠加：先用回环编码器产出 $Z$，再在 $Z$ 上用 $\Psi_h$ 推理。本节替换的是「$E$ 主干 $\to$ 落入 $Z$」这一段的**参数组织方式**，不改 $Z$ 的契约，也不改 §3。
+
+#### 2.10.1 定义
+
+记序列长 $L$、主干隐藏维 $d_h$、潜空间维 $d$（$d:d_h=1:8$，见 §2.2.7）。令 $e=\mathrm{embed}(x)+\mathrm{pos}\in\mathbb R^{L\times d_h}$ 为前端嵌入（含位置编码），单块参数数为 $p$。
+
+**前馈基线**（§2.2 现状）：$N$ 个互不共享的块 $B_i$（参数 $\theta_i$，$|\theta_i|=p$）串接，最后线性头投影到 $Z$：
+
+$$
+h_0=e,\quad h_{i+1}=B_i(h_i)\ (i=0,\dots,N-1),\qquad Z=W_{\mathrm{out}}\,h_N\in\mathbb R^{L\times d}. \tag{LE-1}
+$$
+
+总参数 $P_{\text{ff}}=N\cdot p+P_{\text{embed}}+P_{\text{head}}+P_{\text{pos}}$（embedding / 头 / 位置编码不参与层间共享）。
+
+**回环编码器（MR-Loop 形式）**：单一共享块 $B_\theta$ 迭代 $T$ 次；每步把输入嵌入 $e$ 重新注入（input injection），再读出：
+
+$$
+\boxed{\ h^{(0)}=0,\quad h^{(t)}=B_\theta\big(h^{(t-1)}+e\big)\ (t=1,\dots,T),\qquad Z=W_{\mathrm{out}}\,h^{(T)}\ } \tag{LE-2}
+$$
+
+总参数 $P_{\text{loop}}=p+P_{\text{embed}}+P_{\text{head}}+P_{\text{pos}}$（块参数只存一份，与 $T$ 无关）。
+
+> **为什么必须输入注入（MR-Loop 而非纯环 $h^{(t)}=B(h^{(t-1)})$）**：若 $B$ 的线性部分 $M$ 收缩（$\rho(M)<1$，见 §2.10.4），纯环的不动点 $h^*$ 满足 $h^*=Mh^*$，即 $h^*=0$，**与初值 $h^{(0)}$ 无关**——也就与输入 $x$ 无关，$Z$ 坍缩到常数（违反 §2.2.4 / §2.6 反塌缩）。输入注入 $h^{(t)}=Mh^{(t-1)}+Me$ 把 $e$ 作为**仿射常数项 $b=Me$** 每步重灌，不动点变为 $h^*=(I-M)^{-1}Me$，**显式依赖 $e$**。这是回环编码器可用的前提，也是 `mrLoop_no_input_collapse`（§2.10.7）要守住的契约。
+
+#### 2.10.2 线性化骨架与收敛（DEQ 极限）
+
+把块 $B_\theta$ 在不动点处线性化，记其线性部分为 $M\in\mathbb R^{d_h\times d_h}$（残差注意力块的 $B(h)=h+Mh+\text{非线性}$，此处取线性骨架；非线性项的处理见形式化边界）。MR-Loop 的线性骨架即仿射迭代
+
+$$
+h^{(t)}=M\,h^{(t-1)}+b,\qquad b=M\,e, \tag{LE-3}
+$$
+
+与 §3.7.3 PSCO、§2.9 CARO 的仿射不动点迭代**同构**（同一 `Affine.lean` 幺半群）。当 $M$ 严格收缩（算子范数 $\|M\|\le K<1$，或谱半径 $\rho(M)<1$，谱夹层见 §3.7.3）时：
+
+1. **存在唯一不动点** $h^*=Mh^*+b$，由 Neumann 级数给出
+
+$$
+h^*=(I-M)^{-1}b=\sum_{j=0}^\infty M^j b,\qquad b=Me. \tag{LE-4}
+$$
+
+2. **误差几何衰减**（线性推广 `AssocMem.iterAff_error`，见 `affine_iter_error` / `mrLoop_error`）：
+
+$$
+h^{(t)}-h^*=M^t\big(h^{(0)}-h^*\big),\qquad \|h^{(t)}-h^*\|\le K^t\,\|h^{(0)}-h^*\|\xrightarrow{t\to\infty}0. \tag{LE-5}
+$$
+
+3. **DEQ 极限**：$T$ 足够大时 $h^{(T)}\approx h^*$，$Z=W_{\mathrm{out}}h^*$ 与 $T$ 无关（收益递减，可早停）。训练反传可用 DEQ 隐式微分（§3.7.1 式 (25)，此处 $J=M$），不展开 $T$ 步 rollout。
+
+> 这正是「优化空间使用」的数学根因：权重共享使**跨循环的梯度检查点 / 隐式微分**合法——前向只需存当前态 $h^{(t)}$ 与不动点 $h^*$，激活显存从 $O(T\cdot L\cdot d_h)$ 降到 $O(L\cdot d_h)$（检查点）乃至 $O(1)$（DEQ 只存 $h^*$）。详见 §2.10.3 对比表。
+
+#### 2.10.3 收益与代价：参数 / 算力 / 串行深度 / 显存
+
+记单块前向算力 $C_{\text{block}}$（FLOPs）、$K=\|M\|<1$ 为收缩率。下表对比前馈基线（深度 $N$）与回环（迭代 $T$、单层共享）。
+
+| 维度 | 前馈 $E_{\text{ff}}$（$N$ 层，不共享） | 回环 $E_{\text{loop}}$（$T$ 迭代，单层共享） | 说明 |
+|---|---|---|---|
+| **参数量**（容量代价） | $N\cdot p+P_{\text{前端}}$ | $p+P_{\text{前端}}$ | 同有效深度 $T=N$ 时主干参数 $\div N$（`loop_uses_fewer_params`，$N\ge2$）；前端 embed/head/pos 不共享，是省不掉的接口成本 |
+| **算力 FLOPs** | $N\cdot C_{\text{block}}$ | $T\cdot C_{\text{block}}$ | 同深度 $T=N$ 时**持平**；省下的参数预算可加**宽**单层（更大 $p$）或加**深** $T$，换取「同参更深」。渐进持平已形式化：`eval_isBigO_T`（前向 $=O(T)$）、`checkpoint_eval_isBigO_T`（检查点总 $2T=O(T)$，仅常数 2 重算） |
+| **串行深度**（墙钟关键路径） | $N$ | $T$ | 权重共享**不减少**串行步数，仍是 $T$ 步串行——不能加速单样本前向（并行度不变） |
+| **训练显存（激活）** | $O(N\cdot L\cdot d_h)$（无检查点） | 朴素 $O(T\cdot L\cdot d_h)$；**检查点 $O(L\cdot d_h)$**；**DEQ 隐式 $O(1)$** | 空间优化的核心收益：共享权重使跨循环检查点 / 不动点反传合法。已形式化：朴素 $=O(T)$（`baseline_memory_isBigO_T`，且无界 `baseline_memory_unbounded` ⇒ 非 $O(1)$）、检查点/DEQ $=O(1)$（`checkpoint_memory_isBigO_one` / `deq_memory_isBigO_one`）、轨迹可由 $(f,h_0,T)$ 重建不丢信息（`trajectory_determined`）、DEQ 极限态收敛到不动点（`mrLoop_tendsTo_fixedPoint`） |
+| **权重访存**（内存带宽瓶颈） | 每步读 $N$ 套不同权重 | 每 $T$ 步只读 $1$ 套权重（可驻留 SRAM/缓存） | 内存带宽受限的加速器上，共享权重显著降低访能、提升吞吐——这是「优化计算」的另一面 |
+| **推理** | 固定 $N$ 步 | 可自适应停步（ACT）；收缩时 $T$ 增大收益递减 | 类似 Universal Transformer；$T$ 可按样本难度分配 |
+| **表达力（同深度 $T=N$）** | 各层独立（全函数空间） | 权重绑定（对角子集） | 回环函数族 $\subsetneq$ 同深度前馈函数族（`looped_eq_feedforward_tied`），见 §2.10.5 |
+| **表达力（同参数预算）** | 深度受限 $N\approx P/p$ | 可设 $T\gg N$（同参数下更深） | 「同参更深」潜在收益；但受 §2.10.4 梯度衰减限制，非免费 |
+| **优化难度**（梯度代价） | 各层雅可比独立，可逐层放大/保持 | 共享权重 $\Rightarrow$ 回传 $\sum_t M^{T-t}$，几何衰减 | `gradient_decay_with_K`：第 $t$ 步梯度被 $K^{T-t}$ 抑制，$K$ 越小越早步越难传回——主要优化代价 |
+
+> **诚实声明**：本表的**渐进复杂度 $O(\cdot)$ 已在 Lean 中形式化**（mathlib `Asymptotics.IsBigO`，见 §2.10.7 与 `LoopedEncoder.lean` 第 6 节）：朴素激活显存 $=O(T)$、检查点 / DEQ $=O(1)$、前向 / 检查点算力 $=O(T)$，并证明朴素显存无界（线性 vs 常数对比严格）、轨迹可由 $(f,h_0,T)$ 重建（检查点不丢信息）、DEQ 极限态按范数收敛到不动点。**仍为设计断言、未形式化**的是：常数因子、kernel 融合质量、真实 GPU 墙钟与访存带宽、非线性 transformer 块的表达力与「同参更深」泛化收益——这些需实测。三档规模的取舍见 §2.10.6 第 7 条。
+
+#### 2.10.4 主要代价：梯度衰减与有效信用分配深度
+
+权重共享回环的反传梯度是各迭代步贡献之和。线性化后，第 $t$ 步（$t$ 越小 = 越早）的梯度信号需穿过 $T-t$ 层共享雅可比 $M^\top$：
+
+$$
+\frac{\partial \ell}{\partial \theta}\bigg|_{\text{来自 }h^{(t)}} \propto \big(M^\top\big)^{T-t}\,\nabla_{h^{(T)}}\ell. \tag{LE-6}
+$$
+
+由算子范数次可乘性（`gradient_decay`，仅依赖 `le_opNorm`）：
+
+$$
+\boxed{\ \big\|M^n\,v\big\|\le \|M\|^n\,\|v\|\le K^n\,\|v\|,\quad K=\|M\|<1\ } \tag{LE-7}
+$$
+
+故 $K^{T-t}\to0$：**越早步的梯度被指数级抑制**，有效信用分配深度被收缩率 $K$ 限制。这是相对前馈（各层雅可比可独立调整、残差连接可保持范数）的**主要优化代价**——也是为什么必须用**谱夹层** $\delta<K<1-\gamma$（同 §3.7.3）而不是一味取小 $K$：$K$ 太小虽加速不动点收敛（LE-5），却把早期迭代的梯度杀光（LE-7），二者此消彼长。残差连接（$B(h)=h+\cdots$）把 $M$ 写成 $I+A$，把衰减从 $K^n$ 改善为 $(1+\|A\|)^n$ 的可控范围，是工程上缓解该代价的标准手段（未形式化）。
+
+#### 2.10.5 表达力包含：回环 = 同深度前馈的权重绑定对角
+
+形式化断言（`looped_eq_feedforward_tied`，无 `sorry`）：**任意回环网实现的函数，都能被一个同深度、所有权重层绑定为同一 $f$ 的前馈网实现**。令前馈网为层列表的复合 $\mathrm{feedforward}([f_1,\dots,f_N])=f_1\circ\cdots\circ f_N$，回环网为函数迭代 $\mathrm{looped}(f,T)=f^{\circ T}$，则
+
+$$
+f^{\circ T}=\mathrm{feedforward}\big(\underbrace{[f,\dots,f]}_{T}\big). \tag{LE-8}
+$$
+
+**推论（容量代价的精确表述）**：在固定深度 $T$ 下，回环可实现的函数族是前馈函数族的**子集**（取所有 $f_i=f$ 的对角切片），即
+
+$$
+\{\,f^{\circ T}:f\,\}\ \subseteq\ \{\,f_T\circ\cdots\circ f_1:f_i\,\}. \tag{LE-9}
+$$
+
+反向不成立：前馈可让各层相异（$f_i\neq f_j$），一般 $g\circ f$（$f\neq g$）不是某个 $h^{\circ 2}$。**故同深度下回环表达力严格弱于前馈**——这就是参数共享省下的容量代价。
+
+**反向收益（非形式化，依赖宽/迭代极限）**：在**固定参数预算**下，回环可把省下的参数用于加宽单层或增大 $T$。充分宽的共享块 + 足够多迭代在函数逼近意义下是通用的（可逼近任意固定深度前馈），故「同参更深」存在表达力收益区间——但这依赖宽度/迭代的渐近论证与实测，不在 Lean 形式化范围内（见 §2.10.7 形式化边界）。
+
+#### 2.10.6 契约核对（对照 AGENTS 规则与 math.md 既有前提）
+
+1. **$Z$ 保持连续、不引入语义量化瓶颈**：$Z=W_{\mathrm{out}}h^{(T)}$ 是连续态的线性读出，全程 $\mathbb R^d$ 连续值；不施加 FSQ/VQ/RVQ（同 §2.6 / §2.9.5 接口契约）。数值精度量化（FP8/FP4）只降位宽不改语义。✅
+2. **反塌缩**：输入注入（LE-2）使不动点 $h^*=(I-M)^{-1}Me$ **输入依赖**——$M$ 单射时不同输入 $e_1\neq e_2\Rightarrow$ 不同不动点（`mrLoop_no_input_collapse`），不会坍缩到与输入无关的单一状态；谱夹层封死 $M\to0$ 一步塌缩（同 §3.7.3 五道防线第 1 条）。✅
+3. **$d:d_{\text{hidden}}=1:8$**：回环块隐藏维 $d_h$、读出头 $W_{\mathrm{out}}:d_h\to d$ 维持 §2.2.7 的 $r=8$ 不变；循环只改层间参数组织，不改维度比例。✅
+4. **通路 / 关系分离（§4.5）**：回环迭代是**关系聚合**（对上下文反复重组），读出 $W_{\mathrm{out}}$ 是逐位置**通路**映射，二者仍分离；关系从「$N$ 个不同块的复合」变为「同一块的 $T$ 次复合」，通路仍 $O(L)$ 独立。✅
+5. **与 §3 对齐推理的衔接**：回环只替换 $Z$ 的**生产者**（从 $N$ 层前馈换成单层 $T$ 迭代），产出的仍是连续 $Z$；§3.1 硬对齐、§3.2 交叉掩码、§3.4 PAC 在 $Z$ 之上照常进行，契约不变。✅
+6. **与 §3.7.1 的正交性**：§3.7.1 循环 $Z$ 上的推理算子 $\Psi_h$（输入依赖、$h$ 自推断）；本节循环输入$\to Z$ 的编码器主干（样本内权重固定）。二者可叠加且不冲突：$E_{\text{loop}}$ 产 $Z$，$\Psi_h$ 在 $Z$ 上推理。✅
+7. **三档规模可扩展性（AGENTS 模型规模规则）**：
+   - **小规模（CPU 冒烟，$\le10$M）**：现有 `tiny`/`small` 的 $N$ 本就很小（$N=2\sim4$），回环收益不明显（$N\ge2$ 才严格省参，见 `loop_uses_fewer_params`）；但可直接设 $T=N$ 验证算法正确性（损失下降、不动点收敛、反塌缩），纯 CPU 可跑（回环块是纯 PyTorch，无 GPU-only 依赖，不进入 `pyproject.toml` 可选 extra）。
+   - **中型（GPU + 真实数据，0.3B–7B）**：主要受益档。参数 $\div N$ 释放的预算可加宽单层或转给对齐/生成头；长上下文下跨循环梯度检查点把激活显存从 $O(N\cdot L\cdot d_h)$ 降到 $O(L\cdot d_h)$，是训练长序列的关键。支持 bf16/AMP、`torch.compile`、梯度检查点（均为成熟库能力）。
+   - **大规模（scaling 极限）**：权重共享是规模化刚需（ALBERT 已实证跨层共享可降参数 ~18×）；DEQ 隐式微分使有效迭代深度 $T$ 可远超显存允许的展开深度，$O(1)$ 激活支撑极深有效深度，用于检验 scaling law 的收益/拐点。若引入 GPU-only 隐式求解器，按 AGENTS 规则放入 `pyproject.toml` 可选 extra，保证第 1 档仍纯 CPU。
+
+#### 2.10.7 Lean 形式化（见 §1.0 对照表，全部无 sorry / 无新增公理）
+
+(LE-3)–(LE-9) 的核心断言已在 [`lean-math/LeanMath/LoopedEncoder.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/LoopedEncoder.lean)（命名空间 `LoopedEncoder`）机械化；收敛性复用既有 `Affine.lean` / `Contractive.lean` / `AssociativeMemory.lean`：
+
+| 断言 | 定理 | 对应公式 |
+|---|---|---|
+| (LE-8) 回环 = 同深度前馈的权重绑定特例 ⇒ 函数族包含 (LE-9) | `looped_eq_feedforward_tied` / `looped_realized_by_feedforward` | §2.10.5 |
+| 参数量：同有效深度下回环 $\le$ 前馈；$N\ge2,p>0$ 时严格省 | `loop_uses_no_more_params` / `loop_uses_fewer_params` | §2.10.3 |
+| (LE-5) 仿射迭代误差恒等式（线性推广 `AssocMem.iterAff_error`） | `affine_iter_error` / `mrLoop_error` | §2.10.2 |
+| 反输入塌缩：$M$ 单射 $\Rightarrow e_1\neq e_2\Rightarrow$ 不动点不同（输入依赖） | `mrLoop_no_input_collapse` | §2.10.2 / 契约核对 2 |
+| (LE-7) 梯度衰减 $\|M^n v\|\le\|M\|^n\|v\|\le K^n\|v\|$（优化代价） | `gradient_decay` / `gradient_decay_with_K` | §2.10.4 |
+| 留存轨迹长度 $=T+1$；朴素激活显存 $=O(T)$ 且无界（故非 $O(1)$，对比严格） | `length_trajectory` / `baseline_memory_isBigO_T` / `baseline_memory_unbounded` | §2.10.3 |
+| 检查点 / DEQ 激活显存 $=O(1)$（`Asymptotics.IsBigO`） | `checkpoint_memory_isBigO_one` / `deq_memory_isBigO_one` | §2.10.3 |
+| 前向算力 $=O(T)$；检查点总 $2T=O(T)$（常数 2 重算换显存，渐进持平） | `eval_isBigO_T` / `checkpoint_eval_isBigO_T` | §2.10.3 |
+| 轨迹由 $(f,h_0,T)$ 唯一确定 ⇒ 只存检查点即可重建，不丢信息 | `trajectory_determined` | §2.10.3 |
+| $\|M\|<1$ 时迭代态按范数 $\to$ 不动点 $fp$（DEQ 极限只需留存 $fp$） | `mrLoop_tendsTo_fixedPoint`（拼 `mrLoop_error` + `gradient_decay` + `AssocMem.real_pow_tendsto_zero`） | §2.10.2 / §2.10.3 |
+| $M$ 收缩 $\Rightarrow$ 收敛到唯一不动点（DEQ 极限） | 复用 `Contractive.contraction_comp` + mathlib Banach；标量/对角收敛 `AssocMem.real_pow_tendsto_zero` | §2.10.2 (LE-4)(LE-5) |
+
+> **形式化边界（诚实）**：Lean 证明的是**代数恒等式（函数迭代 = 列表复合）、参数计数、线性仿射误差与输入依赖性、算子范数幂次界，以及渐进复杂度 $O(\cdot)$**（mathlib `Asymptotics.IsBigO`：朴素显存 $=O(T)$、检查点 / DEQ $=O(1)$、前向 / 检查点算力 $=O(T)$、轨迹可由 $(f,h_0,T)$ 重建、DEQ 极限态按范数收敛）——代数结论对任意域 $K$、任意模 $V$、任意（连续）线性 $M$ 成立；复杂度结论对 $T\to\infty$ 的 `Filter.atTop` 成立。**未形式化**的部分：常数因子与真实墙钟 / 访存带宽 / kernel 融合（§2.10.3 表）、非线性 transformer 块的表达力与「同参更深」泛化收益（§2.10.5 反向收益）、DEQ 隐式微分的数值稳定性与求解精度、残差连接对衰减的改善（§2.10.4）、充分宽 / 迭代极限的通用性——均为设计分析，依赖实测，见 [lean-math/README.md](file:///home/simon-ma/JEPA/lean-math/README.md)「发现的问题」。与 §2.9 CARO 一样，线性化骨架是数学分析的对象，真实块的非线性行为需实验验证。
 
 ---
 

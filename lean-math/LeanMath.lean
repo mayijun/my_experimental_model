@@ -8,3 +8,4 @@ import LeanMath.AssociativeMemory
 import LeanMath.FixedPoint
 import LeanMath.Semigroup
 import LeanMath.Retraction
+import LeanMath.LoopedEncoder

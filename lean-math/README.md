@@ -17,6 +17,7 @@
 | `LeanMath/Semigroup.lean` | （纯 Lean，无 mathlib）§3.9 式 (29)–(30) 算子幺半群 + 命题 11 二分：`Ψ=id ⟺ 重建`、`Ψ≠id ⟺ 生成 ⟺ 移动了某点` |
 | `LeanMath/Retraction.lean` | §4.1.7 黎曼流匹配 GPU 友好近似：retraction 公理与一阶一致、欧氏 retraction 退化特例、投影 retraction 幂等核心、低秩度量 `rank(JᵀJ) ≤ min(\|𝒱\|, d)` |
 | `LeanMath/AssociativeMemory.lean` | §2.9 CARO 替代结构（门控结合扫描态）的代数核心：更新是仿射（复用 `PSCO.Aff` 幺半群 ⇒ 并行扫描）、内容可寻址读出恒等式、残差⇔被历史重建、不动点/误差/收敛、反塌缩 |
+| `LeanMath/LoopedEncoder.lean` | §2.10 Looped Encoder 替代结构：把 $E$ 主干→$Z$ 的前馈链折叠为权重共享循环；形式化表达力包含（回环=同深度前馈的权重绑定对角）、参数计数、仿射误差恒等式、反输入塌缩、梯度衰减界 |
 
 ## 形式化结果 ↔ math.md 命题对照
 
@@ -179,6 +180,36 @@ retraction」的 `fderiv_id` 公理（需 π 为光滑投影）不在本文件�
 **精确**内容寻址聚合——这是 CARO 在 `O(n)` 时间内维持 Transformer 内容可寻址性、同时
 超越 Mamba（递推无查询内容选择）的代数根基。详见 math.md §2.9。未形式化的部分（复杂度、
 softmax 核近似、「超越 Mamba」经验断言）见「问题 10」。
+
+### 9. Looped Encoder 替代结构：把 $E$ 主干→$Z$ 折叠为权重共享循环（§2.10）
+
+`LeanMath/LoopedEncoder.lean`（命名空间 `LoopedEncoder`）形式化了 §2.10 提出的回环编码器——把
+§2.2 的 $N$ 层前馈主干 $B_N\circ\cdots\circ B_1$ 折叠为单层 $B_\theta$ 迭代 $T$ 次的内部循环
+（MR-Loop 输入注入形式 $h^{(t)}=B_\theta(h^{(t-1)}+e)$）。在任意域 `K`、任意 `K`-模 `V`、任意
+赋范空间上机械化以下断言（全部无 `sorry` / 无新增公理，`lake build` 通过）：
+
+| 断言 | 定理 | math.md |
+|------|------|---------|
+| 回环 $f^{\circ T}$ = 同深度前馈（所有层绑定为 $f$）⇒ 函数族包含（容量代价的精确表述） | `looped_eq_feedforward_tied` / `looped_realized_by_feedforward` | (LE-8)(LE-9) |
+| 参数计数：同有效深度下回环 $\le$ 前馈；$N\ge2,p>0$ 时严格省（$\div N$） | `loop_uses_no_more_params` / `loop_uses_fewer_params` | §2.10.3 |
+| 仿射迭代误差恒等式（线性推广 `AssocMem.iterAff_error`）：$h^{(t)}-h^*=M^t(h^{(0)}-h^*)$ | `affine_iter_error` / `mrLoop_error` | (LE-5) |
+| 反输入塌缩：$M$ 单射 $\Rightarrow e_1\neq e_2\Rightarrow$ 不动点不同（输入注入守住反塌缩契约） | `mrLoop_no_input_collapse` | §2.10.2 / 契约 2 |
+| 梯度衰减：$\|M^n v\|\le\|M\|^n\|v\|\le K^n\|v\|$（权重共享的优化代价，仅依赖 `le_opNorm`） | `gradient_decay` / `gradient_decay_with_K` | (LE-7) |
+| 留存轨迹长度 $=T+1$；朴素激活显存 $=O(T)$ 且无界（故非 $O(1)$，线性 vs 常数对比严格） | `length_trajectory` / `baseline_memory_isBigO_T` / `baseline_memory_unbounded` | §2.10.3 |
+| 检查点 / DEQ 激活显存 $=O(1)$（mathlib `Asymptotics.IsBigO`） | `checkpoint_memory_isBigO_one` / `deq_memory_isBigO_one` | §2.10.3 |
+| 前向算力 $=O(T)$；检查点总 $2T=O(T)$（常数 2 重算换显存，渐进持平） | `eval_isBigO_T` / `checkpoint_eval_isBigO_T` | §2.10.3 |
+| 轨迹由 $(f,h_0,T)$ 唯一确定 ⇒ 只存检查点即可反向重建，不丢信息 | `trajectory_determined` | §2.10.3 |
+| $\|M\|<1$ 时迭代态按范数 $\to$ 不动点 $fp$（DEQ 极限只需留存 $fp$，$O(1)$ 激活的根因） | `mrLoop_tendsTo_fixedPoint` | §2.10.2 / §2.10.3 |
+
+关键：MR-Loop 的线性骨架 $h\mapsto Mh+Me$ 与 §3.7.3 PSCO / §2.9 CARO 是**同一个仿射不动点迭代**
+（`Affine.lean` 幺半群），故收敛性（$\rho(M)<1$ 时 $h^{(t)}\to h^*=(I-M)^{-1}Me$）直接复用
+`Contractive.contraction_comp`（复合仍收缩）与 `AssocMem.real_pow_tendsto_zero`（对角/标量
+$a^n\to0$）。本文件补的是**表达力包含**（LE-8）、**参数计数**、**反输入塌缩**、**梯度衰减**，
+以及此前标为「设计断言」的**复杂度 / 显存**——用 mathlib `Asymptotics.IsBigO` 把朴素显存
+$=O(T)$、检查点 / DEQ $=O(1)$、算力 $=O(T)$ 落地为定理，并证明朴素显存无界（对比严格）、轨迹
+可由 $(f,h_0,T)$ 重建（检查点不丢信息）、DEQ 极限态按范数收敛到不动点（`mrLoop_tendsTo_fixedPoint`
+拼 `mrLoop_error` + `gradient_decay` + `AssocMem.real_pow_tendsto_zero`，`squeeze_zero`）。
+详见 math.md §2.10。仍未形式化的部分（常数因子 / 墙钟 / 访存 / 非线性表达力等）见「问题 11」。
 
 ## 数值校验结果
 
@@ -379,11 +410,32 @@ $H(T)=I(T;Y)+H(T\mid Y)$——指向以下效率方向：
 
 形式化与未形式化的边界在 math.md §2.9.6 与 §1.0 对照表中如实标注，不把设计断言伪装成定理。
 
+### 问题 11（§2.10 Looped Encoder：非线性表达力 / 「同参更深」泛化 / DEQ 数值稳定 / 常数因子仍为设计断言，未形式化）
+
+`LoopedEncoder.lean` 机械化的是回环编码器的**代数恒等式、参数计数、线性仿射误差、输入依赖性、
+算子范数幂次界，以及渐进复杂度 $O(\cdot)$**（mathlib `Asymptotics.IsBigO`：朴素显存 $=O(T)$、
+检查点 / DEQ $=O(1)$、算力 $=O(T)$、轨迹可重建性、DEQ 极限态收敛，见 §2.10.7 与 `LoopedEncoder.lean`
+第 6 节）。但以下断言**仍未在 Lean 中形式化**，属设计分析，需实测或额外理论：
+
+1. **常数因子、墙钟与访存带宽**：§2.10.3 的**渐进复杂度 $O(\cdot)$ 已形式化**（`IsBigO`），但
+   常数因子、内存带宽、kernel 融合、真实 GPU 墙钟仍是非机械化的工程量，需实测。
+2. **非线性表达力与「同参更深」泛化收益**：(LE-9) 只证明同深度下回环函数族 $\subseteq$ 前馈
+   （容量代价）；「同参数预算下回环可加宽/加深并取得泛化收益」依赖宽度/迭代的渐近通用逼近
+   论证与实测，未形式化。
+3. **DEQ 隐式微分的数值稳定性**：§2.10.2 引用 §3.7.1 式 (25) 的隐式反传；不动点迭代的收敛
+   速度、数值精度与重启策略是工程问题，未形式化。
+4. **残差连接对梯度衰减的改善**：§2.10.4 提到残差把衰减从 $K^n$ 改善为 $(1+\|A\|)^n$ 可控范围，
+   这是工程启发，未形式化；(LE-7) 只证了朴素线性雅可比的幂次界。
+5. **真实 transformer 块的非线性**：本文件取块的线性骨架 $M$ 作分析对象（与 §2.9 / §3.7.3 一致）；
+   非线性（softmax 注意力、MLP）的表达力与收缩性需额外论证或实测。
+
+形式化与未形式化的边界在 math.md §2.10.7 与 §1.0 对照表中如实标注，不把设计断言伪装成定理。
+
 ## 复现
 
 ```bash
 cd lean-math && lake build
 ```
 
-（Lean 4.36.0 + mathlib，见 `lean-toolchain`。全部 10 个模块——含纯 Lean 的
+（Lean 4.36.0 + mathlib，见 `lean-toolchain`。全部 11 个模块——含纯 Lean 的
 `FixedPoint` / `Semigroup`——均由 `lake build` 一次编译验证，无 `sorry`/`axiom`。）
