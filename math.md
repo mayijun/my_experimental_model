@@ -57,9 +57,15 @@
 | §3.7 结论 = 变换链不动点 | `FixedPoint.lean` : `stabilized_is_fixed_point` / `read_only_fixes_all` | ✅ 已证 |
 | §3.7.1 收缩复合 + Neumann 级数 | `Contractive.lean` : `contraction_comp` / `geom_sum_one_sub` | ✅ 已证 |
 | §3.7.3 仿射幺半群 + 线性递推闭式 | `Affine.lean` : `comp_assoc` / `iterate_eq_closedForm` | ✅ 已证 |
+| §2.9 CARO：更新是仿射 ⇒ 复用结合幺半群 ⇒ 并行扫描合法 | `AssociativeMemory.lean` : `update_is_affine` | ✅ 已证 |
+| §2.9 (CARO-1) 内容可寻址读出恒等式 $S_T q=\sum_{i<T}(\prod a)g_i B(k_i,q)v_i$ | `AssociativeMemory.lean` : `stateFrom_readout` | ✅ 已证 |
+| §2.9 (CARO-2) 残差 $\rho=0\iff v_t$ 被历史精确重建 | `AssociativeMemory.lean` : `prediction_is_content_sum` / `residual_zero_iff_reconstructed` | ✅ 已证 |
+| §2.9 (CARO-4) 不动点 $S^*=(1-a)^{-1}b$ + 误差恒等式 + $a^n\to0$ 收敛 | `AssociativeMemory.lean` : `fixedPoint_is_fixed` / `iterAff_error` / `real_pow_tendsto_zero` | ✅ 已证 |
+| §2.9 反塌缩：不同输入 $b$ ⇒ 不同不动点（输入依赖） | `AssociativeMemory.lean` : `no_collapse` | ✅ 已证 |
 | 命题 11（重建 $L_0$ vs 生成 $L_{\ge1}$） | `Semigroup.lean` : `generation_iff_not_reconstruction` / `generation_iff_moves_some_point` | ✅ 已证 |
 | 命题 7 / 8 / 9（设计 / 诊断断言） | — | ⚠️ 非可形式化定理，见 README 问题 7 |
 | §3.7.3 谱夹层 vs §3.7.1 $\rho<1$ | `Contractive.lean` / `Affine.lean` | ⚠️ 谱夹层**强于** $\rho<1$，见 README 问题 6 |
+| §2.9 复杂度 $O(\cdot)$ 表 / 「超越 Mamba」经验断言 | — | ⚠️ 设计分析，非 Lean 可形式化（复杂度未机械化），见 §2.9.6 与 README 问题 10 |
 
 **成熟要点（直接引用，不重证）**：
 
@@ -818,6 +824,99 @@ $$H(I \mid M) > 0. \tag{16}$$
 4. **$L$ 只定总量、不定方向**：$L$ 同时缩放 $H(T)$ 与 $h(z_0)$，在比值中抵消，不改变定性结论；它决定绝对预算（7B 档 $h(z_0)\approx4.3$ Mbit），对应「文字高压缩、潜空间高冗余」的直觉。
 
 > **结论**：§2.3–2.5 的信息论结论是**规模不变的**——有损性、失真地板、噪声熵源在 tiny 到 7B 全部成立，且安全裕度只随 $d/\log_2|\mathcal V|$ 增长。唯一需要遵守的数值判据是 $d\gg\log_2|\mathcal V|$（几乎自动满足），故跨规模缩放时无需为维持这些结论而引入额外约束。
+
+### 2.9 替代结构：CARO——把「按 ρ 丢/留 → 落入 Z → 在 Z 中对齐并推理」折叠为单一门控结合扫描态
+
+> **动机**。§2.6 的压缩器（记忆 $M$，线性注意力 / DeltaNet 的矩阵仿射扫描）、编码器 $E$（Transformer / Mamba）、§3.7.3 的推理算子 PSCO，**三者底层是同一个仿射结合扫描幺半群**（$x\mapsto a x+b$，见 `Affine.lean` `comp_assoc`）：压缩器把 token 写进一个仿射态、$E$ 又对上下文重新聚合一遍、PSCO 再在 $Z$ 上迭代仿射不动点。三次走过同一代数结构是冗余的。本节约束一个**单一门控结合扫描算子 CARO**（Context-addressed Associative-scan Reasoning Operator），用一个线性态同时承担「压缩 / 表征 / 推理」，替代「按 $\rho$ 丢/留 $\to$ $E$ $\to$ $Z$ $\to$ 对齐并推理」这一整段，在 GPU 的五个复杂度维度上追平或超越 Transformer / Mamba，同时在长程上维持并超越内容可寻址注意力。
+
+#### 2.9.1 定义
+
+令键相似度双线性型 $B:V\times V\to K$（线性注意力的核 $k\cdot q$），外积算子 $\mathrm{outer}_B(k,v):q\mapsto B(k,q)\,v$。**CARO 状态**是一个线性映射 $S_t:V\to V$，由三步构成：
+
+$$
+\boxed{\ S_{t+1}=a_t\,S_t+g_t\,\mathrm{outer}_B(k_t,v_t),\qquad z_t=S_t\,q_t,\qquad \rho_t=\|v_t-S_{t-1}\,k_t\|^2\ }
+$$
+
+- **状态更新（压缩 + 表征）**：$a_t\in(0,1)$ 是遗忘/衰减（谱夹层中 $\delta<a_t<1-\gamma$，见 §3.7.3）；$g_t\in[0,1]$ 是由残差 $\rho_t$ 驱动的**写入门控**——$\rho_t\approx0$（已被历史吸收）则 $g_t\approx0$（不写，等价于「丢」），$\rho_t$ 大则 $g_t\approx1$（写，等价于「留」）。于是「按 $\rho$ 丢/留」不再是显式掩码 gather，而是连续门控 $g_t$，§2.6 GPU 并行的第 3 步（`keep_t` 掩码 gather 保留 token）被消掉。
+- **读出（表征落入 $Z$）**：$z_t=S_t\,q_t$。把 $S_t$ 按递推展开即得核心恒等式
+
+$$
+z_t=S_t\,q_t=\sum_{i<t}\Big(\prod_{j=i+1}^{t-1}a_j\Big)\,g_i\,B(k_i,q_t)\,v_i . \tag{CARO-1}
+$$
+
+这是对**全部历史**按「键相似度 $B(k_i,q_t)\times$ 写入强度 $g_i\times$ 累积衰减」的加权聚合——即**精确的内容可寻址长程检索**，由一个常数大小的线性态 $S_t$ 实现，无需 $O(L^2)$ 注意力矩阵。$Z=(z_1,\dots,z_L)$ 即编码后的连续表征（$Z$ 全程连续，见契约核对）。
+
+- **残差（新奇度 / 压缩信号）**：$\rho_t=\|v_t-S_{t-1}k_t\|^2$。由 (CARO-1)，$S_{t-1}k_t$ 本身就是「历史按键相似度 $B(k_i,k_t)$ 的加权重建」，故
+
+$$
+\rho_t=0\iff v_t=\sum_{i<t}\Big(\prod_{j=i+1}^{t-1}a_j\Big)\,g_i\,B(k_i,k_t)\,v_i\iff v_t\text{ 被历史精确重建}\iff\text{该 token 冗余}. \tag{CARO-2}
+$$
+
+这把 §2.6 的「$\rho$ 判冗余」变成状态直接给出的连续信号，并与写入门控 $g_t$ 闭环（$\rho\uparrow\Rightarrow g\uparrow$，压缩率内生自平衡，同 §2.6）。
+
+- **推理（在 $Z$ 中对齐并推理）**：给定读出的 $Z$，推理阶段固定 $(a,b)$ 做仿射迭代
+
+$$
+S^{(n+1)}=a\,S^{(n)}+b,\qquad a\in(\delta,1-\gamma)\subset(0,1) \tag{CARO-3}
+$$
+
+（线性骨架即 §3.7.3 PSCO 的 $\tilde A_h Z+b_h$，此处取标量/对角 $a$；$b$ 输入依赖，由隐含模式 $h$ 投影，见 §3.5）。$|a|<1$ 时收缩到唯一不动点
+
+$$
+S^*=(1-a)^{-1}b,\qquad S^{(n)}-S^*=a^n(S^{(0)}-S^*)\xrightarrow{n\to\infty}0. \tag{CARO-4}
+$$
+
+#### 2.9.2 与既有流水线的对应（折叠了什么）
+
+| 既有段 | 原实现 | CARO 对应 |
+|---|---|---|
+| 按 $\rho$ 丢/留（§2.6） | 记忆 $M$ + 残差 $\rho$ + `keep` 掩码 gather | $g_t=\sigma(\rho_t)$ 连续写入门控；$\rho_t$ 由同一状态读出，零额外前向 |
+| 编码器 $E$（Transformer / Mamba） | 对保留 token $\tilde x$ 重聚合上下文得 $Z$ | 读出 $z_t=S_t q_t$（CARO-1）已聚合全部历史，$E$ 的二次聚合被消除 |
+| 在 $Z$ 中对齐并推理（§3 / §3.7.3 PSCO） | PSCO 在 $Z$ 上迭代仿射不动点 | 同一状态迭代 (CARO-3)，复用 `Affine.lean` 幺半群与 `Contractive.lean` 收缩 |
+
+一句话：**压缩（$\rho$ / $g$）、表征（$z=Sq$）、推理（$S^{(n)}\to S^*$）是同一个仿射态的三种读法**，不再是三个串行模块。
+
+#### 2.9.3 复杂度对比（追平 / 超越 Transformer 与 Mamba）
+
+记序列长 $n$、表征维 $d$、CARO 单头键/值维 $D$（冻结 64，同 §2.6 `rho_head_dim`，靠加 head 扩容量）。
+
+| 维度 | Transformer | Mamba (SSM) | **CARO（本结构）** | 说明 |
+|---|---|---|---|---|
+| 训练计算 | $O(n^2 d)$ | $O(n\,d\,N)\approx O(n\,d)$ | **$O(n\,d\,D)\approx O(n\,d)$** | 同 Mamba；$D=64$ 冻结故与 $d$ 解耦，线性于 $n$ |
+| 训练显存 | $O(n^2)$（注意力矩阵） | $O(n)$（线性） | **$O(n\,D^2)$ 或 $O(n\,d)$** | 线性于 $n$；矩阵路径 $D=64$ 可接受，低秩路径 $O(n\,d)$（同 §2.6） |
+| 推理单步 | $O(n\,d)$（KV cache 随上下文增长） | $O(1)$（仅依赖上一步隐状态） | **$O(1)$** | $S_t$ 是定常线性态，单步只更新 $S$，不依赖历史长度 |
+| 推理总耗 | $O(n^2 d)$ | $O(n)$ | **$O(n)$** | 同 Mamba；每步 $O(1)$，$n$ 步共 $O(n)$ |
+| 推理显存 | $O(n\,d)$（KV cache） | $O(1)$（常数状态） | **$O(1)$** | 只存当前态 $S$，无 KV cache |
+
+> **诚实声明**：上表的 $O(\cdot)$ 是**设计断言，未在 Lean 中形式化**（复杂度不是 mathlib 已机械化的对象）。「追平 Mamba / 超越 Transformer」指**渐进复杂度**；常数因子、kernel 融合质量、真实 GPU 墙钟时间需实测。参数量 / 显存 / 算力在 tiny–7B 三档的伸缩按 §2.2.7 规模表与 AGENTS 规则执行——$D=64$ 冻结、靠加 head 扩容量，保证第 1 档纯 CPU 可跑（CARO 无 GPU-only 依赖，不进入 `pyproject.toml` 可选 extra）。
+
+#### 2.9.4 长程注意力：维持并超越
+
+- **维持 Transformer 的内容可寻址性**：(CARO-1) 说明 $z_t=S_t q_t$ 精确等于「历史按 $B(k_i,q_t)$ 加权聚合」——这正是注意力 $\mathrm{softmax}(QK^\top)V$ 的**线性化内核形式**（$B$ 替代 softmax），在**线性状态**中实现，无需物化 $n\times n$ 矩阵。因此 CARO 具备 Transformer 「按内容检索任意历史 token」的能力（needle-in-haystack 可解）。
+- **超越 Mamba 的长程**：Mamba 的 SSM 递推 $h_t=A h_{t-1}+B x_t$、读出 $y_t=C h_t$ 是**通道/位置固定**的线性递推，不含查询 $q_t$ 对历史的**内容选择**——长程 needle 检索是其已知弱点。CARO 的读出 $S_t q_t$ 显式含 $q_t$，每步按当前查询对全历史做内容加权，故在长程内容寻址上**严格强于 Mamba**。
+- **软化 caveat（非形式化）**：$B(k,q)$ 是双线性核，等价于线性注意力；要达到 softmax-attention 的匹配质量需用正核近似（$\exp(k\cdot q)$ 等）或多尺度。这是**工程近似，未在 Lean 中证明**；恒等式 (CARO-1) 对任意双线性 $B$ 精确成立，但 softmax 质量不在形式化范围内。
+
+#### 2.9.5 契约核对（对照 AGENTS 规则与 math.md 既有前提）
+
+1. **$Z$ 保持连续、不引入语义量化瓶颈**：$z_t=S_t q_t$ 是线性态的线性读出，全程 $\mathbb R^d$ 连续值；不施加 FSQ/VQ/RVQ（同 §2.6 接口契约）。数值精度量化（FP8/FP4）只降位宽、不改语义，且可分层（同 §2.6）。✅
+2. **反塌缩**：(CARO-4) 不动点 $S^*=(1-a)^{-1}b$ **输入依赖**——不同 $b$ 得不同 $S^*$（`no_collapse`），不会坍缩到单一状态；谱夹层 $a\in(\delta,1-\gamma)$ 封死 $a\to0$ 一步塌缩（同 §3.7.3 五道防线第 1 条）。✅
+3. **$d:d_{\text{hidden}}=1:8$**：CARO 表征读出维 $d$ 与主干 $d_{\text{hidden}}$ 维持 §2.2.7 / §2.8 的 $r=8$ 不变；键/值维 $D=64$ 冻结不随 $d$ 缩放（同 §2.6 记忆维度扩展策略）。✅
+4. **通路 / 关系分离（§4.5）**：CARO 的状态更新（关系建模，$O(n)$）与通路映射（逐位置读出投影，$O(1)$ 深度）仍分离——读出 $z_t=S_t q_t$ 是关系聚合，其后的读出头 / 量化是逐位置通路，互不混淆。关系从 $O(n^2)$ 降到 $O(n)$，通路仍 $O(L)$ 独立，符合 §4.5 的分离原则。✅
+5. **与 §3 对齐推理的衔接**：CARO 折叠的是「编码 → 落入 Z」这一段的表征获取；§3 的硬对齐（§3.1）、交叉掩码（§3.2）、PAC（§3.4）在 $Z$ 之上仍照常进行——CARO 产出连续 $Z$，不改变 §3 的契约，只是把 $Z$ 的生产者从「$E$ 重聚合」换成「同一状态读出」。✅
+
+#### 2.9.6 Lean 形式化（见 §1.0 对照表，全部无 sorry / 无新增公理）
+
+恒等式 (CARO-1)–(CARO-4) 与反塌缩已在 [`lean-math/LeanMath/AssociativeMemory.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/AssociativeMemory.lean)（命名空间 `AssocMem`）机械化：
+
+| 断言 | 定理 |
+|---|---|
+| 更新是仿射映射 ⇒ 复用 `PSCO.Aff` 结合幺半群 ⇒ 并行扫描合法 | `update_is_affine` |
+| (CARO-1) 读出 = 历史键相似度加权和（内容可寻址长程检索） | `stateFrom_readout` |
+| (CARO-2) 残差 = 预测误差，$\rho=0\iff$ 被历史重建 | `prediction_is_content_sum` / `residual_zero_iff_reconstructed` |
+| (CARO-3)(CARO-4) 不动点公式与误差恒等式，$|a|<1$ 收敛 | `fixedPoint_is_fixed` / `iterAff_error` / `real_pow_tendsto_zero` |
+| 反塌缩：不同输入 $b$ ⇒ 不同不动点 | `no_collapse` |
+
+> **形式化边界（诚实）**：Lean 证明的是**代数恒等式与收敛性**（任意域 $K$、任意模 $V$、任意双线性型 $B$）。**未形式化**的部分：复杂度 $O(\cdot)$、GPU 友好性、softmax 核近似质量、「超越 Mamba」的经验断言——这些是设计分析，见 [lean-math/README.md](file:///home/simon-ma/JEPA/lean-math/README.md)「发现的问题」。
 
 ---
 

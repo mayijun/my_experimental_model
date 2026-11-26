@@ -16,6 +16,7 @@
 | `LeanMath/FixedPoint.lean` | （纯 Lean，无 mathlib）§3.7「结论状态 = 变换链不动点」：轨迹稳定 ⟹ 不动点、读模式退化为恒等、pred 迭代收敛到 0 |
 | `LeanMath/Semigroup.lean` | （纯 Lean，无 mathlib）§3.9 式 (29)–(30) 算子幺半群 + 命题 11 二分：`Ψ=id ⟺ 重建`、`Ψ≠id ⟺ 生成 ⟺ 移动了某点` |
 | `LeanMath/Retraction.lean` | §4.1.7 黎曼流匹配 GPU 友好近似：retraction 公理与一阶一致、欧氏 retraction 退化特例、投影 retraction 幂等核心、低秩度量 `rank(JᵀJ) ≤ min(\|𝒱\|, d)` |
+| `LeanMath/AssociativeMemory.lean` | §2.9 CARO 替代结构（门控结合扫描态）的代数核心：更新是仿射（复用 `PSCO.Aff` 幺半群 ⇒ 并行扫描）、内容可寻址读出恒等式、残差⇔被历史重建、不动点/误差/收敛、反塌缩 |
 
 ## 形式化结果 ↔ math.md 命题对照
 
@@ -157,6 +158,27 @@ theorem rank_pullbackMetric_le_min (J : Matrix m n ℝ) :
 证明 `π(R_z v)=R_z v`——即一步之后恒在不动点集（流形）上，是 §4.1.6/4.1.7「路径始终在
 M 上、全程可解码」的代数保证。真流形的 exp/log、测地线 ODE 与「投影 retraction 是
 retraction」的 `fderiv_id` 公理（需 π 为光滑投影）不在本文件展开，见「问题 8」「问题 9」。
+
+### 8. CARO 替代结构：门控结合扫描（§2.9）
+
+`LeanMath/AssociativeMemory.lean`（命名空间 `AssocMem`）形式化了 §2.9 提出的 CARO
+（Context-addressed Associative-scan Reasoning Operator）——把「按 ρ 丢/留 → 落入 Z → 在 Z
+中对齐并推理」折叠为**单一仿射结合扫描态**。在任意域 `K`、任意 `K`-模 `V`、任意双线性型
+`B : V →ₗ (V →ₗ K)` 下机械化以下断言（全部无 `sorry` / 无新增公理，`lake build` 通过）：
+
+| 断言 | 定理 | math.md |
+|------|------|---------|
+| 状态更新 `S ↦ a•S + g•outer(k,v)` 是 `PSCO.Aff` 仿射映射 ⇒ 复用 `Affine.lean` 结合幺半群 ⇒ 前缀扫描合法 | `update_is_affine` | §2.9.1 / §3.7.3 |
+| 读出恒等式 `S_T·q = Σ_{i<T} (Π_{j=i+1}^{T-1} a_j)·g_i·B(k_i,q)·v_i`（内容可寻址长程检索，线性状态实现） | `stateFrom_readout` | (CARO-1) |
+| 推论：预测值 `S_t·k_t` = 历史按 `B(k_i,k_t)` 加权和 | `prediction_is_content_sum` | (CARO-1) |
+| 残差 `ρ = ‖v − S_{t-1}·k_t‖`；`ρ=0 ⟺ v_t 被历史精确重建 ⟺ 冗余` | `residual_zero_iff_reconstructed` | (CARO-2) |
+| 不动点 `S*=(1−a)⁻¹·b` 验证 + 误差恒等式 `S⁽ⁿ⁾−S* = aⁿ·(S⁰−S*)` + `aⁿ→0`（`a∈[0,1)`） | `fixedPoint_is_fixed` / `iterAff_error` / `real_pow_tendsto_zero` | (CARO-3)(CARO-4) |
+| 反塌缩：`b₁≠b₂ ⇒ 不动点不同`（输入依赖，不坍缩到单一状态） | `no_collapse` | §2.9.5 契约 2 |
+
+关键：`stateFrom_readout` 的归纳证明显示，**常数大小的线性状态 `S`** 即可实现对整个历史的
+**精确**内容寻址聚合——这是 CARO 在 `O(n)` 时间内维持 Transformer 内容可寻址性、同时
+超越 Mamba（递推无查询内容选择）的代数根基。详见 math.md §2.9。未形式化的部分（复杂度、
+softmax 核近似、「超越 Mamba」经验断言）见「问题 10」。
 
 ## 数值校验结果
 
@@ -339,6 +361,23 @@ $H(T)=I(T;Y)+H(T\mid Y)$——指向以下效率方向：
    单条流、把离散瓶颈并入流的末端，可减少一次重建失真、并进一步减少串行步。
 
 6. **线性注意力 / Mamba 替代 $O(L^2)$ 自注意力**（§3.6(g) 已提及，纯计算效率，不改变信息论结论）。
+
+### 问题 10（§2.9 CARO：复杂度 / GPU / softmax 近似 / 「超越 Mamba」均为设计断言，未形式化）
+
+`AssociativeMemory.lean` 机械化的是 CARO 的**代数恒等式与收敛性**（任意域 `K`、模 `V`、
+双线性型 `B`），但以下断言**未在 Lean 中形式化**，属设计分析，需实测或额外理论：
+
+1. **复杂度 `O(·)`**：§2.9.3 的五维复杂度表（训练计算/显存、推理单步/总耗/显存）是渐进
+   分析；复杂度不是 mathlib 已机械化的对象，常数因子、kernel 融合、真实墙钟时间需实测。
+2. **「超越 Mamba」的经验断言**：Mamba 长程 needle 检索弱、CARO 内容寻址更强，是基于机制
+   的判断，未做基准实测；在特定数据/超参下可能不成立。
+3. **softmax 匹配质量（kernel caveat）**：(CARO-1) 对任意双线性 `B` 精确成立，但 `B` 等价于
+   线性注意力核；要达到 softmax-attention 质量需正核近似（`exp(k·q)` 等），这是工程近似，
+   近似误差未形式化。
+4. **GPU 落地**：CARO 的并行扫描复用 §2.6/§3.7.3 的同原语，但实际 kernel 实现（Triton/pscan）、
+   bf16/AMP、`torch.compile` 融合均未在本目录验证。
+
+形式化与未形式化的边界在 math.md §2.9.6 与 §1.0 对照表中如实标注，不把设计断言伪装成定理。
 
 ## 复现
 

@@ -2,16 +2,70 @@
 
 ===/<repository>/===
 .gitattributes[FV3T]: F:强制文本以LF检出并自动识别二进制，保证AOCI基线在各平台字节一致 | R:- | A:text=auto,eol=lf | S:覆盖Windows默认的autocrlf改写，避免整树被误判为漂移
-.gitignore[FV4S]: F:排除Python字节码、虚拟环境、密钥、构建产物、PyTorch/ML权重与日志、Jupyter、测试覆盖率、IDE及本项目的.screenshots/.trae/lean-math | R:- | A:- | S:模型权重默认不入库，提交特定小权重用!例外；.trae与lean-math禁止入库
-AGENTS.md[SQ7S]: F:约束Agent建立、恢复与增量维护AOCI仓库认知的工作合同，规定最小使用入口与收尾维护流程 | R:- | A:aoci_rules,aoci_overview,aoci_maintain,aoci_update_entry,aoci_report | S:Entry语义须由模型依据真实证据创作，不得从路径/文件名/符号/模板推导；冲突、CAS与恢复信号不得绕过
-README.md[SG6S]: F:阐述Flow Matching+JEPA统一潜空间核心思想、项目要回答的问题、模型架构、目录结构与快速开始 | R:code:math.md,code:flow_matching_jepa.py | A:- | S:math.md讲「为什么」、flow_matching_jepa.py讲最小实现、pretrain+data_prepare+eval_generate放大到真实语料与GPU、analyze.py把命题变成可跑PASS/FAIL
-analyze.py[TA5S]: F:训练教学模型后验证math.md§4两条推论——生成文本熵率上界与重编码失真>0 | R:code:flow_matching_jepa.py | A:build_data,generate_batch,entropy_rate,reencode_distortion,main | S:靠sys.path.insert导入同目录模型；输出词表不含[MASK]，mask_id=len(chars)
-data_prepare.py[XD6M]: F:下载并准备中英混合字符级语料，切段交错后输出train/eval JSONL供pretrain.py | R:code:download_full.py | A:load_wikitext,load_wikipedia_split,chunk_all,interleave,write_jsonl,main | S:英文wikitext整片下载、中文wikipedia按row_group读取；命中download_full.py缓存则跳过下载；需先export HF_ENDPOINT
-download_full.py[XD5S]: F:并行预下载全量中英语料分片到缓存，HTTP Range分段+断点续传规避镜像单连接限速 | R:code:data_prepare.py | A:_urls,_size,_download_range,_fetch,main | S:缓存命名与data_prepare._cache_key一致；每分片16段并行+10次重试，最终文件存在且非空即可信完整
-eval_generate.py[TA7M]: F:加载checkpoint在留出集上评测重建困惑度、条件生成、多样性与重编码失真/自洽性 | R:code:flow_matching_jepa.py,code:pretrain.py | A:load_vocab,eval_reconstruction,generate,entropy_rate,main | S:需与pretrain.py同目录且已生成checkpoints/；重建走quantize后decoder，生成用fm.flow_sample+decode_latents
-math.md[SA9L]: F:Flow Matching+JEPA字符模型的数学基础与核心命题验证，公式与flow_matching_jepa.py逐式对齐 | R:code:flow_matching_jepa.py | A:- | S:§3.1-3.6为已实现文本通道，§3.7-3.15为多模态/闭环/训练策略扩展规划P1-P8暂未实现；§4两条推论由analyze.py可跑验证
-pretrain.py[EA8M]: F:正式预训练脚本，HuggingFace Accelerate+datasets多卡/bf16/断点续训，两阶段训练并在stage2加入采样重建 | R:code:flow_matching_jepa.py,code:data_prepare.py | A:main,stage1_step,stage2_step | S:stage2_step用单步Euler端点估计的采样潜变量训练解码器以对Flow采样误差鲁棒；数据集来自data_prepare.py，checkpoint为config.json+model.pt
-run_full_pipeline.sh[OV6T]: F:全量数据预训练接力——等待download_full.py下载完成后准备全量数据并启动1-epoch预训练 | R:code:data_prepare.py,code:pretrain.py | A:- | S:pgrep等待下载进程退出并校验「全部完成」标记；数据与checkpoint路径硬编码为/root/autodl-tmp
-run_pipeline.sh[OV5T]: F:中英混合Flow Matching+JEPA数据准备→预训练→生成评测一条龙，支持smoke/full两种规模 | R:code:data_prepare.py,code:pretrain.py,code:eval_generate.py | A:- | S:MODE=smoke用wikitext-2小集冒烟，MODE=full用0.3B配置；EPOCHS>0时按epoch训练并忽略stage步数
-run_pretrain_a100.sh[OV5T]: F:在A100上运行0.3B规模Flow Matching+JEPA预训练的现成配置，参数化数据集/模型/训练 | R:code:pretrain.py | A:- | S:优先用.venv/bin/python；RESUME=1时加--resume续训；日志写入logs/并tee到终端
-flow_matching_jepa.py[KA9L]: F:自包含教学版两阶段潜变量生成器——双编码器JEPA、FSQ/VQ/RVQ量化、条件Flow Matching速度场、位置混合Transformer解码器及MaskGIT/后验采样 | R:code:math.md | A:FlowJEPA,Decoder,FSQ,train,flow_sample,decode_latents | S:单文件可CPU跑通端到端；mask_id=vocab_size-1且在输出侧屏蔽；math.md公式与此文件逐式对齐
+.gitignore[FV4S]: F:排除Python字节码、虚拟环境、密钥、构建产物、PyTorch/ML权重、日志、Jupyter、测试覆盖率、IDE及本项目的.screenshots/.trae/lean-math缓存 | R:- | A:- | S:权重默认不入库(小权重用!例外)；.trae与lean-math禁止入库；新增产物目录须显式排除
+AGENTS.md[SQ7S]: F:约束Agent建立、恢复与增量维护AOCI仓库认知的工作合同；并规定模型修改须对照math.md、三档可扩展与模块选型组织规则 | R:- | A:- | S:Entry语义须据真实证据创作，不得从路径/文件名/符号/模板推导；模型结构/损失/表征/推理改动须对照math.md说明公式与前提，代码与数学不得脱节；冲突、CAS、恢复信号不得绕过
+README.md[SG6S]: F:阐述多模态JEPA共享潜空间Z的核心思想、项目要回答的问题、模型架构、目录结构与快速开始 | R:code:math.md | A:- | S:math.md讲「为什么」与公式；model/为生产实现（小/中/大三档同构）；lean-math/用Lean形式化核心命题；data_prepare/training/inference/evaluation分别对应数据/训练/推理/评测
+math.md[SA9L]: F:多模态JEPA四阶段流水线的数学基础与核心命题：编码(§2)→对齐推理(§3)→解码(§4)→自反馈(§5)，公式与model/、training/逐式对齐 | R:code:model/jepa.py,code:model/encoder.py,code:training/losses.py,code:model/flow.py,code:lean-math/LeanMath.lean | A:- | S:Z全程连续不量化，有损仅在token层(§2.6)；反塌缩三道=重建+VICReg+交叉掩码(§2.2.4/§3.2)；对角线SSM收缩系数经谱夹层钳在(δ,1-γ)，上界<1收敛、下界>δ防塌缩(§3.7.3)；§2.9 CARO替代结构由lean-math/AssociativeMemory.lean形式化且全定理无sorry/axiom，但其复杂度O(·)与超越Mamba等属经验断言未证明(见lean-math/README问题10)；d与d_hidden按1:8解耦(§2.2.7)；模型结构/损失/表征/推理改动须对照本文件说明对应公式与前提并同步更新，代码与数学不得脱节
+.python-version[FV3T]: F:固定本仓库Python解释器版本为3.14，供uv/pyenv与CI一致解析 | R:- | A:- | S:升级Python须同步改pyproject的requires-python，否则uv与CI解释器错位
+backbone-selection.md[SA6M]: F:Z空间编码主干（transformer/mamba/hybrid）的成熟模块选型与三档参数量/显存/算力代价，只选型不改代码 | R:code:math.md | A:- | S:选型不可违背math.md契约：Z全程连续不量化(§2.6)、反塌缩+对角线SSM谱夹层(§2.2.4/§3.7.3)、d:d_hidden=1:8解耦(§2.2.7)、通路/关系分离(§4.5)；GPU-only组件须进pyproject可选extra以保CPU冒烟档可跑
+decoder-selection.md[SA4T]: F:解码器D∈{R_I,g}的技术选型与备选方案记录(图像/文本渲回)，与backbone-selection.md平行，只选型不改代码 | R:code:math.md,code:backbone-selection.md | A:- | S:选型不可违背：Z连续不量化(§2.6)、不加VAE KL(§4.2c)、读出头不weight tying(§4.2a)、三档同构
+pyproject.toml[FV5T]: F:项目依赖声明：numpy基础，torch在cpu/cu126/cu130互斥extra，data/hf/train/train-gpu可选extra，三档环境可比 | R:- | A:- | S:torch锁死2.14.1(同时提供CPU+CUDA构建，2.15.x仅CPU)；三个torch extra互斥([tool.uv]conflicts)，--all-extras不可用；不选extra时torch不安装也不回落PyPI；bitsandbytes在train-gpu extra保冒烟档CPU可跑
+uv.lock[FV2L]: F:uv生成的依赖锁文件，锁定全部传递依赖版本与wheel来源，保证CPU/GPU环境可复现 | R:- | A:- | S:由uv生成勿手改；改依赖走pyproject.toml后uv lock；torch来源由extra定
+
+===/<repository>/data_prepare/===
+__init__.py[LD3T]: F:数据准备包入口：语料下载、格式整理、合成/真实图文对与词表的统一导出 | R:code:data_prepare/synthetic.py | A:- | S:-
+download.py[ID5S]: F:并行预下载全量中英预训练语料分片到缓存，用HTTP Range分段+断点续传规避镜像单连接限速 | R:code:data_prepare/prepare.py | A:_urls,_key,_size,_download_range,_fetch,main | S:缓存命名须与prepare._cache_key一致(<config>_<split>_<shard>.parquet)；每分片8段并行+重试，半成品只留.part，最终文件存在且非空即可信完整；需export HF_ENDPOINT=https://hf-mirror.com
+hf_datasets.py[ID7M]: F:真实图文数据流：HuggingFace datasets流式+本地parquet/ImageFolder+HF tokenizer+PIL，支持远程HF/本地parquet/ImageFolder三种spec与加权混合流 | R:code:data_prepare/ledger.py,code:model/config.py | A:load_hf_tokenizer,LLaDATokenizer,encode_text,image_transform,real_batch_iterator,mixture_iterator | S:重依赖函数内惰性导入，包级__init__引用不强制装datasets；LLaDATokenizer实现pad/mask/vocab/encode/decode接口使train.py不改即可换词表；ImageFolder holdout按seed+类名crc32稳定序，train/holdout不相交
+img2folder.py[ID5S]: F:把URL+caption型图文对数据集并发下载成HF imagefolder(图片+metadata.jsonl)，供training.train --data-dir离线训练 | R:- | A:collect_items,download_one,main | S:字段名以各数据集schema为准，可用datasets.load_dataset(name).features核对；默认COYO-700M，中档建议下20M–100M子集(图片约200GB–1TB)用--max-samples控制；纯CPU即可跑；需先export HF_ENDPOINT
+ledger.py[PD6M]: F:数据台账：用SQLite记录已训练数据的数据集/分片级消费进度与样本级哈希去重，支撑续训不重复与公开数据溯源 | R:code:training/train.py | A:Ledger,mark_dataset,mark_shard_consumed,is_shard_consumed,record_sample,record_run | S:标准库sqlite3(零依赖)；两级：dataset+shard级(核心)与sample级哈希(预留)；写入时机：开始/分片完/结束对应mark_dataset/mark_shard_consumed/record_run；image_hash像素级折中，严格去重应用原始字节
+medium.py[ID5S]: F:中档(0.3b/1b/3b/7b)训练与eval数据准备：按preset生成manifest+可选缓存下载+打印训练命令 | R:code:model/config.py,code:data_prepare/download.py | A:build_manifest,cache_dataset,main | S:只负责图文对(对齐与双向生成主数据)，纯文本重建/生成走data_prepare.prepare；产物medium_manifest.json供training.train --data-config消费；--download缓存parquet分片到$JEPA_CACHE复用download.py
+prepare.py[ID6M]: F:下载并准备中英混合字符级语料，按字符预算截取后切段交错，输出train/eval JSONL供两阶段训练 | R:code:data_prepare/download.py | A:_cache_key,_download,load_wikitext,load_wikipedia_split,interleave,main | S:绕开hf-mirror对wikitext的503：英文整片下载，中文wikipedia分片大(~587MB)用HTTP Range只读行组；命中download.py缓存则跳过；文本切~512字符段再交错以覆盖双语；需先export HF_ENDPOINT
+synthetic.py[DD5S]: F:离线合成图文对数据(颜色×形状×位置)与字符词表，不依赖torchvision/PIL/datasets，天然适合验证跨模态硬对齐 | R:- | A:draw_image,make_caption,CharTokenizer,build_dataset,synthetic_batch_fn | S:CharTokenizer保留0=PAD、1=MASK；build_dataset可注入实现pad_id/mask_id/vocab_size/encode/decode的任意词表(如LLaDATokenizer)切换编码；from_itos从已存itos恢复词表供推理加载checkpoint
+
+===/<repository>/evaluation/===
+__init__.py[LA3T]: F:评测包入口：导出跨模态检索与双向重建指标函数 | R:code:evaluation/metrics.py | A:- | S:-
+metrics.py[TA5T]: F:评测：跨模态检索与双向重建指标，对应math.md §3.2硬对齐与§3.4软对齐 | R:- | A:evaluate,evaluate_real | S:evaluate_real从真实数据流取样本做检索+图像→文本解码样例；检索在共享Z的[CLS]聚合token上做余弦相似度
+
+===/<repository>/inference/===
+__init__.py[LA3T]: F:推理包入口：加载checkpoint后在共享潜空间Z内做正向/反向映射，入口见inference/run.py | R:code:inference/run.py | A:- | S:-
+run.py[EA7M]: F:推理入口：加载checkpoint，在Z内做文本→图像/图像→文本往返与无条件生成(文本/图像)，支持Euler/midpoint/heun采样与温度采样 | R:code:data_prepare/synthetic.py,code:model/jepa.py,code:model/flow.py,code:data_prepare/hf_datasets.py | A:encode_image,encode_text,text_to_image,image_to_text,generate_text,load_checkpoint | S:load_checkpoint加载后删EMA目标编码器释显存，CUDA下转bf16；velocity用torch.compile reduce-overhead(CUDA Graph)消launch，含graph break的SSM回落eager不影响正确性；二阶求解器每步成本×2仅低步数值得
+
+===/<repository>/lean-math/===
+LeanMath.lean[CA5T]: F:Lean形式化根文件：按依赖顺序导入全部LeanMath子模块，是lake build的defaultTarget | R:code:lean-math/LeanMath/Entropy.lean,code:lean-math/LeanMath/InfoTheory.lean,code:lean-math/LeanMath/Affine.lean,code:lean-math/LeanMath/AssociativeMemory.lean,code:lean-math/LeanMath/Contractive.lean | A:- | S:导入顺序须满足依赖：Numeric→Lossy→Affine→Contractive→AssociativeMemory等；新增子模块须在此补import并保持无环，否则lake build报import cycle
+README.md[SA6M]: F:Lean形式化说明：math.md信息论论证的推导与检查、文件结构、命题↔定理对照、已发现问题与未形式化边界 | R:code:lean-math/LeanMath.lean,code:math.md | A:- | S:所有定理均lake build验证(无sorry/axiom)；问题10列出未形式化项：CARO复杂度O(·)、超越Mamba经验主张、softmax核近似、GPU实现——属经验/工程断言非定理，修改时不得误标为已证明
+lake-manifest.json[FV2T]: F:lake生成的依赖清单，锁定mathlib4等包的版本、来源与rev，供lake构建可复现解析 | R:- | A:- | S:由lake生成勿手改；改依赖走lakefile.toml后lake update
+lakefile.toml[FV3T]: F:Lean工程定义：包名版本、默认目标LeanMath、lean选项与mathlib4依赖 | R:code:lean-math/LeanMath.lean | A:- | S:lake build默认构建LeanMath全部形式化；mathlib从SJTU镜像拉取
+lean-toolchain[FV2T]: F:固定Lean工具链版本leanprover/lean4:v4.36.0，供elan/lake与CI一致解析 | R:- | A:- | S:升级Lean须同步改本文件，否则lake环境与CI工具链错位
+
+===/<repository>/lean-math/LeanMath/===
+Affine.lean[KA7S]: F:§3.7.3 PSCO数学核心：仿射幺半群与线性递推闭式，对应math.md式(30)-(31)，证明仿射复合结合律与Z^(k)闭式 | R:- | A:- | S:全部定理无sorry/axiom，lake build通过；仿射映射(M,u)的复合(M1M2, M1u2+u1)构成幺半群，是并行扫描(Hillis-Steele)合法的前提；与model/psco.py的associative_scan逐式对应
+AssociativeMemory.lean[KA8M]: F:§2.9替代结构CARO(门控结合扫描算子)的数学核心：把按ρ丢/留→落入Z→在Z中对齐推理折叠进单一仿射结合扫描状态 | R:code:lean-math/LeanMath/Affine.lean | A:update,update_is_affine,stateFrom_readout,residual_zero_iff_reconstructed,fixedPoint,no_collapse | S:全部定理无sorry/axiom，lake build通过；key-similarity B声明为V→ₗ(V→ₗK)故B k q:K；update作用在线性映射空间须实例化PSCO.Aff K (V→ₗ V)而非PSCO.Aff K V；证明内容可寻址读出闭式S_T·q=Σ衰减·B(k_i,q)·v_i、ρ=0⟺v_t恰被历史重建、不动点输入依赖(反塌缩)；复杂度/超越Mamba等经验主张未形式化(见lean-math/README问题10)
+Basic.lean[KA3T]: F:验证mathlib4可用的最小示例：1+1=2 | R:- | A:- | S:-
+Contractive.lean[KA7T]: F:§3.7.1/§3.7.3收缩算子与Neumann级数：ρ(J)<1⇒J^k→0⇒ΣJ^k=(I-J)⁻¹，对应DEQ隐式微分与谱夹层→收缩 | R:- | A:- | S:全部定理无sorry/axiom；收缩映射复合仍收缩(Banach不动点定理)；(I-J)⁻¹=ΣJ^k是BPTT的Σ_{k<L}J^k在L→∞的极限，为model/operator.py的DEQ路径提供根基
+Entropy.lean[KA6T]: F:有限字母表上Shannon熵定义、非负性与最大熵定理，对应math.md式(1)-(2) H(T)≤L log|V| | R:- | A:- | S:从零定义有限分布上的Shannon熵，用Jensen不等式证明最大熵定理；全部定理无sorry/axiom
+FixedPoint.lean[KA6T]: F:§3.7结论状态是变换链不动点的形式化：轨迹稳定⇒不动点；改分量为零(读模式)⇒算子退化为恒等 | R:- | A:- | S:对应math.md §3.7 CoT是状态依赖变换轨迹z_{i+1}=Ψ_{h_i}(z_i)；全部定理无sorry/axiom
+InfoTheory.lean[KA6S]: F:互信息与条件熵的有限字母表形式化及确定性信道命题：T=g(Z)确定时I(Z;T)=H(T)，对应math.md式(3)(15) | R:- | A:- | S:从联合分布出发用链式法则重排定义条件熵与互信息；证明确定性标记不增加熵；全部定理无sorry/axiom
+Lossy.lean[KA6T]: F:命题1/2/10的离散核心：鸽笼原理下确定性映射g:Z→T若码本严格小于源集则必非单射，对应有损性/失真地板/软反馈不竭 | R:- | A:- | S:连续版本依赖微分熵与率失真测度论(mathlib暂缺)，故只形式化离散核心；据机械证明指出math.md一处可改进措辞(见lean-math/README问题5)；全部定理无sorry/axiom
+Numeric.lean[KA4T]: F:数值校验：math.md中出现的位计数常量(熵上界、量化熵、高斯差分熵)，整数部分norm_num精确、对数部分Float近似 | R:- | A:- | S:仅校验数值常量不证明命题；对数用Float近似非精确证明，改math.md数值后须同步复核
+Retraction.lean[KA6S]: F:§4.1.7黎曼流匹配的GPU友好近似(retraction-based)：R_z与指数映射一阶一致，投影retraction=decode–reencode | R:- | A:- | S:对应math.md §4.1.7 R_z(0)=z、dR_z(0)=id、exp_z(v)=R_z(v)+O(‖v‖²)；为model/flow.py软投影(make_projection)提供数学基础；全部定理无sorry/axiom
+Semigroup.lean[KA6S]: F:§3.9算子幺半群与重建/生成形式化：自映射全体在复合下构成幺半群，重建=D(id(Z))、生成=D(Ψ(Z,ω)) | R:- | A:- | S:纯Lean不依赖mathlib证明：Z→Z在函数复合下构成幺半群(结合律+单位元id)；对应命题11；全部定理无sorry/axiom
+
+===/<repository>/model/===
+__init__.py[KA4T]: F:模型包入口：统一导出配置、编码器、解码器、JEPA组装、速度场与表征层 | R:code:model/jepa.py,code:model/encoder.py,code:model/config.py,code:model/flow.py,code:model/representation.py | A:- | S:-
+alignment.py[KA6S]: F:软对齐头(math.md §3.4)：BYOL/DINO投影-预测自蒸馏，替换InfoNCE兜底，只给[CLS]弱对齐不担防塌缩主责 | R:code:model/jepa.py | A:BYOLHead,DINOHead,build_alignment_head,_mlp | S:BYOL用LayerNorm替代原文BatchNorm(小batch更稳)；对齐只在[CLS]聚合token上给弱信号，防塌缩主责在重建+VICReg+交叉掩码；alignment_method=infonce时返回None沿用model.proj
+config.py[KA6S]: F:模型超参与规模预设：MJEPAConfig+PRESETS+build_config，改字段即可在冒烟与大规模间伸缩 | R:code:model/jepa.py,code:training/train.py | A:MJEPAConfig,build_config,PRESETS,vision_patch,width | S:冒烟档hidden_dim=0时width与潜空间d绑定；新增预设须与现有PRESETS同构只调超参不改调用约定；d与d_hidden按1:8解耦由width/n_patches控制
+decoder.py[KA6T]: F:共享解码器(math.md §4)：ImageDecoder R_I与TextDecoder g都接收同形潜token[B,L,d]，把两模态焊在同一坐标系 | R:code:model/encoder.py,code:model/jepa.py | A:ImageDecoder,TextDecoder | S:两解码器主干与编码器同构(transformer/mamba/hybrid，§4.2g对称架构)默认hybrid；图像与文本token都走同一解码器是硬对齐/双向重建的前提
+encoder.py[KA8L]: F:编码器(math.md §2)：E^I/E^T把图文编译进共享连续潜空间Z=[B,L,d]，支持掩码输入，含transformer/mamba/hybrid主干与线性记忆/ρ压缩 | R:code:model/psco.py,code:model/jepa.py,code:model/decoder.py | A:ImageEncoder,TextEncoder,build_backbone,LinearMemory,RhoCompressor,SigLIP2Frontend | S:Z全程连续不量化(§2.6)；SSMBlock的a_t钳在(δ,1-γ)用psco.associative_scan并行扫描O(logL)；LinearMemory的head_dim冻结不随hidden_dim缩放，大模型加head而非放大D(放大D为O(D²)显存平方)；RhoCompressor的ε_ρ取相对阈值(批内均值+z·σ)，因ρ量级随初始化/head_dim/beta漂移；梯度检查点仅在线grad路径做，target在no_grad下跳过
+flow.py[KA7M]: F:Flow Matching(§4.1)：潜空间速度场v_ψ+欧氏OT直线基线+Euler/midpoint/heun采样，含软投影retraction | R:code:model/encoder.py,code:model/jepa.py | A:VelocityField,flow_loss,conditional_flow_loss,euler_sample,make_projection,projection_components | S:当前落地欧氏FM基线(回归速度z1-z0)，测地整流/RFM留后续；z1应为冻结目标潜变量(§4.2e Flow阶段E_ξ冻结只训v_ψ)；V>=d满列秩时软投影P_z=I退化为欧氏；冻结解码器时预计算投影摊销每步
+jepa.py[KA8S]: F:模型组装：双在线/目标编码器+表征层预测器+共享双解码器，forward包成model(...)使loss出自前向以支持DDP | R:code:model/encoder.py,code:model/decoder.py,code:model/representation.py,code:model/operator.py,code:model/flow.py,code:training/losses.py | A:MultimodalJEPA,forward,_forward_flow,_decoder_heads | S:mode=pretrain走编码→对齐/推理→解码全流水线；mode=flow冻结E_ξ/E_θ与解码器只训v_ψ不update_target；包成model(...)使loss出自forward从而可被DDP包装同步梯度
+operator.py[KA7S]: F:PSCO状态依赖收缩算子Ψ_h生产实现(§3.7.3)：瞬态段串行m步+渐近段N步并行扫描，谱夹层保收敛防塌缩 | R:code:model/psco.py,code:model/jepa.py | A:PsiLayer,infer_h,linear_coeffs,transient,asymptotic,smoke | S:a_h∈(δ,1-γ)由make_contractive_a保证；反传默认路径A对扫描autograd(O(logN)深度O(N)显存)，路径B DEQ隐式微分未实现留大规模优化；中/大档可换mamba_ssm.selective_scan或fla(Triton，放pyproject可选extra)
+psco.py[KA7M]: F:PSCO最小可跑原型(纯PyTorch无第三方依赖)：验证并行扫描与顺序迭代一致、收缩收敛、反塌缩 | R:code:model/operator.py | A:associative_scan,associative_scan_mat,make_contractive_a,fixed_point,compose,check_anti_collapse | S:纯torch无第三方依赖可CPU冒烟；associative_scan是通用非对角情形的正确性参考，operator.py生产路径复用它；运行`.venv/bin/python -m model.psco`
+representation.py[KA6T]: F:表征层Z：JEPA潜预测器P_φ、跨模态掩码预测器与目标编码器EMA更新(§2.2/§3.5) | R:code:model/encoder.py,code:model/jepa.py,code:training/train.py | A:LatentPredictor,CrossMaskPredictor,update_target,_ema_params,_ema_thin_params | S:share_trunk=True时共享主干只EMA一次(避免图文都引用同trunk被EMA两次致decay变μ²)，薄接口各自EMA；CrossMaskPredictor防单模态坍缩(命题6)
+
+===/<repository>/scripts/===
+train_on_AutoDL.py[OH7L]: F:AutoDL单卡3b/L=1024全流程：环境自举→ImageNet-1K定位→训练→评测，AutoDL专属行为集中于此，其余复用现有模块 | R:code:training/train.py,code:data_prepare/hf_datasets.py,code:evaluation/metrics.py,code:inference/run.py | A:main,bootstrap,prepare_imagenet,run_train,run_eval,parse_args | S:数据查找顺序：公开(/root/autodl-pub)→共享(--shared-root)→公网下载(HF gated需HF_TOKEN)；按显卡选torch extra(cu126/cu130)；TensorBoard默认写/root/tf-logs；已解压目录只读，仅tar/zip才解压
+
+===/<repository>/training/===
+__init__.py[KA4T]: F:训练包入口：导出损失与训练循环 | R:code:training/losses.py,code:training/train.py | A:- | S:-
+losses.py[KA7M]: F:训练目标与分项损失：编码→对齐/推理→解码前向，含掩码、JEPA余弦、VICReg方差、率失真、软对齐、PSCO防塌缩三道 | R:code:model/flow.py,code:training/train.py,code:model/jepa.py | A:forward_losses,psi_losses,mask_patches,mask_text,variance_loss,rate_loss | S:反塌缩三道=重建+VICReg+交叉掩码；交叉掩码比例随训练ρ_mask(t)=min(end,start+(end-start)·t/T)；rate_loss经b_t→ρ→记忆投影回传使记忆吸收冗余；b为None(未启用ρ压缩)时返回None由调用方置零
+train.py[RA8L]: F:训练入口：数据源装配+分布式训练循环+checkpoint落盘+续训，支持CPU冒烟与GPU多卡bf16 | R:code:model/jepa.py,code:training/losses.py,code:model/representation.py,code:data_prepare/hf_datasets.py,code:data_prepare/ledger.py,code:evaluation/metrics.py | A:train,train_flow_stage,save_checkpoint,main,setup_distributed,build_optimizer | S:DDP下仅前向model(...)走包装同步梯度，其余用_unwrap；resume恢复三套rng，但HF流式shuffle buffer不可序列化，不重复靠台账去重；steps为总步数，resume后须>start_step；Flow阶段冻结E_ξ/E_θ+解码器只训v_ψ，多卡DDP用find_unused_parameters=True；adamw8bit(bitsandbytes)省~50%显存CUDA-only未装降级adamw；bf16落盘(3b约13.7GB)，inference加载自动回fp32
