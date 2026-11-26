@@ -245,6 +245,40 @@ def _find_imagenet(root, share_roots=()):
     return None, None
 
 
+def _find_flickr(root, share_roots=()):
+    """寻找 Flickr30k（含 flickr30k_train.parquet 的目录），用于图文对跨模态续训。
+
+    返回目录 Path 或 None。扫描顺序：环境变量 AUTODL_FLICKR → 共享数据 →
+    公开数据 /root/autodl-pub → 数据盘 /root/autodl-tmp/autodl-pub → 工作目录。
+    """
+    env = os.environ.get("AUTODL_FLICKR", "")
+    if env and Path(env).exists():
+        return Path(env)
+    roots = (
+        tuple(share_roots) + SHARE_DATA_ROOTS
+        + ("/root/autodl-pub", "/root/autodl-tmp/autodl-pub",
+           str(root), str(Path(root) / "data"))
+    )
+    seen = set()
+    for base in roots:
+        key = str(Path(base))
+        if key in seen or not Path(base).is_dir():
+            continue
+        seen.add(key)
+        p = Path(base)
+        cands = [p, p / "Flickr30k", p / "flickr30k", p / "Flicker30k"]
+        for c in cands:
+            if (c / "flickr30k_train.parquet").exists():
+                return c
+        try:
+            for child in p.iterdir():
+                if child.is_dir() and (child / "flickr30k_train.parquet").exists():
+                    return child
+        except OSError:
+            pass
+    return None
+
+
 def _need_space(path, need, what="解压"):
     p = Path(path).resolve()
     while not p.exists() and p != p.parent:
@@ -474,30 +508,58 @@ def prepare_imagenet(root, imagenet_root=None, share_roots=(), download_urls=(),
     return str(train), (str(val) if val else None), classes_file
 
 
-def build_manifest(train_dir, val_dir, classes_file, holdout, manifest_path):
-    train_spec = {
-        "type": "imagefolder", "name": "autodl-imagenet1k-train",
-        "root": train_dir, "classes_file": classes_file,
-        "split": "train" if not val_dir else "all",
-        "holdout": 0 if val_dir else holdout,
-        "templates": TEMPLATES, "weight": 1.0,
-    }
-    eval_spec = {
-        "type": "imagefolder", "name": "autodl-imagenet1k-eval",
-        "root": val_dir or train_dir, "classes_file": classes_file,
-        "split": "all" if val_dir else "holdout",
-        "holdout": 0 if val_dir else holdout,
-        "templates": TEMPLATES[:1], "weight": 1.0,
-    }
+def build_manifest(train_dir, val_dir, classes_file, holdout, manifest_path,
+                   flickr_root=None, flickr_weight=1.0, imagenet_weight=1.0):
+    """构建中档 manifest：ImageNet-1K（类名模板）+ Flickr30k（真实图文对）加权混合。
+
+    Flickr30k 的 parquet 列：image（HF Image 懒加载）/ caption（list[str]，取第 0 条）；
+    提供真实自然语言描述，是 run#1（仅 ImageNet 类名模板）缺失的跨模态对齐信号来源。
+    """
+    train_specs, eval_specs = [], []
+    if train_dir:
+        train_specs.append({
+            "type": "imagefolder", "name": "autodl-imagenet1k-train",
+            "root": train_dir, "classes_file": classes_file,
+            "split": "train" if not val_dir else "all",
+            "holdout": 0 if val_dir else holdout,
+            "templates": TEMPLATES, "weight": float(imagenet_weight),
+        })
+        eval_specs.append({
+            "type": "imagefolder", "name": "autodl-imagenet1k-eval",
+            "root": val_dir or train_dir, "classes_file": classes_file,
+            "split": "all" if val_dir else "holdout",
+            "holdout": 0 if val_dir else holdout,
+            "templates": TEMPLATES[:1], "weight": float(imagenet_weight),
+        })
+    if flickr_root:
+        flickr_root = Path(flickr_root)
+        train_specs.append({
+            "name": "flickr30k-train",
+            "data_files": [str(flickr_root / "flickr30k_train.parquet")],
+            "image_key": "image", "text_key": "caption", "split": "train",
+            "weight": float(flickr_weight),
+        })
+        eval_specs.append({
+            "name": "flickr30k-val",
+            "data_files": [str(flickr_root / "flickr30k_val.parquet")],
+            "image_key": "image", "text_key": "caption", "weight": float(flickr_weight),
+        })
+    if not train_specs:
+        raise SystemExit("manifest 为空：未找到 ImageNet 也未找到 Flickr30k。")
     manifest = {
         "preset": "3b", "image_size": 256, "text_len": 1024,
         "tokenizer": "llada", "llada_model": "GSAI-ML/LLaDA-8B-Instruct",
-        "train": [train_spec], "eval": [eval_spec],
+        "train": train_specs, "eval": eval_specs,
     }
     manifest_path = Path(manifest_path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[ImageNet] manifest: {manifest_path}（holdout={0 if val_dir else holdout}/类）")
+    parts = []
+    if train_dir:
+        parts.append(f"imagenet(w={imagenet_weight})")
+    if flickr_root:
+        parts.append(f"flickr30k(w={flickr_weight})")
+    print(f"[manifest] {manifest_path}：{' + '.join(parts)}（holdout={0 if val_dir else holdout}/类）")
     return manifest_path
 
 
@@ -549,7 +611,13 @@ def run_train(args, manifest_path, ckpt, logdir):
         "--eval-samples", str(args.eval_samples), "--seed", str(args.seed),
         "--logdir", str(logdir),
     ]
-    print(f"[train] optim={optim} batch={args.batch_size} steps={args.steps}+{args.flow_steps}")
+    if args.resume:
+        argv += ["--resume", str(args.resume)]
+    if args.save_every:
+        argv += ["--save-every", str(args.save_every)]
+    print(f"[train] optim={optim} batch={args.batch_size} steps={args.steps}+{args.flow_steps}"
+          + (f" | resume={args.resume}" if args.resume else "")
+          + (f" | save_every={args.save_every}" if args.save_every else ""))
     old = sys.argv
     sys.argv = argv
     try:
@@ -608,6 +676,21 @@ def parse_args():
     p.add_argument("--force-setup", action="store_true")
     p.add_argument("--skip-train", action="store_true")
     p.add_argument("--skip-eval", action="store_true")
+    # —— resume 续训：从 checkpoint 恢复 cfg/权重/优化器/步数，继续训练 ——
+    p.add_argument("--resume", type=str, default="",
+                   help="从该 checkpoint 续训（恢复权重/优化器/步数）；steps 会自动 bump 到 ckpt 步 + --resume-extra-steps")
+    p.add_argument("--resume-extra-steps", type=int, default=10000,
+                   help="resume 时若 --steps 不大于 ckpt 步数，自动追加的训练步数（默认 10000）")
+    p.add_argument("--save-every", type=int, default=0,
+                   help="每 N 步原子落盘（0=仅结束时）；长跑防中断丢进度")
+    # —— Flickr30k（真实图文对，跨模态对齐信号）——
+    p.add_argument("--flickr-root", type=str, default="",
+                   help="显式指定 Flickr30k 目录（含 flickr30k_train.parquet）；默认按 公开数据→数据盘 自动发现")
+    p.add_argument("--no-flickr", action="store_true", help="manifest 不加入 Flickr30k")
+    p.add_argument("--no-imagenet", action="store_true",
+                   help="manifest 不加入 ImageNet（纯 Flickr 续训时用，避免再跑已训过的 ImageNet）")
+    p.add_argument("--flickr-weight", type=float, default=1.0, help="Flickr30k 在混合 manifest 中的采样权重")
+    p.add_argument("--imagenet-weight", type=float, default=1.0, help="ImageNet 在混合 manifest 中的采样权重")
     return p.parse_args()
 
 
@@ -639,15 +722,35 @@ def main():
         print(f"[gpu] {torch.cuda.get_device_name(0)} "
               f"{torch.cuda.get_device_properties(0).total_memory / 2**30:.0f}GiB")
 
-    # —— 1. ImageNet-1K（公开数据 → 共享数据 → 公网下载）——
-    train_dir, val_dir, classes_file = prepare_imagenet(
-        root, args.imagenet_root or None,
-        share_roots=args.shared_root,
-        download_urls=[u.strip() for u in args.download_urls.split(",") if u.strip()],
-        download_limit=args.download_limit,
-    )
+    # —— resume：自动把 --steps bump 到 ckpt 步 + 增量，避免 steps<=start_step 时训练空转 ——
+    if args.resume:
+        resume_blob = torch.load(args.resume, map_location="cpu", weights_only=False)
+        ckpt_step = int(resume_blob.get("step", 0))
+        del resume_blob
+        if args.steps <= ckpt_step:
+            args.steps = ckpt_step + args.resume_extra_steps
+        print(f"[resume] 从 {args.resume} 续训：ckpt_step={ckpt_step} → 目标 steps={args.steps}")
+
+    # —— 1. 数据装配：ImageNet-1K（公开数据 → 共享数据 → 公网下载）+ Flickr30k（自动发现）——
+    train_dir = val_dir = classes_file = None
+    if not args.no_imagenet:
+        train_dir, val_dir, classes_file = prepare_imagenet(
+            root, args.imagenet_root or None,
+            share_roots=args.shared_root,
+            download_urls=[u.strip() for u in args.download_urls.split(",") if u.strip()],
+            download_limit=args.download_limit,
+        )
+    flickr_root = None
+    if not args.no_flickr:
+        flickr_root = args.flickr_root or _find_flickr(root, args.shared_root)
+        if flickr_root:
+            print(f"[Flickr30k] 数据来源: {flickr_root}")
+        else:
+            print("[Flickr30k] 未找到（--no-flickr 可关闭此提示）；仅用 ImageNet")
     manifest_path = Path(args.manifest) if args.manifest else root / "data" / "autodl_manifest.json"
-    build_manifest(train_dir, val_dir, classes_file, args.holdout, manifest_path)
+    build_manifest(train_dir, val_dir, classes_file, args.holdout, manifest_path,
+                   flickr_root=flickr_root, flickr_weight=args.flickr_weight,
+                   imagenet_weight=args.imagenet_weight)
 
     ckpt = Path(args.ckpt) if args.ckpt else root / "runs" / "jepa_3b_l1024.pt"
     ckpt.parent.mkdir(parents=True, exist_ok=True)

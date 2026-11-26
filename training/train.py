@@ -228,11 +228,15 @@ def make_writer(logdir, rank=0):
 
 
 def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", rank=0,
-          writer=None, optimizer=None, start_step=0):
+          writer=None, optimizer=None, start_step=0,
+          save_path=None, save_every=0, save_dtype="fp32", vocab_size=0, tokenizer_meta=None):
     """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。
 
     resume 时传入已恢复状态的 optimizer 与 start_step，从 start_step+1 继续；
     steps 为「绝对目标总步数」，resume 后应 > start_step，否则本函数跳过主训练。
+
+    save_every>0 时每 save_every 步原子落盘（写 .tmp 再 os.replace），防止长跑中断
+    （OOM/重启/手动停止）丢失全部进度；同一路径覆盖，磁盘只占一份 checkpoint。
     """
     model.train()
     raw = _unwrap(model)
@@ -270,10 +274,19 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
             if cfg.pac_enabled:
                 writer.add_scalar("train/p_anchor", pac_anchor_prob(step, steps, cfg), step)
 
+        # 周期性原子落盘：写 .tmp 后 os.replace，存盘中途崩溃也不会损坏旧 checkpoint。
+        if rank == 0 and save_path and save_every > 0 and step % save_every == 0 and step < steps:
+            tmp = save_path + ".tmp"
+            save_checkpoint(tmp, raw, cfg, vocab_size, tokenizer_meta=tokenizer_meta,
+                            save_dtype=save_dtype, optimizer=optimizer, step=step,
+                            rng_state=_capture_rng())
+            os.replace(tmp, save_path)
+            print(f"[ckpt] 周期保存 step {step} → {save_path}", flush=True)
+
         if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
             detail = " ".join(f"{k}={v.item():.3f}" for k, v in parts.items())
             extra = f" | p_anchor={pac_anchor_prob(step, steps, cfg):.3f}" if cfg.pac_enabled else ""
-            print(f"step {step:4d} | loss {loss.item():.4f} | {detail}{extra}")
+            print(f"step {step:4d} | loss {loss.item():.4f} | {detail}{extra}", flush=True)
     return model
 
 
@@ -315,7 +328,7 @@ def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, 
                 _log_scalar(f"flow/{k}", v.item(), step)
         if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
             print(f"flow-stage {step:4d} | flow {parts['flow'].item():.4f} "
-                  f"| flow_cond {parts['flow_cond'].item():.4f}")
+                  f"| flow_cond {parts['flow_cond'].item():.4f}", flush=True)
     return model
 
 
@@ -444,6 +457,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save", type=str, default="")  # 例如 runs/mjepa.pt
     parser.add_argument("--save-dtype", choices=["fp32", "bf16"], default="fp32")  # 落盘精度（bf16 省一半磁盘）
+    parser.add_argument("--save-every", type=int, default=0)  # 每 N 步原子落盘（0=仅结束时）；长跑防中断丢进度
     parser.add_argument("--resume", type=str, default="")  # 从 checkpoint 续训：恢复 cfg/权重/优化器/步数/rng
     parser.add_argument("--ledger", type=str, default="")  # 数据台账 SQLite 路径（空=关闭；记录已训练数据集）
     # TensorBoard：默认开启，事件写入 --logdir（空字符串关闭）；AutoDL 用 /root/tf-logs
@@ -559,7 +573,7 @@ def main():
         # resume：优先从 checkpoint 恢复词表，保证 vocab 一致；vocab_size 稍后统一用 checkpoint 值。
         tokenizer_meta = resume_blob["tokenizer_meta"]
         tokenizer = _restore_tokenizer(resume_blob)
-        pad_id, mask_id = tokenizer.pad_id, tokenizer.mask_id
+        pad_id, mask_id, vocab_size = tokenizer.pad_id, tokenizer.mask_id, tokenizer.vocab_size
     elif args.tokenizer == "llada":
         tokenizer = LLaDATokenizer(args.llada_model)
         pad_id, mask_id, vocab_size = tokenizer.pad_id, tokenizer.mask_id, tokenizer.vocab_size
@@ -647,7 +661,9 @@ def main():
         optimizer.load_state_dict(resume_blob["optimizer"])
 
     train(model, batch_fn, pad_id, mask_id, device, args.steps, args.lr, optim=args.optim,
-          rank=rank, writer=writer, optimizer=optimizer, start_step=start_step)
+          rank=rank, writer=writer, optimizer=optimizer, start_step=start_step,
+          save_path=args.save or None, save_every=args.save_every, save_dtype=args.save_dtype,
+          vocab_size=vocab_size, tokenizer_meta=tokenizer_meta)
 
     if args.flow_stage_steps > 0:
         if rank == 0:
@@ -657,10 +673,13 @@ def main():
 
     if rank == 0 and args.save:
         # DDP 下 state_dict 键带 "module." 前缀，落盘前解包回裸模型，供 inference 直接加载。
-        save_checkpoint(args.save, _unwrap(model), cfg, vocab_size,
+        # 原子落盘：写 .tmp 再 os.replace，存盘中途崩溃不损坏既有 checkpoint。
+        tmp = args.save + ".tmp"
+        save_checkpoint(tmp, _unwrap(model), cfg, vocab_size,
                         tokenizer_meta=tokenizer_meta, save_dtype=args.save_dtype,
                         optimizer=optimizer, step=max(start_step, args.steps),
                         rng_state=_capture_rng())
+        os.replace(tmp, args.save)
 
     # —— 数据台账收尾：记录本次训练会话 + 累加数据集进度（仅 rank0）——
     if rank == 0 and ledger is not None:
