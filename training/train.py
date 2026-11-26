@@ -239,6 +239,16 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
     cfg = raw.cfg
     if optimizer is None:
         optimizer = make_optimizer(model, lr, optim)
+    ema_state = {}
+
+    def _log_scalar(tag, val, step):
+        # 原始值 + EMA 平滑值双写：原始曲线保留诊断尖峰，_ema 曲线压平小 batch 噪声便于读趋势
+        prev = ema_state.get(tag, val)
+        cur = 0.95 * prev + 0.05 * val
+        ema_state[tag] = cur
+        writer.add_scalar(tag, val, step)
+        writer.add_scalar(tag + "_ema", cur, step)
+
     for step in range(start_step + 1, steps + 1):
         img, txt = batch_fn()
         with maybe_autocast(device):
@@ -251,9 +261,9 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
         update_target(raw, cfg.ema_decay)
 
         if writer is not None:
-            writer.add_scalar("train/loss", loss.item(), step)
+            _log_scalar("train/loss", loss.item(), step)
             for k, v in parts.items():
-                writer.add_scalar(f"train/{k}", v.item(), step)
+                _log_scalar(f"train/{k}", v.item(), step)
             cur_lr = optimizer.param_groups[0].get("lr")
             if cur_lr is not None:
                 writer.add_scalar("train/lr", cur_lr, step)
@@ -283,6 +293,15 @@ def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, 
     optimizer = build_optimizer(
         [p for p in raw.velocity.parameters() if p.requires_grad], lr, optim
     )
+    ema_state = {}
+
+    def _log_scalar(tag, val, step):
+        prev = ema_state.get(tag, val)
+        cur = 0.95 * prev + 0.05 * val
+        ema_state[tag] = cur
+        writer.add_scalar(tag, val, step)
+        writer.add_scalar(tag + "_ema", cur, step)
+
     for step in range(1, steps + 1):
         img, txt = batch_fn()
         with maybe_autocast(device):
@@ -291,9 +310,9 @@ def train_flow_stage(model, batch_fn, device, steps, lr, optim="adamw", rank=0, 
         loss.backward()
         optimizer.step()
         if writer is not None:
-            writer.add_scalar("flow/loss", loss.item(), step)
+            _log_scalar("flow/loss", loss.item(), step)
             for k, v in parts.items():
-                writer.add_scalar(f"flow/{k}", v.item(), step)
+                _log_scalar(f"flow/{k}", v.item(), step)
         if rank == 0 and (step == 1 or step % 25 == 0 or step == steps):
             print(f"flow-stage {step:4d} | flow {parts['flow'].item():.4f} "
                   f"| flow_cond {parts['flow_cond'].item():.4f}")
