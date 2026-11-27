@@ -279,6 +279,37 @@ def _find_flickr(root, share_roots=()):
     return None
 
 
+def _find_coco(root, share_roots=()):
+    """寻找 COCO Captions（含 train-*.parquet 的目录），566k 条真实图文对。
+
+    扫描顺序：环境变量 AUTODL_COCO → 工作目录 /root/datasets → 共享数据 → 公开数据。
+    """
+    env = os.environ.get("AUTODL_COCO", "")
+    if env and Path(env).exists():
+        return Path(env)
+    roots = (
+        "/root/datasets", str(root), str(Path(root) / "data"),
+    ) + tuple(share_roots) + SHARE_DATA_ROOTS + ("/root/autodl-pub", "/root/autodl-tmp/autodl-pub")
+    seen = set()
+    for base in roots:
+        key = str(Path(base))
+        if key in seen or not Path(base).is_dir():
+            continue
+        seen.add(key)
+        p = Path(base)
+        cands = [p, p / "COCO_captions", p / "coco_captions", p / "COCO"]
+        for c in cands:
+            if list(c.glob("train-*.parquet")):
+                return c
+        try:
+            for child in p.iterdir():
+                if child.is_dir() and list(child.glob("train-*.parquet")):
+                    return child
+        except OSError:
+            pass
+    return None
+
+
 def _need_space(path, need, what="解压"):
     p = Path(path).resolve()
     while not p.exists() and p != p.parent:
@@ -509,11 +540,13 @@ def prepare_imagenet(root, imagenet_root=None, share_roots=(), download_urls=(),
 
 
 def build_manifest(train_dir, val_dir, classes_file, holdout, manifest_path,
-                   flickr_root=None, flickr_weight=1.0, imagenet_weight=1.0):
-    """构建中档 manifest：ImageNet-1K（类名模板）+ Flickr30k（真实图文对）加权混合。
+                   flickr_root=None, flickr_weight=1.0, imagenet_weight=1.0,
+                   coco_root=None, coco_weight=1.0):
+    """构建中档 manifest：ImageNet-1K（类名模板）+ Flickr30k + COCO（真实图文对）加权混合。
 
-    Flickr30k 的 parquet 列：image（HF Image 懒加载）/ caption（list[str]，取第 0 条）；
-    提供真实自然语言描述，是 run#1（仅 ImageNet 类名模板）缺失的跨模态对齐信号来源。
+    Flickr30k / COCO 的 parquet 列：image（HF Image 懒加载）/ caption（Flickr 为 list[str]
+    取第 0 条、COCO 为 str）；二者提供真实自然语言描述，是 run#1（仅 ImageNet 类名模板）
+    缺失的跨模态对齐信号来源。
     """
     train_specs, eval_specs = [], []
     if train_dir:
@@ -544,8 +577,18 @@ def build_manifest(train_dir, val_dir, classes_file, holdout, manifest_path,
             "data_files": [str(flickr_root / "flickr30k_val.parquet")],
             "image_key": "image", "text_key": "caption", "weight": float(flickr_weight),
         })
+    if coco_root:
+        coco_root = Path(coco_root)
+        coco_files = sorted(str(p) for p in coco_root.glob("*.parquet"))
+        if coco_files:
+            train_specs.append({
+                "name": "coco-train",
+                "data_files": coco_files,
+                "image_key": "image", "text_key": "caption", "split": "train",
+                "weight": float(coco_weight),
+            })
     if not train_specs:
-        raise SystemExit("manifest 为空：未找到 ImageNet 也未找到 Flickr30k。")
+        raise SystemExit("manifest 为空：未找到 ImageNet / Flickr30k / COCO。")
     manifest = {
         "preset": "3b", "image_size": 256, "text_len": 1024,
         "tokenizer": "llada", "llada_model": "GSAI-ML/LLaDA-8B-Instruct",
@@ -554,11 +597,14 @@ def build_manifest(train_dir, val_dir, classes_file, holdout, manifest_path,
     manifest_path = Path(manifest_path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    coco_added = bool(coco_root and list(Path(coco_root).glob("*.parquet")))
     parts = []
     if train_dir:
         parts.append(f"imagenet(w={imagenet_weight})")
     if flickr_root:
         parts.append(f"flickr30k(w={flickr_weight})")
+    if coco_added:
+        parts.append(f"coco(w={coco_weight})")
     print(f"[manifest] {manifest_path}：{' + '.join(parts)}（holdout={0 if val_dir else holdout}/类）")
     return manifest_path
 
@@ -613,19 +659,23 @@ def run_train(args, manifest_path, ckpt, logdir):
     ]
     if args.rho:
         # token 层 ρ 压缩（§2.6 / §3.4.2 先写后压）：--rho 开启，课程 S1 冻结 ρ 记忆、S2 解冻。
+        # rho_eps_z / rho_rate_weight 未显式指定时不传 → 由 model/config.py 默认值接管（单一事实源）；
+        # 显式传入则覆盖 config 默认，保留调参能力。
         argv += [
             "--rho-compress",
             "--rho-head-dim", str(args.rho_head_dim),
             "--rho-beta", str(args.rho_beta),
             "--rho-eps", str(args.rho_eps),
-            "--rho-eps-z", str(args.rho_eps_z),
             "--rho-eps-keep", str(args.rho_eps_keep),
             "--rho-b-a", str(args.rho_b_a),
             "--rho-b-c", str(args.rho_b_c),
             "--rho-b-min", str(args.rho_b_min),
             "--rho-b-max", str(args.rho_b_max),
-            "--rho-rate-weight", str(args.rho_rate_weight),
         ]
+        if args.rho_eps_z is not None:
+            argv += ["--rho-eps-z", str(args.rho_eps_z)]
+        if args.rho_rate_weight is not None:
+            argv += ["--rho-rate-weight", str(args.rho_rate_weight)]
     if args.resume:
         argv += ["--resume", str(args.resume)]
     if args.save_every:
@@ -706,18 +756,25 @@ def parse_args():
                    help="manifest 不加入 ImageNet（纯 Flickr 续训时用，避免再跑已训过的 ImageNet）")
     p.add_argument("--flickr-weight", type=float, default=1.0, help="Flickr30k 在混合 manifest 中的采样权重")
     p.add_argument("--imagenet-weight", type=float, default=1.0, help="ImageNet 在混合 manifest 中的采样权重")
+    # —— COCO Captions（真实图文对，566k 条）——
+    p.add_argument("--coco-root", type=str, default="",
+                   help="显式指定 COCO Captions 目录（含 train-*.parquet）；默认自动发现 /root/datasets/COCO_captions 等")
+    p.add_argument("--no-coco", action="store_true", help="manifest 不加入 COCO")
+    p.add_argument("--coco-weight", type=float, default=1.0, help="COCO 在混合 manifest 中的采样权重")
     # —— token 层 ρ 压缩（§2.6 / §3.4.2 先写后压）：--rho 开启；课程 S1 冻结 ρ 记忆、S2 解冻 + 码率 warmup ——
     p.add_argument("--rho", action="store_true", help="开启 token 层 ρ 压缩（先写后压课程）")
     p.add_argument("--rho-head-dim", type=int, default=64, help="ρ 记忆 M 的 k/v 维度（冻结，O(D²) 显存）")
     p.add_argument("--rho-beta", type=float, default=0.1, help="delta rule 写入率")
     p.add_argument("--rho-eps", type=float, default=0.0, help="绝对阈值（0 禁用，改相对阈值）")
-    p.add_argument("--rho-eps-z", type=float, default=0.5, help="相对阈值 z-score：ε_ρ=批内均值+z·σ")
+    p.add_argument("--rho-eps-z", type=float, default=None,
+                   help="相对阈值 z-score：ε_ρ=批内均值+z·σ（不指定则用 config 默认 0.5）")
     p.add_argument("--rho-eps-keep", type=float, default=0.02, help="ε 强制采样比例（防自我强化退化）")
     p.add_argument("--rho-b-a", type=float, default=1.0, help="b_t surprisal 系数 a")
     p.add_argument("--rho-b-c", type=float, default=0.5, help="b_t 条件熵代理系数 c")
     p.add_argument("--rho-b-min", type=float, default=0.0, help="b_t clamp 下界")
     p.add_argument("--rho-b-max", type=float, default=4.0, help="b_t clamp 上界")
-    p.add_argument("--rho-rate-weight", type=float, default=0.1, help="码率正则权重 λ（R+λD）")
+    p.add_argument("--rho-rate-weight", type=float, default=None,
+                   help="码率正则权重 λ（R+λD，不指定则用 config 默认 0.1）")
     return p.parse_args()
 
 
@@ -774,10 +831,18 @@ def main():
             print(f"[Flickr30k] 数据来源: {flickr_root}")
         else:
             print("[Flickr30k] 未找到（--no-flickr 可关闭此提示）；仅用 ImageNet")
+    coco_root = None
+    if not args.no_coco:
+        coco_root = args.coco_root or _find_coco(root, args.shared_root)
+        if coco_root:
+            print(f"[COCO] 数据来源: {coco_root}")
+        else:
+            print("[COCO] 未找到（--no-coco 可关闭此提示）")
     manifest_path = Path(args.manifest) if args.manifest else root / "data" / "autodl_manifest.json"
     build_manifest(train_dir, val_dir, classes_file, args.holdout, manifest_path,
                    flickr_root=flickr_root, flickr_weight=args.flickr_weight,
-                   imagenet_weight=args.imagenet_weight)
+                   imagenet_weight=args.imagenet_weight,
+                   coco_root=coco_root, coco_weight=args.coco_weight)
 
     ckpt = Path(args.ckpt) if args.ckpt else root / "runs" / "jepa_3b_l1024.pt"
     ckpt.parent.mkdir(parents=True, exist_ok=True)

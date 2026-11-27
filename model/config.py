@@ -32,14 +32,14 @@ class MJEPAConfig:
     rho_head_dim: int = 64      # 记忆 M 的 k/v 维度（冻结，不随 hidden_dim 缩放，§2.6）。
     rho_beta: float = 0.1       # delta rule 写入率。
     rho_eps: float = 0.0        # 绝对阈值（默认 0 禁用，改相对阈值 rho_eps_z）。
-    rho_eps_z: float = 0.0      # 相对阈值 z-score：ε_ρ = 批内均值 + z·σ（ρ 绝对量级随初始化/head_dim 变，须相对标定）。
+    rho_eps_z: float = 0.5      # 相对阈值 z-score：ε_ρ = 批内均值 + z·σ（--rho-compress 开启时的默认行为；z=0.5 取自 math.md §2.6 建议扫描范围 {-0.5,0,0.5,1.0}，目标 keep∈[0.3,0.7]）。
     rho_eps_keep: float = 0.02  # ε 强制采样比例（防「丢弃→学不到」自我强化退化）。
     # 比特门控 b_t = clamp(a·log(1/p(ρ)) + c·H(x|rest), b_min, b_max)（§2.6 式 665）
     rho_b_a: float = 1.0        # surprisal 系数（ρ 的分布罕见度）。
     rho_b_c: float = 0.5        # 条件熵代理系数（ρ 作 H 上界代理，§2.6「测差值别估熵」）。
     rho_b_min: float = 0.0      # b_t clamp 下界。
     rho_b_max: float = 4.0      # b_t clamp 上界。
-    rho_rate_weight: float = 0.0  # 码率正则权重（§2.6 式 665）：R=mean(b_t)，与重建失真构成 R+λD。
+    rho_rate_weight: float = 0.1  # 码率正则权重 λ（§2.6 式 665，R+λD）；--rho-compress 开启时的默认值。课程 §3.4.2 在 t<curriculum_rho_start 时门控为 0，故默认权重不与「先写后压」冲突。
     ema_decay: float = 0.99    # 目标编码器的 EMA 系数 μ。
     mask_ratio: float = 0.5    # JEPA 掩码比例。
     temperature: float = 0.07  # InfoNCE 温度。
