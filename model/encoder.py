@@ -4,6 +4,8 @@ E^I 与 E^T 各自把模态编译进同一个连续潜空间 Z = [B, L, d]，并
 （图像换 mask_token、文本换 mask_id），供 JEPA 潜预测使用。
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -223,12 +225,14 @@ class RhoCompressor(nn.Module):
     """
 
     def __init__(self, dim, head_dim=64, beta=0.1, eps_rho=0.0, eps_z=0.0,
-                 eps_keep=0.02, b_a=1.0, b_c=0.5, b_min=0.0, b_max=4.0):
+                 eps_keep=0.02, b_a=1.0, b_c=0.5, b_min=0.0, b_max=4.0,
+                 eps_keep_modal=0.0):
         super().__init__()
         self.memory = LinearMemory(dim, head_dim, beta)
         self.eps_rho = eps_rho    # 绝对阈值（0 禁用）
         self.eps_z = eps_z        # 相对阈值 z-score
-        self.eps_keep = eps_keep  # ε 强制采样比例
+        self.eps_keep = eps_keep  # ε 强制采样比例（token 级）
+        self.eps_keep_modal = eps_keep_modal  # §8.6 式 57 模态级保留下界 ε_m（0=关闭）
         self.b_a = b_a
         self.b_c = b_c
         self.b_min = b_min
@@ -265,8 +269,34 @@ class RhoCompressor(nn.Module):
             drop = ~keep
             force = drop & (torch.rand_like(rho) < self.eps_keep)
             keep = keep | force
+        if self.eps_keep_modal > 0:  # §8.6 式 57：模态层保留下界（防整模态被裁 → 模态饥饿）
+            keep = self._enforce_modal_keep(keep)
         x_tilde = torch.where(keep.unsqueeze(-1), x, mask_token)
         return x_tilde, keep, rho, b_t
+
+    def _enforce_modal_keep(self, keep):
+        """§8.6 式 57 模态级保留下界：keep.mean() < ε_m 时从 drop 中随机补足到 ε_m。
+
+        与 token 级 eps_keep（drop 内 ε 比例强制保留）不同，这里是**全模态 keep_ratio 的硬下界**：
+        跨模态 ρ 若把某模态信息判为「恒被其它模态覆盖」而整体裁掉，该模态前端梯度→0 → 编码器塌缩，
+        到推理时覆盖模态被遮挡即单点失效。补足到 ε_m 给「暂时冗余但结构必需」的通道留一条梯度通路。
+        """
+        cur = keep.float().mean()
+        if cur >= self.eps_keep_modal:
+            return keep
+        drop = ~keep
+        n_drop = int(drop.sum().item())
+        if n_drop == 0:
+            return keep
+        total = keep.numel()
+        n_need = int(math.ceil((self.eps_keep_modal - cur) * total))
+        n_need = min(n_need, n_drop)
+        if n_need <= 0:
+            return keep
+        drop_idx = drop.nonzero(as_tuple=False)            # [n_drop, 2]
+        perm = torch.randperm(n_drop, device=keep.device)[:n_need]
+        keep[drop_idx[perm, 0], drop_idx[perm, 1]] = True
+        return keep
 
 
 class SigLIP2Frontend(nn.Module):
@@ -323,7 +353,7 @@ class ImageEncoder(nn.Module):
                  freeze_vision=True, rho_compress=False, rho_head_dim=64,
                  rho_beta=0.1, rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
                  rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0,
-                 grad_checkpoint=False, shared_encoder=None):
+                 rho_eps_keep_modal=0.0, grad_checkpoint=False, shared_encoder=None):
         super().__init__()
         hidden_dim = hidden_dim or dim
         self.frontend = image_frontend
@@ -345,7 +375,8 @@ class ImageEncoder(nn.Module):
         # token 层 ρ 压缩（§2.6）：私有记忆 M，图像模态一份。
         self.rho_compressor = (
             RhoCompressor(hidden_dim, rho_head_dim, rho_beta, rho_eps, rho_eps_z,
-                          rho_eps_keep, rho_b_a, rho_b_c, rho_b_min, rho_b_max)
+                          rho_eps_keep, rho_b_a, rho_b_c, rho_b_min, rho_b_max,
+                          rho_eps_keep_modal)
             if rho_compress else None
         )
         self.last_keep = None  # 供测试/可视化读取最近一次的 ρ 判据
@@ -383,7 +414,7 @@ class TextEncoder(nn.Module):
                  rho_compress=False, rho_head_dim=64, rho_beta=0.1,
                  rho_eps=0.0, rho_eps_z=0.0, rho_eps_keep=0.02,
                  rho_b_a=1.0, rho_b_c=0.5, rho_b_min=0.0, rho_b_max=4.0,
-                 embed_factor=0, grad_checkpoint=False, shared_encoder=None):
+                 rho_eps_keep_modal=0.0, embed_factor=0, grad_checkpoint=False, shared_encoder=None):
         super().__init__()
         hidden_dim = hidden_dim or dim
         # 词嵌入低秩分解（§2.2.7，ALBERT factorized embedding）：V×H → V×F + F×H。
@@ -406,7 +437,8 @@ class TextEncoder(nn.Module):
         # token 层 ρ 压缩（§2.6）：私有记忆 M，文本模态一份。
         self.rho_compressor = (
             RhoCompressor(hidden_dim, rho_head_dim, rho_beta, rho_eps, rho_eps_z,
-                          rho_eps_keep, rho_b_a, rho_b_c, rho_b_min, rho_b_max)
+                          rho_eps_keep, rho_b_a, rho_b_c, rho_b_min, rho_b_max,
+                          rho_eps_keep_modal)
             if rho_compress else None
         )
         self.last_keep = None

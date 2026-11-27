@@ -32,7 +32,11 @@ def variance_loss(z):
 
 
 def covariance_loss(z):
-    """VICReg 协方差约束（§2.2.4 补）：惩罚维度间协方差，防维度冗余塌缩。z: [B,d]。"""
+    """VICReg 协方差约束（§2.2.4(c)）：惩罚维度间协方差，防维度冗余/低秩塌缩。z: [N,d]。
+
+    N 可为 batch（对齐投影空间，CLS 每样本一行）或 batch×位置（token 序列 Z 摊平），
+    二者语义一致：把 d 维潜空间的维度间去相关，迫使信息沿 d 个维度铺开而非挤进低秩子空间。
+    """
     z = z - z.mean(dim=0, keepdim=True)
     cov = (z.t() @ z) / max(z.size(0) - 1, 1)
     d = cov.size(0)
@@ -170,33 +174,49 @@ def curriculum_gates(step, total_steps, cfg):
 
 
 def psi_losses(model, img_z, txt_z, img_ctx, txt_ctx, img_tgt, txt_tgt):
-    """PSCO 算子（§3.7.3 + §3.7）损失：防塌缩三道 + 推理两目标。
+    """PSCO 算子（§3.7.3 + §3.7）损失：防塌缩五道 + 推理两目标。
 
     - readout（防线 2）：读出头锚定 Z* 重建输入 Z（塌成常数则重建不了）；
     - var（防线 3）：方差正则，防维度塌缩；
+    - h_var/h_cov（防线 4）：h=H(Z) 的信息量约束（VICReg 方差 + 协方差），防 h 塌缩为常数
+      使算子退化为常值映射；
+    - nontriv（防线 5）：轨迹非平凡性，瞬态段首步位移下界，防算子首步跳不动点；
     - stop（§3.7 L_stop）：不动点/停止正则，Ψ_h(Z_clean)≈Z_clean，读端 g_change→0 退化为恒等；
     - consist（§3.7 L_consist）：路径无关一致性，Ψ_h(Z_ctx)≈Z_tgt，改端把上下文变换到目标。
 
-    返回按模态拆分的 (readout_i, readout_t, var_i, var_t, stop_i, stop_t,
-    consist_i, consist_t, img_ctx_star, txt_ctx_star)；供 forward_losses 做 PAC 模态门控与
-    课程阶段门控（改端 consist/gen 在 S1/S2 置 0）。
+    返回按模态拆分的 dict；供 forward_losses 做 PAC 模态门控与课程阶段门控
+    （读端 readout/var/stop/h_var/h_cov 属 psi_read 门控，改端 consist/gen/nontriv 属 psi_change 门控）。
     """
+    out = {}
     img_star = model.psi_layer(img_z)
     txt_star = model.psi_layer(txt_z)
-    readout_i = (model.psi_layer.readout(img_star) - img_z).pow(2).mean()
-    readout_t = (model.psi_layer.readout(txt_star) - txt_z).pow(2).mean()
-    var_i = variance_loss(img_star)
-    var_t = variance_loss(txt_star)
+    out["readout_i"] = (model.psi_layer.readout(img_star) - img_z).pow(2).mean()
+    out["readout_t"] = (model.psi_layer.readout(txt_star) - txt_z).pow(2).mean()
+    out["var_i"] = variance_loss(img_star)
+    out["var_t"] = variance_loss(txt_star)
     # §3.7 L_stop：干净 Z 已是不动点（读端恒等，改分量 g_change→0）
-    stop_i = (img_star - img_z).pow(2).mean()
-    stop_t = (txt_star - txt_z).pow(2).mean()
+    out["stop_i"] = (img_star - img_z).pow(2).mean()
+    out["stop_t"] = (txt_star - txt_z).pow(2).mean()
+    # §3.7.3 防线 4：h 信息量约束（VICReg 方差 + 协方差，防 h 塌缩为常数 → 算子退化为常值映射）
+    h_i = model.psi_layer.infer_h(img_z)
+    h_t = model.psi_layer.infer_h(txt_z)
+    out["h_var_i"] = variance_loss(h_i)
+    out["h_var_t"] = variance_loss(h_t)
+    out["h_cov_i"] = covariance_loss(h_i)
+    out["h_cov_t"] = covariance_loss(h_t)
     # §3.7 L_consist：算子把掩码上下文变换到干净目标（改端，改分量 g_change→1）
     img_ctx_star = model.psi_layer(img_ctx)
     txt_ctx_star = model.psi_layer(txt_ctx)
-    consist_i = (img_ctx_star - img_tgt).pow(2).mean()
-    consist_t = (txt_ctx_star - txt_tgt).pow(2).mean()
-    return (readout_i, readout_t, var_i, var_t, stop_i, stop_t,
-            consist_i, consist_t, img_ctx_star, txt_ctx_star)
+    out["consist_i"] = (img_ctx_star - img_tgt).pow(2).mean()
+    out["consist_t"] = (txt_ctx_star - txt_tgt).pow(2).mean()
+    # §3.7.3 防线 5：轨迹非平凡性（改端瞬态段首步位移下界，防算子首步跳不动点）
+    disp_i = model.psi_layer.first_step_disp(img_ctx)
+    disp_t = model.psi_layer.first_step_disp(txt_ctx)
+    out["nontriv_i"] = F.relu(model.cfg.psi_nontriv_eps - disp_i)
+    out["nontriv_t"] = F.relu(model.cfg.psi_nontriv_eps - disp_t)
+    out["img_ctx_star"] = img_ctx_star
+    out["txt_ctx_star"] = txt_ctx_star
+    return out
 
 
 def maybe_autocast(device):
@@ -277,6 +297,11 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     align = alignment_loss(model, img_cls, txt_cls)
     var_i = variance_loss(img_tokens)
     var_t = variance_loss(txt_tokens)
+    # —— token 序列 Z 的协方差去相关（§2.2.4(c) 补足）：原协方差只作用在对齐投影空间（CLS），
+    #    而 token 序列（重建 + JEPA 的核心潜变量）只受方差约束、无去相关，仍可低秩塌缩。
+    #    方差管「每个维度有足够方差」，协方差管「维度间不冗余」，二者合起来才是完整 VICReg。
+    cov_i = covariance_loss(img_tokens.reshape(-1, img_tokens.size(-1)))
+    cov_t = covariance_loss(txt_tokens.reshape(-1, txt_tokens.size(-1)))
     # —— 对齐投影空间反塌缩（VICReg 方差 + 协方差）：补足 BYOL 余弦 + LayerNorm 无防塌缩的缺口。
     #    math.md §2.2.4 ⚠️ 已指出「余弦 + EMA 不能排除塌缩」；CLS 只受对齐损失监督，故需在此显式正则。
     align_var = torch.zeros((), device=device)
@@ -309,18 +334,25 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         cross_pred_i = cosine_loss(cm_pred_img, img_tgt)
         cross_pred_t = cosine_loss(cm_pred_txt, txt_tgt)
 
-    # —— PSCO 算子（§3.7.3 + §3.7）：防塌缩三道 + 推理两目标（L_stop / L_consist）——
+    # —— PSCO 算子（§3.7.3 + §3.7）：防塌缩五道 + 推理两目标（L_stop / L_consist）——
     psi_readout_i = psi_readout_t = torch.zeros((), device=device)
     psi_var_i = psi_var_t = torch.zeros((), device=device)
     psi_stop_i = psi_stop_t = torch.zeros((), device=device)
     psi_consist_i = psi_consist_t = torch.zeros((), device=device)
     psi_gen_i = psi_gen_t = torch.zeros((), device=device)
+    psi_h_var_i = psi_h_var_t = torch.zeros((), device=device)
+    psi_h_cov_i = psi_h_cov_t = torch.zeros((), device=device)
+    psi_nontriv_i = psi_nontriv_t = torch.zeros((), device=device)
     if cfg.psi_enabled and model.psi_layer is not None:
-        (psi_readout_i, psi_readout_t, psi_var_i, psi_var_t,
-         psi_stop_i, psi_stop_t, psi_consist_i, psi_consist_t,
-         img_ctx_star, txt_ctx_star) = psi_losses(
-            model, img_tokens, txt_tokens, img_ctx, txt_ctx, img_tgt, txt_tgt
-        )
+        p = psi_losses(model, img_tokens, txt_tokens, img_ctx, txt_ctx, img_tgt, txt_tgt)
+        psi_readout_i, psi_readout_t = p["readout_i"], p["readout_t"]
+        psi_var_i, psi_var_t = p["var_i"], p["var_t"]
+        psi_stop_i, psi_stop_t = p["stop_i"], p["stop_t"]
+        psi_consist_i, psi_consist_t = p["consist_i"], p["consist_t"]
+        psi_h_var_i, psi_h_var_t = p["h_var_i"], p["h_var_t"]
+        psi_h_cov_i, psi_h_cov_t = p["h_cov_i"], p["h_cov_t"]
+        psi_nontriv_i, psi_nontriv_t = p["nontriv_i"], p["nontriv_t"]
+        img_ctx_star, txt_ctx_star = p["img_ctx_star"], p["txt_ctx_star"]
         # §3.9 生成 = D(Ψ(Z))：把算子不动点 Z*=Ψ(Z_ctx)（掩码上下文的完成）解码回目标
         img_gen = model.image_decoder(img_ctx_star)
         txt_gen = model.text_decoder(txt_ctx_star)
@@ -347,6 +379,7 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.cross_weight * mscale(recon_img_cross, recon_txt_cross)
         + cfg.align_weight * align
         + cfg.var_weight * mscale(var_i, var_t)
+        + cfg.cov_weight * mscale(cov_i, cov_t)
         + cfg.align_var_weight * align_var
         + cfg.align_cov_weight * align_cov
         + cfg.cls_readout_weight * mscale(cls_readout_i, cls_readout_t)
@@ -354,8 +387,11 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.cross_mask_weight * mscale(cross_pred_i, cross_pred_t)
         + cfg.psi_readout_weight * mscale(psi_readout_i, psi_readout_t) * gates["psi_read"]
         + cfg.psi_var_weight * mscale(psi_var_i, psi_var_t) * gates["psi_read"]
+        + cfg.psi_h_var_weight * mscale(psi_h_var_i, psi_h_var_t) * gates["psi_read"]
+        + cfg.psi_h_cov_weight * mscale(psi_h_cov_i, psi_h_cov_t) * gates["psi_read"]
         + cfg.psi_stop_weight * mscale(psi_stop_i, psi_stop_t) * gates["psi_read"]
         + cfg.psi_consist_weight * mscale(psi_consist_i, psi_consist_t) * gates["psi_change"]
+        + cfg.psi_nontriv_weight * mscale(psi_nontriv_i, psi_nontriv_t) * gates["psi_change"]
         + cfg.psi_gen_weight * mscale(psi_gen_i, psi_gen_t) * gates["psi_change"]
         + cfg.flow_weight * mscale(flow_i, flow_t)
         + cfg.flow_cond_weight * mscale(flow_cond_i, flow_cond_t)
@@ -363,15 +399,18 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     parts = {
         "jepa": jepa_i + jepa_t, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
-        "align": align, "var": var_i + var_t, "rate": rate,
+        "align": align, "var": var_i + var_t, "cov": cov_i + cov_t, "rate": rate,
         "align_var": align_var, "align_cov": align_cov,
         "cls_readout": cls_readout_i + cls_readout_t,
         "cross_pred": cross_pred_i + cross_pred_t,
         "psi_readout": psi_readout_i + psi_readout_t,
         "psi_var": psi_var_i + psi_var_t,
+        "psi_h_var": (psi_h_var_i + psi_h_var_t) * gates["psi_read"],
+        "psi_h_cov": (psi_h_cov_i + psi_h_cov_t) * gates["psi_read"],
         "psi_stop": psi_stop_i + psi_stop_t,
-        # 改端（consist/gen）记入阶段门控后的值：S1/S2 为 0，S3 起非 0（课程可观测）
+        # 改端（consist/nontriv/gen）记入阶段门控后的值：S1/S2 为 0，S3 起非 0（课程可观测）
         "psi_consist": (psi_consist_i + psi_consist_t) * gates["psi_change"],
+        "psi_nontriv": (psi_nontriv_i + psi_nontriv_t) * gates["psi_change"],
         "psi_gen": (psi_gen_i + psi_gen_t) * gates["psi_change"],
         "flow": (flow_i + flow_t) * gates["flow"],
         "flow_cond": (flow_cond_i + flow_cond_t) * gates["flow"],

@@ -34,6 +34,7 @@ class MJEPAConfig:
     rho_eps: float = 0.0        # 绝对阈值（默认 0 禁用，改相对阈值 rho_eps_z）。
     rho_eps_z: float = 0.5      # 相对阈值 z-score：ε_ρ = 批内均值 + z·σ（--rho-compress 开启时的默认行为；z=0.5 取自 math.md §2.6 建议扫描范围 {-0.5,0,0.5,1.0}，目标 keep∈[0.3,0.7]）。
     rho_eps_keep: float = 0.02  # ε 强制采样比例（防「丢弃→学不到」自我强化退化）。
+    rho_eps_keep_modal: float = 0.0  # §8.6 式 57：每模态保留比例下界 ε_m（0=关闭；>0 时强制 keep.mean()≥ε_m，防「模态饥饿」整模态被裁）
     # 比特门控 b_t = clamp(a·log(1/p(ρ)) + c·H(x|rest), b_min, b_max)（§2.6 式 665）
     rho_b_a: float = 1.0        # surprisal 系数（ρ 的分布罕见度）。
     rho_b_c: float = 0.5        # 条件熵代理系数（ρ 作 H 上界代理，§2.6「测差值别估熵」）。
@@ -49,8 +50,9 @@ class MJEPAConfig:
     cross_weight: float = 0.5   # 硬对齐（双向重建）权重。
     align_weight: float = 0.1   # InfoNCE 软对齐权重。
     var_weight: float = 0.1     # VICReg 方差正则（防塌缩，作用在 token 序列上）。
-    align_var_weight: float = 0.1  # VICReg 方差正则（作用在对齐投影空间 g_θ(CLS)，防 CLS 投影塌缩；§2.2.4(b) 式 36 的补足）。
-    align_cov_weight: float = 0.1  # VICReg 协方差正则（惩罚对齐投影维度间协方差，防维度冗余塌缩）。
+    cov_weight: float = 0.1     # VICReg 协方差正则（作用在 token 序列 Z 上，防维度冗余/低秩塌缩；§2.2.4(c) 补足：原协方差只作用在对齐投影空间）。
+    align_var_weight: float = 0.3  # VICReg 方差正则（作用在对齐投影空间 g_θ(CLS)，防 CLS 投影塌缩；§2.2.4(b) 式 36 的补足）。实测 CLS 投影方差偏弱，0.1→0.3。
+    align_cov_weight: float = 0.3  # VICReg 协方差正则（惩罚对齐投影维度间协方差，防维度冗余塌缩）。
     cls_readout_weight: float = 0.3  # CLS 读出头锚定（§3.7.3 防线 2）：CLS 预测池化目标 token，给 CLS 非退化锚点。
 
     # —— 对齐方法（§3.4）：跨模态软对齐信号源，默认 BYOL（无负样本、无 batch 依赖）——
@@ -90,6 +92,12 @@ class MJEPAConfig:
     psi_stop_weight: float = 0.1     # §3.7 L_stop 不动点/停止正则：Ψ_h(Z_clean)≈Z_clean（读端退化为恒等）
     psi_consist_weight: float = 0.1  # §3.7 L_consist 路径无关一致性：Ψ_h(Z_ctx)≈Z_tgt（改端变换到目标）
     psi_gen_weight: float = 0.1      # §3.9 生成 = D(Ψ(Z))：解码算子不动点 Z*=Ψ(Z_ctx) 重建目标（接通「算子→不动点→解码→生成」）
+    # —— §3.7.3 防线 4：h 信息量约束（VICReg 方差 + 协方差，防 h 塌缩为常数 → 算子退化为常值映射）——
+    psi_h_var_weight: float = 0.5    # h 的方差下界 relu(1−σ_j)：σ=0（常数塌缩）处取严格正值 1（Lean 已证 AntiCollapse.lean）。实测 h 塌缩最严重，0.1→0.5。
+    psi_h_cov_weight: float = 0.3    # h 的协方差去相关：防 h 各维度冗余、退化为低秩子空间
+    # —— §3.7.3 防线 5：轨迹非平凡性（瞬态段首步位移下界，防算子首步跳不动点/瞬态段被跳过）——
+    psi_nontriv_weight: float = 0.1  # 首步位移下界惩罚权重
+    psi_nontriv_eps: float = 0.1     # 首步位移下界阈值（设计断言，须实测标定）
 
     # —— Flow Matching（§4.1）：潜空间速度场 v_ψ，欧氏 OT 直线基线（测地整流/RFM 后续阶段）——
     flow_enabled: bool = True        # 启用速度场（§4.1.2 无条件生成，z_0=噪声 → z_1=冻结目标 Z）

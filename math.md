@@ -420,7 +420,7 @@ $$\xi \leftarrow \mu\,\xi + (1-\mu)\,\theta, \qquad \mu = 0.99.$$
 
 #### 2.2.4 防塌缩的两道附加约束（源码中的关键设计）
 
-> ⚠️ 严谨说明：余弦损失 + EMA 本身**并不能完全排除塌缩**——若在线编码器把所有位置映到同一常向量 $a$，预测器输出 $a$，目标经 EMA 也趋于 $a$，仍有 $\cos(a,a)=1$、损失为 0。因此本模型真正的塌缩防线是下面两项。防塌缩在本框架分三层：本节为**表征层**，**模态层**见 §3.4（交叉掩码），**算子层**见 §3.7.3（谱夹层 + 读出头 + 方差），三层总表见 §3.7.3。
+> ⚠️ 严谨说明：余弦损失 + EMA 本身**并不能完全排除塌缩**——若在线编码器把所有位置映到同一常向量 $a$，预测器输出 $a$，目标经 EMA 也趋于 $a$，仍有 $\cos(a,a)=1$、损失为 0。因此本模型真正的塌缩防线是下面两项。防塌缩在本框架分三层：本节为**表征层**，**模态层**见 §3.4（交叉掩码），**算子层**见 §3.7.3（谱夹层 + 读出头 + 方差），三层总表与缺口改进见 §2.2.8（整合）。
 
 **(a) 重建损失（主要防线；文本侧交叉熵、图像侧均方误差）**
 
@@ -436,11 +436,11 @@ $$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1-\sigma_j)\bigr],\
 
 > **作用对象修正（表征塌缩修复）**：上式 $\sigma_j$ 原仅作用于 token 序列 $Z\in\mathbb R^{L\times d}$（`var_weight`）。但 `[CLS]` 聚合 token 只受软对齐损失 $\mathcal L_{\text{align}}$ 监督，而 BYOL 余弦目标存在平凡退化解（所有 `[CLS]` 投影坍为同一常数、`cos=1`、损失为 0），且 BYOL 投影器以 LayerNorm 替代 BatchNorm（小 batch 更稳）后失去了 BN 的隐式反塌缩——实测 `[CLS]` 投影方差坍到 $\sim10^{-4}$ 而 token 序列 `var` 仍守住（序列受重建损失约束、`[CLS]` 不受）。故把方差正则**同时施加到对齐投影空间 $g_\theta(\texttt{CLS})$**（`align_var_weight`），直接约束塌缩发生的空间。Lean 已验证：`varPenalty(σ)=relu(1-σ)` 在 `σ=0`（常数塌缩）处取严格正值 `1`，故常数解不可能是零损失极小点（见 `lean-math/LeanMath/AntiCollapse.lean`）。
 
-**(c) VICReg 风格协方差约束（维度去冗余）**：对对齐投影表征 $Z_c\in\mathbb R^{B\times d}$（居中后）算 $d\times d$ 协方差矩阵，惩罚非对角元素的平方和
+**(c) VICReg 风格协方差约束（维度去冗余）**：对居中后的表征算 $d\times d$ 协方差矩阵，惩罚非对角元素的平方和
 
-$$\mathcal{L}_{\text{cov}} = \frac1d\sum_{i\neq j} C_{ij}^2,\qquad C = \frac{Z_c^\top Z_c}{B-1},$$
+$$\mathcal{L}_{\text{cov}} = \frac1d\sum_{i\neq j} C_{ij}^2,\qquad C = \frac{Z^\top Z}{N-1},$$
 
-防止不同潜维度退化为彼此冗余（维度塌缩的另一形态）；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `covariance_loss`（`align_cov_weight`）。与 (b) 合起来构成 VICReg 的完整「方差 + 去相关」正则（VICReg 三项中的两项；不变量项即 $\mathcal L_{\text{align}}$）。
+防止不同潜维度退化为彼此冗余（维度塌缩的另一形态）；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `covariance_loss`。**作用对象（本文档本次修订补足）**：该项此前仅作用于对齐投影表征 $Z_c\in\mathbb R^{B\times d}$（`align_cov_weight`，每样本一行）；但 token 序列 $Z\in\mathbb R^{L\times d}$——重建与 JEPA 的核心潜变量——只受方差约束 (b)、**无去相关**，仍可低秩塌缩（各维度高度相关、信息挤进低秩子空间而方差检验不报警）。故把协方差约束同时施加到摊平后的 token 序列 $\mathrm{reshape}(Z,[-1,d])$（`cov_weight`，每 token 一行），使 (b)(c) 合起来对 token 序列构成完整 VICReg「方差 + 去相关」（VICReg 三项中的两项；不变量项即 $\mathcal L_{\text{align}}$）。
 
 **(d) CLS 读出头锚定（非退化锚点）**：`[CLS]` 聚合 token 原仅受软对齐损失监督（欠监督 → 退化塌缩），现加读出头 $r(\cdot)$，令 CLS 预测**池化目标 token**（目标编码器 token 序列的均值池化，重建锚定、输入特定）：
 
@@ -450,9 +450,9 @@ $$\mathcal{L}_{\text{cls-readout}} = \|r(\texttt{img\_cls}) - \mathrm{pool}(Z_{y
 
 阶段一总目标（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`，图文双模态各取一组）：
 
-$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}} + 0.1\,\mathcal{L}_{\text{align-var}} + 0.1\,\mathcal{L}_{\text{align-cov}} + 0.3\,\mathcal{L}_{\text{cls-readout}},$$
+$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}} + 0.1\,\mathcal{L}_{\text{cov}} + 0.3\,\mathcal{L}_{\text{align-var}} + 0.3\,\mathcal{L}_{\text{align-cov}} + 0.3\,\mathcal{L}_{\text{cls-readout}},$$
 
-其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的软对齐（§3.4，默认 BYOL）；$\mathcal{L}_{\text{align-var}}$、$\mathcal{L}_{\text{align-cov}}$ 是对齐投影空间的方差/协方差正则（见 (b)(c)）；$\mathcal{L}_{\text{cls-readout}}$ 是 CLS 读出头锚定（见 (d)）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`、`align_var_weight=0.1`、`align_cov_weight=0.1`、`cls_readout_weight=0.3`。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
+其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的软对齐（§3.4，默认 BYOL）；$\mathcal{L}_{\text{var}}$、$\mathcal{L}_{\text{cov}}$ 是 token 序列 $Z$ 的方差/协方差正则（见 (b)(c)，后者为本次补足）；$\mathcal{L}_{\text{align-var}}$、$\mathcal{L}_{\text{align-cov}}$ 是对齐投影空间的方差/协方差正则（见 (b)(c)）；$\mathcal{L}_{\text{cls-readout}}$ 是 CLS 读出头锚定（见 (d)）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`、`cov_weight=0.1`、`align_var_weight=0.3`、`align_cov_weight=0.3`、`cls_readout_weight=0.3`（`align_var/align_cov` 因实测 CLS 投影方差偏弱、由 0.1 提至 0.3）。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
 
 #### 2.2.5 编码器主干的候选选型（测试不理想时的备选路径）
 
@@ -578,6 +578,38 @@ class LLaDATokenizer:
 **词表扩展对比例的影响**：$d:d_{\text{hidden}}=1:8$ 的比例与 $|V|$ 大小无关（只要 $|V|\gg d$）。词表从字符级（合成语料）→ 12.6 万的实际影响只有两处：(i) embedding 层参数量 $|V|\times d_{\text{hidden}}$（7B 档约 $12.6\text{万}\times4096\approx5.2\text{亿}$，占 ~7.4%，需计入参数量预算或对 embedding 层单独处理）；(ii) 拉回度量秩上界从字符级放宽到 $\min(|V|,d)=d$，方案 (a)/(c) 不再受词表约束。
 
 **结论（3B–7B）**：主干 $d_{\text{hidden}}=3072$（3B）/ $4096$（7B），潜空间 $d=384$（3B）/ $512$（7B），即 $r=8$ 等比例缩放，词表用 LLaDA 现成 tokenizer（内置 mask id）。潜空间 $d$ 的最终值仍须按 §2.2.6 的实验判据实测（$I(Z;Y)$ 饱和点 + $\widehat{\mathrm{Var}}(Z\mid T)$），比例 $r$ 可在 $[4,16]$ 内据实调整。
+
+#### 2.2.8 防塌缩机制整合（三层总表 + 缺口与改进方向）
+
+本小节把散落在 §2.2.4（表征层）、§3.4（模态层）、§3.7.3（算子层）、§2.6（ε 采样）与 §8.6（模态饥饿）的反塌缩机制整合为一张总表，并标注当前实现缺口与改进方向。**塌缩的共性根因**可归结为一句话：*模型找到一个使损失为零、却不携带输入信息的平凡解*——余弦目标与 EMA 的常数退化解（§2.2.4 ⚠️）、算子 $\tilde A_h\to0$ 一步抹信息的强收缩解（§3.7.3）、或跨模态 $\rho$ 裁掉整模态的「模态饥饿」（§8.6）。所有防线都在同一件事上使力：**强制表征 / 算子 / 模态保留输入依赖性**。
+
+**三层总表（每行 = 一条防线；「缺口」= 当前实现相对数学契约的不足）。**
+
+| 层 | 防线 | 数学表述 / 位置 | 代码 | 权重 | 缺口与改进方向 |
+|---|---|---|---|---|---|
+| 表征 | (a) 重建损失 | §2.2.4(a) 式 (34) | [losses.py](file:///home/simon-ma/JEPA/training/losses.py) `recon_img_self/recon_txt_self` | `recon_weight=1.0` | 主力；图像为像素 MSE、文本为 CE。**改进**：可用 §2.2.6 拉回度量 / 解码器分布对齐替换欧氏 MSE（同纤维零惩罚） |
+| 表征 | (b) 方差正则 | §2.2.4(b) 式 (36) | `variance_loss`（`var_weight`） | 0.1 | 只防「维度方差→0」，不防「低秩」。**改进**：方差下界可从固定 $\sigma=1$ 改为自适应/归一化方差 |
+| 表征 | (c) 协方差去相关 | §2.2.4(c) 式 (37) | `covariance_loss`（`cov_weight` token 序列 + `align_cov_weight` 对齐空间） | 0.1 / 0.3 | **本次补足**：原仅作用于对齐投影空间，token 序列 $Z$ 无去相关、可低秩塌缩；现已同时施加到摊平 token 序列 |
+| 表征 | (d) CLS 读出头锚定 | §2.2.4(d) 式 (38) | `cls_readout`（`cls_readout_weight`） | 0.3 | 给仅受软对齐监督的 `[CLS]` 一个非退化锚点。**改进**：可推广为「读出头预测重建 token」而非仅池化目标 |
+| 表征 | EMA + stop-gradient | §2.2.3 式 (31) | [representation.py](file:///home/simon-ma/JEPA/model/representation.py) `update_target` | $\mu=0.99$ | 必要但非充分（§2.2.4 ⚠️）；**改进**：可加入 target 更新动量调度（早期小 $\mu$ 更快追随、后期趋冻结） |
+| 模态 | 交叉掩码 | §3.2 命题 6 / 式 (18) | `CrossMaskPredictor`（`cross_mask_weight`） | 1.0 | 防单模态坍缩。**改进**：图像改 block mask、文本切 BPE 后改 span mask（§2.2.1 表） |
+| 模态 | PAC 锚定课程 | §3.4 式 (21) | `build_param_groups`/`apply_pac_schedule` | 分层 lr | 锚定 ≠ 冻结；当前 `pac_anchor_prob` 仅缩放损失权重（近似单模态投喂，§3.4.1 偏离 1） |
+| 模态 | 跨模态 $\rho$ 反饥饿 | §8.6 式 (57) | `RhoCompressor.eps_keep_modal`（模态级下界）+ `eps_keep`（token 层 ε） | 0.0 / 0.02 | **本次实装**：`_enforce_modal_keep` 强制 $\mathbb E[\mathrm{keep}_{m,t}]\ge\varepsilon_m$；默认 0 关闭（随 `rho_compress` 启用） |
+| 算子 | 谱夹层 | §3.7.3 式 (39) | [psco.py](file:///home/simon-ma/JEPA/model/psco.py) `make_contractive_a` | $\delta=0.05,\gamma=0.10$ | 上界保收敛、下界封死 $\tilde A_h\to0$；**已由 psco 冒烟验证** |
+| 算子 | 不动点读出头锚定 | §3.7.3 防线 2 | `PsiLayer.readout`（`psi_readout_weight`） | 0.1 | 强制 $Z^*$ 携带输入信息 |
+| 算子 | 方差正则 | §3.7.3 防线 3 | `psi_var`（`psi_var_weight`） | 0.1 | 防算子不动点维度塌缩 |
+| 算子 | $h$ 信息量约束 | §3.7.3 防线 4 | `psi_h_var`/`psi_h_cov`（`psi_h_var_weight`/`psi_h_cov_weight`） | 0.5 / 0.3 | **本次实装**：对 $h$ 的 VICReg 方差+协方差，防 $h$ 塌缩为常数/低秩（h 塌缩最严重，var 提至 0.5） |
+| 算子 | 轨迹非平凡性 | §3.7.3 防线 5 | `PsiLayer.first_step_disp` + `psi_nontriv`（`psi_nontriv_weight`/`psi_nontriv_eps`） | 0.1 | **本次实装**：瞬态段首步位移下界 hinge，防算子首步跳不动点 |
+
+**改进方向的优先级排序（据「快速塌缩」的实际症状）。** 三条最高杠杆、最贴近现行契约的改进：
+
+1. **完整 VICReg 落地到 token 序列 $Z$（本次已做）。** 方差 (b) 只保证「每维有方差」，不保证「维度间不冗余」；缺失协方差时表征可整体滑向一个低秩子空间而方差检验不报警——这是中等规模下最常见、最隐蔽的塌缩形态。补上 `cov_weight` 后 token 序列与对齐空间都具备「方差 + 去相关」，与 JEPA 余弦（不变量项）合成完整 VICReg。
+
+2. **算子层 $h$ 的信息量约束 + 轨迹非平凡性（防线 4/5，本次已实装）。** §3.7.3 已把「塌缩本质 = 算子失去输入依赖性」说透；防线 4（对 $h$ 的 VICReg 方差+协方差）封死「$h$ 退化为常数 → $\Psi_h$ 变常值映射」，防线 5（瞬态段首步位移下界）封死「算子首步跳不动点 → 瞬态段/非线性残差失去梯度」。二者作为读端 / 改端门控接入 §3.4.2 课程。
+
+3. **BYOL 对齐头的 collapse-free 化。** 当前 `BYOLHead` 用 LayerNorm 替代原文 BatchNorm（小 batch 更稳），却失去了 BN 的隐式反塌缩（§2.2.4「作用对象修正」已指出），靠 `align_var/align_cov/cls_readout` 补。更稳的路线是默认切 DINO（教师 EMA + centering + 锐化，`DINOHead` 已存在），centering 天然抑制教师输出塌缩；或对 `[CLS]` 投影空间加 Barlow Twins 式在线/目标互相关去对角。
+
+**监控判据（早发现塌缩）。** 训练中应持续观测以下诊断量（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `stats` 已输出部分）：`z_std_img/txt`（每维跨样本标准差，趋 0 = 维度塌缩）、`cross_cos_sim`（配对余弦趋 1 且方差趋 0 = 全体表征坍为一点）、`align_var/align_cov`（对齐空间健康度）、`keep_ratio_img/txt`（ρ 是否空转）、以及 [train.py](file:///home/simon-ma/JEPA/training/train.py) 的 `grad_norm`（某分支梯度为 0 是塌缩前兆）。**〔设计断言〕** 塌缩的「预警阈值」（如 `z_std < 10^{-2}` 持续 $w$ 步）尚未形式化，依赖实测。
 
 ### 2.3 纤维几何与数据处理不等式（验证有损性）
 
@@ -1621,13 +1653,13 @@ PSCO 不替代 reflow，而是给 reflow 提供一个**有据可依、能自适�
 | 模态坍缩 | 某模态被另一模态/共享表征吞并 | 对齐目标单侧收敛、交叉掩码缺位（防线见 §3.4） |
 | 算子塌缩 | $\Psi_h\to\mathrm{id}$（$\tilde A_h\to1$）或常值映射 | 模型学到「不做计算 / 恒等」的最省力解 |
 
-五道防线（前三道已在 [`psco.py`](file:///home/simon-ma/JEPA/model/psco.py) 验证，后两道留作扩展）：
+五道防线（五道均已落码：前三道在 [`psco.py`](file:///home/simon-ma/JEPA/model/psco.py) / [`operator.py`](file:///home/simon-ma/JEPA/model/operator.py)，后两道本次补入 [`losses.py`](file:///home/simon-ma/JEPA/training/losses.py) / [`operator.py`](file:///home/simon-ma/JEPA/model/operator.py)）：
 
 1. **谱夹层（spectral sandwich）** 逐维 $\delta<\tilde a_{h,i}<1-\gamma$（等价于 $\rho(\tilde A_h)<1-\gamma$ 且 $\min_i\tilde a_{h,i}>\delta$）：上界保收敛（§3.7.1 收缩条件），下界 $\delta$ 封死「$\tilde A_h\to0$ 一步塌成一点」这条最阴的路径——只给上界时模型会学 $\tilde A_h\to0$，一步把所有 $Z$ 拉到共享 $b_h$，轨迹不再区分输入。参数化取 $\tilde A_h=\operatorname{diag}\big(\delta+(1-\gamma-\delta)\,\sigma(h)\big)$，逐维钳进 $(\delta,1-\gamma)$。
 2. **不动点读出头锚定**：$Z^*$ 必须能预测任务目标 $\mathcal L_{\text{readout}}=\|r(Z^*)-\tilde Z_y\|^2$（$r$ 为读出头）。塌成常数就预测不了，梯度把 $Z^*$ 重新推开。对应 §3.8 的预测目标与 §3.7 的 $\mathcal L_{\text{consist}}$。
 3. **方差正则**：对 $Z^*$ 每维标准差设下限 $\mathcal L_{\text{var}}=\mathrm{relu}(1-\sigma_j)$（同 §2.2.4(b) 式 (36)），防维度塌缩。
-4. **$h$ 的信息量约束**：$a_h,b_h$ 由 $h$ 自推断；若 $h$ 网络塌缩（所有输入同一 $h$），算子退化为常值。把 $h$ 接一个判别/预测任务（或 DIB 约束 §2.5）强制 $h$ 随输入变化。
-5. **轨迹非平凡性**：扫描物化整条轨迹，加「首步位移 / 轨迹长度」下限惩罚，防算子第一步就跳到不动点（瞬态段 $m$ 步被跳过）。对应 §2.6「ε 强制采样」防自我强化退化。
+4. **$h$ 的信息量约束**：$a_h,b_h,g$ 由 $h$ 自推断；若 $h$ 网络塌缩（所有输入同一 $h$），算子退化为常值映射。落地为对 $h\in\mathbb R^{B\times d}$ 的 VICReg「方差 + 协方差」正则（与 §2.2.4(b)(c) 同源，作用于隐含模式而非 token）：$$\mathcal L_{h\text{-var}}=\mathbb E_j\big[\mathrm{relu}(1-\sigma_j^h)\big],\qquad \mathcal L_{h\text{-cov}}=\tfrac1d\sum_{i\neq j}(C^h)_{ij}^2,$$ 其中 $\sigma_j^h$、$C^h$ 为 $h$ 在 batch 维的边际标准差与协方差。方差下界封死「$h$→常数」，协方差封死「$h$→低秩子空间」，二者合起来强制 $h$ 随输入变化。见 [`losses.py`](file:///home/simon-ma/JEPA/training/losses.py) `psi_h_var`/`psi_h_cov`（`psi_h_var_weight`/`psi_h_cov_weight`，读端 `psi_read` 门控）。
+5. **轨迹非平凡性**：扫描物化整条轨迹，加「首步位移」下限惩罚，防算子第一步就跳到不动点（瞬态段 $m$ 步被跳过、非线性残差 $r_h$ 失去梯度）。落地为对瞬态段第 1 步位移的 hinge：$$\mathcal L_{\text{nontriv}}=\mathrm{relu}\big(\varepsilon-\|\text{gg}\odot(\tilde A_h Z+b_h)\|\big),$$ 其中 $\tilde A_h=\operatorname{diag}(a_h-1)$、位移为 $z_1-z_0$ 的 batch×位置均值。见 [`operator.py`](file:///home/simon-ma/JEPA/model/operator.py) `PsiLayer.first_step_disp` 与 [`losses.py`](file:///home/simon-ma/JEPA/training/losses.py) `psi_nontriv`（`psi_nontriv_weight`/`psi_nontriv_eps`，改端 `psi_change` 门控）。**〔设计断言〕** 阈值 $\varepsilon$ 依赖 $d$ 与初始化，须实测标定。
 
 一句话：**塌缩本质是「算子失去输入依赖性」——$\tilde A_h\to0$ 强收缩抹信息，或 $b_h$ 退成常数共享吸引子。谱夹层管 $\tilde A_h$ 的健康区间，读出头锚定强制 $Z^*$ 携带输入信息，方差正则管维度分布，三者合起来保证不动点不塌成一点。**
 
@@ -2777,6 +2809,8 @@ $$\mathbb{E}[\mathrm{keep}_{m,t}] \ge \epsilon_m > 0,\qquad m=1,\dots,K. \tag{57
 
 (57) 是 §2.6 ε 强制采样从「token 层」到「模态层」的推广（§2.6 是 2–5% 低 $\rho$ 保留，(57) 是每模态最低保留比例），并与 §3.4 PAC 的「分层 lr / 锚定 ≠ 冻结」同源：都是给「信息暂时冗余但结构上必需」的通道留一条梯度通路。
 
+**落地注记（本次实装）**：每模态一个 `RhoCompressor` 实例（image/text 各一），(57) 的 $\epsilon_m$ 即该实例的 `rho_eps_keep_modal`；`RhoCompressor._enforce_modal_keep` 在 `keep.mean()<\epsilon_m` 时从 drop 集合随机补足到 $\epsilon_m$。与 token 级 `eps_keep`（drop 内 ε 比例强制保留）的区别：后者是「被丢 token 的 ε 抽样」，前者是「全模态保留比例的硬下界」。默认 `rho_eps_keep_modal=0`（关闭，随 `rho_compress` 一并启用），因跨模态 $\rho$ 压缩（§8）本身尚未实装、当前无模态饥饿触发条件。
+
 ### 8.7 规模缩减到底省在哪
 
 对照 §2.2.7 的参数量公式与三档规则，把「缩减模型规模」拆成可检验的三项：
@@ -2796,7 +2830,7 @@ $$\mathbb{E}[\mathrm{keep}_{m,t}] \ge \epsilon_m > 0,\qquad m=1,\dots,K. \tag{57
 | $Z$ 全程连续（§2.6 接口契约） | ✅ | 丢/留发生在 token 层、$E$ 之前，$E$ 输出仍连续 $Z$ |
 | 不施加语义量化瓶颈（§2.6） | ✅ | 门控是 token 级布尔掩码，非 $Z$ 量化 |
 | 有损只发生在 token 层（§2.6） | ⚠️ 部分修订 | 跨模态 $\rho$ 把「语义冗余」也提前到 token 层裁，§8.5 已论证这不违反 §2.6 本意（判据在共享语义空间） |
-| 反塌缩（§2.2.4 / §2.6 ε / §3.2 命题 6） | ⚠️ 需新增 (57) | 跨模态 $\rho$ 引入模态饥饿，须加每模态保留下界 |
+| 反塌缩（§2.2.4 / §2.6 ε / §3.2 命题 6） | ✅ 已实装 (57) | 跨模态 $\rho$ 的模态饥饿下界经 `rho_eps_keep_modal` 落地（默认关闭，随 $\rho$ 压缩启用） |
 
 ### 8.9 结论与落地判据
 

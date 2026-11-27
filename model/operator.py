@@ -62,9 +62,6 @@ class PsiLayer(nn.Module):
             )
         # 读出头（防线 2）：锚定 Z* 保留输入信息（塌成常数则无法重建）
         self.readout = nn.Linear(dim, dim)
-        # h 信息量约束读出头（防线 4）：h=H(Z) 必须能重建池化输入 Z，
-        # 强制 h 随输入变化（h 塌成常数则读不出不同输入，算子退化为常值映射）。
-        self.h_readout = nn.Linear(dim, dim)
 
     def infer_h(self, z):
         """z: [B, L, d] → h: [B, d]（沿序列池化）。"""
@@ -88,6 +85,21 @@ class PsiLayer(nn.Module):
                 inc = inc + self.residual_mlp(z)
             z = z + gg * inc
         return z
+
+    def first_step_disp(self, z):
+        """瞬态段第 1 步位移（§3.7.3 防线 5：轨迹非平凡性）。
+
+        返回 ‖z_1 − z_0‖ 的 batch×位置均值（z_1 为瞬态段第 1 步输出）。
+        若算子首步就跳到不动点（g_change→0 或 a_h→1, b→0），位移→0，瞬态段被跳过、
+        非线性残差 r_h 失去梯度（对应 §2.6「ε 强制采样」防自我强化退化的算子层类比）。
+        防线 5 用 relu(ε − disp) 惩罚位移过小，把算子从「不做计算」的最省力解推开。
+        """
+        h = self.infer_h(z)
+        a_h, b_h, g = self.linear_coeffs(h)
+        inc = (a_h.unsqueeze(1) - 1.0) * z + b_h.unsqueeze(1)  # 第 1 步增量（不含门控）
+        if self.residual_mlp is not None:
+            inc = inc + self.residual_mlp(z)
+        return (g.unsqueeze(1) * inc).norm(dim=-1).mean()  # [B,L]→标量（‖z_1−z_0‖ 均值）
 
     def asymptotic(self, z, a_h, b_h):
         """渐近段：N 步线性骨架 Z'=a_h⊙Z+b_h 的并行扫描（O(log N)），返回 (Z*, 深度)。"""
