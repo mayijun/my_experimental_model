@@ -66,6 +66,11 @@ class MJEPAConfig:
     align_gauss_weight: float = 0.3  # (σ²-1)² 双端正则，严格强于 relu(1-σ)（Lean: DistributionReg.gauss_strictly_stronger）
     # —— DINOv3 Gram-anchoring（§3.4）：冻结 Gram teacher 锚定 dense 特征 Gram 矩阵 ——
     gram_anchor_weight: float = 0.1  # ‖X_S·X_Sᵀ − X_G·X_Gᵀ‖²_F，X_G 来自冻结锚点
+    # Gram 矩阵为 O(N²)（N=token 数）。3B/7B 档 N=4096，峰值显存 = 4·B·N²·2B（gs+gg+diff+grad，bf16）。
+    # 按 A800 80GB 等比例（Gram 项占 1% ≈ 819MB）：batch≤8 时完整 Gram ≤1GB，覆盖最大 N=4096 无需采样；
+    # 仅 batch≥16 才需下调（K=⌊√(819MB/(8·B))⌋：B=16→2590、B=32→1831）。默认 4096 覆盖全部档。
+    # 采样对 N 维无放回随机取 K 个 token，student/teacher 共用同一组索引（完整 Gram 的随机子采样近似，不改 §3.4 的 L_Gram）。
+    gram_max_tokens: int = 4096       # 0=不采样（完整 Gram）；N>K 时采样到 K。tiny/small N=16 不受影响
 
     # —— 对齐方法（§3.4）：跨模态软对齐信号源，默认 BYOL（无负样本、无 batch 依赖）——
     alignment_method: str = "dinov3" # infonce（软对齐兜底）/ byol / dino / dinov3（DINO centering + Gram-anchoring，默认）

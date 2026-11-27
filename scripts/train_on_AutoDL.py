@@ -650,6 +650,10 @@ def run_train(args, manifest_path, ckpt, logdir):
         "--data", "real", "--tokenizer", "llada", "--data-config", str(manifest_path),
         "--backbone", "hybrid", "--share-trunk", "1", "--grad-checkpoint", "1",
         "--embed-factor", "128", "--cross-mask", "1", "--psi", "1",
+        # —— 防塌缩（§2.2.4/§3.4）：dinov3 对齐头 + 冻结锚点 + block mask + 高斯正则 + Gram-anchoring ——
+        "--alignment-method", "dinov3", "--anchor-frozen", "1", "--block-mask", "1",
+        "--align-gauss-weight", "0.3", "--gram-anchor-weight", "0.1",
+        "--gram-max-tokens", "4096",   # AutoDL 3b image_size=256 → N=1024 < 4096，走完整 Gram 不采样
         "--flow", "1", "--flow-adaln", "1", "--flow-steps", "20",
         "--optim", optim, "--batch-size", str(args.batch_size), "--lr", str(args.lr),
         "--steps", str(args.steps), "--flow-stage-steps", str(args.flow_steps),

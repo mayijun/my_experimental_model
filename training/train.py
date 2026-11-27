@@ -518,8 +518,8 @@ def main():
                         help="梯度裁剪阈值（0=不裁剪，仍记录 grad_norm 供诊断爆炸/消失；>0 时裁剪到该范数）")
     parser.add_argument("--grad-accum", type=int, default=1,
                         help="梯度累积步数（>1 等效增大有效 batch：micro-batch=batch-size，每 grad-accum 个 micro-batch 累加梯度后 step）")
-    # 对齐方法（§3.4）：infonce / byol（默认）/ dino
-    parser.add_argument("--alignment-method", choices=["infonce", "byol", "dino"], default=None)
+    # 对齐方法（§3.4）：infonce / byol / dino / dinov3（默认：DINO centering + Gram-anchoring）
+    parser.add_argument("--alignment-method", choices=["infonce", "byol", "dino", "dinov3"], default=None)
     # 交叉掩码（§3.2 式 18）与 PAC（§3.4 式 21）
     parser.add_argument("--cross-mask", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--pac", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
@@ -529,6 +529,15 @@ def main():
     parser.add_argument("--cov-weight", type=float, default=None)          # token 序列协方差去相关（防低秩塌缩）
     parser.add_argument("--align-var-weight", type=float, default=None)    # 对齐投影空间方差正则
     parser.add_argument("--align-cov-weight", type=float, default=None)    # 对齐投影空间协方差去相关
+    # 本次防塌缩实装（§2.2.4/§3.4）：冻结锚点 / block mask / 高斯分布正则 / DINOv3 Gram-anchoring
+    parser.add_argument("--anchor-frozen", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
+                        help="冻结初始化锚点 f₀（cls_readout + Gram teacher 共用；默认开启，传 0 关闭）")
+    parser.add_argument("--block-mask", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
+                        help="图像 block masking（I-JEPA 多块连续掩码；默认开启，传 0 退回逐位置 Bernoulli）")
+    parser.add_argument("--block-mask-num", type=int, default=None)          # I-JEPA 式多块掩码的块数
+    parser.add_argument("--align-gauss-weight", type=float, default=None)    # 对齐空间高斯 χ² 分布正则 (σ²-1)²
+    parser.add_argument("--gram-anchor-weight", type=float, default=None)    # DINOv3 Gram-anchoring 权重
+    parser.add_argument("--gram-max-tokens", type=int, default=None)         # Gram 采样上限（0=不采样；默认 4096 覆盖最大 N）
     # PSCO 状态依赖收缩算子（§3.7.3）
     parser.add_argument("--psi", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--psi-transient-steps", type=int, default=None)
@@ -639,6 +648,12 @@ def main():
         rho_b_max=args.rho_b_max,
         rho_rate_weight=args.rho_rate_weight,
         alignment_method=args.alignment_method,
+        anchor_frozen=args.anchor_frozen,
+        block_mask=args.block_mask,
+        block_mask_num=args.block_mask_num,
+        align_gauss_weight=args.align_gauss_weight,
+        gram_anchor_weight=args.gram_anchor_weight,
+        gram_max_tokens=args.gram_max_tokens,
         cross_mask=args.cross_mask,
         cov_weight=args.cov_weight,
         align_var_weight=args.align_var_weight,

@@ -77,15 +77,24 @@ def gauss_penalty(z):
     return ((std ** 2 - 1.0) ** 2).mean()
 
 
-def gram_anchor_loss(z_student, z_teacher):
+def gram_anchor_loss(z_student, z_teacher, max_tokens=0):
     """DINOv3 Gram-anchoring（§3.4）：锚定 dense 特征 Gram 矩阵到冻结 Gram teacher。
 
     L_Gram = ‖X_S·X_Sᵀ − X_G·X_Gᵀ‖²_F，X 为 L2 归一化的 dense 特征（[B,N,d] → [B,N,N] Gram）。
     z_teacher 来自冻结锚点（no_grad）；塌缩时学生 Gram 退化为全 1（秩 1），与非塌缩 teacher
     的 Gram 差异 > 0，故把学生从塌缩推开。
+
+    max_tokens>0 且 N>max_tokens 时，对 N 维无放回随机采样 K=max_tokens 个 token，student/teacher
+    共用同一组索引（保证两个 Gram 的行列一一对应），显存/算力从 O(N²) 降到 O(K²)。这是完整 Gram
+    的随机子采样近似，不改变 L_Gram 的数学形式（§3.4），仅作用于计算实现（A800 80GB 3B 档需要）。
     """
     xs = F.normalize(z_student, dim=-1)
     xg = F.normalize(z_teacher, dim=-1)
+    n = xs.size(1)
+    if max_tokens and max_tokens > 0 and n > max_tokens:
+        idx = torch.randperm(n, device=xs.device)[:max_tokens]
+        xs = xs[:, idx]
+        xg = xg[:, idx]
     gs = torch.bmm(xs, xs.transpose(1, 2))
     gg = torch.bmm(xg, xg.transpose(1, 2))
     return F.mse_loss(gs, gg)
@@ -379,8 +388,8 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     # —— DINOv3 Gram-anchoring（§3.4）：dense 特征 Gram 锚到冻结 Gram teacher（anchor f₀）——
     gram_i = gram_t = torch.zeros((), device=device)
     if cfg.alignment_method == "dinov3" and getattr(model, "anchor_image", None) is not None:
-        gram_i = gram_anchor_loss(img_tokens, img_anchor)
-        gram_t = gram_anchor_loss(txt_tokens, txt_anchor)
+        gram_i = gram_anchor_loss(img_tokens, img_anchor, cfg.gram_max_tokens)
+        gram_t = gram_anchor_loss(txt_tokens, txt_anchor, cfg.gram_max_tokens)
     rate = torch.zeros((), device=device)
     if cfg.rho_compress and img_b is not None and txt_b is not None:
         rate = 0.5 * (img_b.mean() + txt_b.mean())
