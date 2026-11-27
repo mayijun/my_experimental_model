@@ -104,6 +104,11 @@
 | §3.13 保护拉大慢快留存差距：$a_s^k-a_f^k\le a_s'^k-a_f^k$（分离强化） | `TemporalHierarchy.lean` : `slow_fast_gap_widened` | ✅ 已证 |
 | §3.13 自反馈修正随 horizon 衰减：$a_f\in[0,1)$ 时 $a_f^k\to0$（短期局部化） | `TemporalHierarchy.lean` : `feedback_correction_decays` | ✅ 已证 |
 | §3.13 门控自反馈不扰动慢特征：$\Pi_f(\Pi_s z)=0\Rightarrow (C\circ\Pi_f)(\Pi_s z)=0$ | `TemporalHierarchy.lean` : `feedback_spares_slow` | ✅ 已证 |
+| §3.14 对角门控逐点独立：第 $i$ 维输出只依赖第 $i$ 维输入（GPU 并行，无跨维依赖） | `TemporalHierarchy.lean` : `diagGate_pointwise` | ✅ 已证 |
+| §3.14 门控复合 = 逐维权重相乘：$\operatorname{diag}(p)\circ\operatorname{diag}(q)=\operatorname{diag}(p\cdot q)$（可合并） | `TemporalHierarchy.lean` : `diagGate_comp` | ✅ 已证 |
+| §3.14 门控逐维放过：$p_i=0\Rightarrow(\operatorname{diag}(p)z)_i=0$（推广 feedback_spares_slow） | `TemporalHierarchy.lean` : `diagGate_zero_dim` | ✅ 已证 |
+| §3.14 软门控逐维单调：$p_i\le q_i$、$0\le z_i$ ⟹ $(\operatorname{diag}(p)z)_i\le(\operatorname{diag}(q)z)_i$ | `TemporalHierarchy.lean` : `diagGate_mono` | ✅ 已证 |
+| §3.14 软门控不破坏收缩：$a\in[0,1)$、$p\in[0,1]$ ⟹ $pa\in[0,1)$ | `TemporalHierarchy.lean` : `soft_gate_preserves_contraction` | ✅ 已证 |
 
 **成熟要点（直接引用，不重证）**：
 
@@ -2098,6 +2103,54 @@ $$Z^{(t)} \;=\; M^t Z^{(0)} \;+\;\sum_{i<t} M^{\,t-1-i}\, x_i$$
 - 慢/快谱分裂阈值 $\theta$、保护强度 $a_s'$ 是超参（分析 / 设计量，未机械化）；Lean 已证的是其**代数核心**：留存抬升（`slow_retention_lifted`）、差距拉大（`slow_fast_gap_widened`）、修正衰减（`feedback_correction_decays`）、慢子空间零扰动（`feedback_spares_slow`）。
 - 投影 $\Pi_s/\Pi_f$ 的「正交分解」只用假设 $\forall z,\ \Pi_f(\Pi_s z)=0$ 表达（`feedback_spares_slow`），未要求具体正交基——保持抽象、与任意实现解耦。
 - 融合是**单 Z 骨架上的谱正则 + 门控**，**不是**引入显式多层（避开 §3.11 独立层参数陷阱），也**不是**丢弃快特征（快维仍存在并承载短期状态，只由自反馈修正、由 ρ压缩在 token 层有损）。
+
+---
+
+## 3.14 机制二的推广：全 Z 逐维软门控（对角门控）
+
+> **问题**：§3.13 的机制二用**二值**投影 $\Pi_f$ 门控（快维权重 1、慢维权重 0）。能否推广到**所有 Z 维度**——每一维独立拥有自己的门控权重 $p_i\in[0,1]$（软门控），即「全 Z 逐维分层」？其优缺点、GPU 友善性如何？本节给出数学形式并已 Lean 机械化。
+
+### 3.14.1 数学形式：对角门控 diag(p)
+
+把 §3.13 的二值门控 $F=C\circ\Pi_f$ 推广为**对角门控** $G=\operatorname{diag}(p)$：
+
+$$(G z)_i \;=\; p_i\, z_i,\qquad p_i\in[0,1]$$
+
+反馈算子 $F=C\circ G$。$p_i=0$ 表示维度 $i$ 被完全保护（慢特征，反馈零扰动）；$p_i=1$ 表示全修正（快特征）；$0<p_i<1$ 连续调节。二值门控是 $p_i\in\{0,1\}$ 的特例。
+
+这同时把 §3.11 的「离散多时间尺度」与 §3.13 的「慢/快二分」统一为**逐维连续谱**：每个维度 $i$ 是独立的一层，拥有自己的 $($特征值 $a_i$, 门控权重 $p_i)$。
+
+### 3.14.2 GPU 友善（已 Lean 机械化）
+
+1. **逐点独立（embarrassingly parallel）**：`diagGate_pointwise` 证第 $i$ 维输出只依赖第 $i$ 维输入——各维度缩放无跨维数据依赖、无归约，可完全并行，逐元素 kernel 被 `torch.compile` 融合。
+2. **门控可合并**：`diagGate_comp` 证 $\operatorname{diag}(p)\circ\operatorname{diag}(q)=\operatorname{diag}(p\cdot q)$——多个门控合并为单次逐元素缩放，并入 §3.7.3 PSCO 关联扫描的幺半群元时不破坏结合律（`comp_assoc`）、不新增扫描趟次，零额外开销。
+3. **仍收缩**：`soft_gate_preserves_contraction` 证 $0\le a<1$、$0\le p\le1$ ⟹ $pa\in[0,1)$——全 Z 分层后仍 $\rho<1$，不动点收敛与 PSCO 扫描全部继承。
+
+### 3.14.3 逐维性质（已 Lean 机械化）
+
+- **逐维放过（推广 `feedback_spares_slow`）**：`diagGate_zero_dim` 证 $p_i=0\Rightarrow(Gz)_i=0$——慢维被完全保护。
+- **逐维单调（反馈影响连续调节）**：`diagGate_mono` 证 $p_i\le q_i$、$0\le z_i$ ⟹ $(G_p z)_i\le(G_q z)_i$——门控权重越大反馈影响越大，$p_i$ 是「放过 $\leftrightarrow$ 全修正」的连续旋钮。
+
+### 3.14.4 优缺点
+
+**优点**：
+
+1. **消除硬阈值**：§3.13 的慢/快二分依赖阈值 $\theta$，逐维软门控消除这一任意性，保留谱夹层全部信息。
+2. **连续可微、可学习**：$p_i\in[0,1]$ 连续，可端到端学习 / 正则（二值 $\Pi_f$ 不可微）。
+3. **全谱控制**：每个维度独立 $($留存 $a_i$, 反馈 $p_i)$，统一 §3.11 与 §3.13。
+4. **GPU 友善**：见 §3.14.2。
+
+**缺点**：
+
+1. **$n$ 个超参**（每维 $p_i$），需学习门控或正则，优化 / 过拟合负担高于二值的单阈值 $\theta$。
+2. **留存与反馈是两个旋钮**：软门控只控「反馈强度」，不直接抬升「留存」（留存由 $a_i$ 决定，需配 §3.13 机制一 `slow_retention_lifted`）。
+3. **慢维反馈泄漏风险**：$p_i$ 未正确正则时，慢维 $p_i\not\to0$，长期不变特征会被反馈扰动——二值 $\Pi_f$ 的硬零更稳健。
+4. **对角线假设**：$G=\operatorname{diag}(p)$ 要求 $M$ 可对角化（谱域理想化）；真实 $M$ 非对角时需先谱分解或子空间投影，增加实现复杂度。
+
+### 3.14.5 边界（诚实）
+
+- Lean 已证的是对角门控的**代数与有序核心**（逐点独立、可合并、逐维放过 / 单调、保收缩）；$p_i$ 的取值、阈值、学习方式为超参（未机械化）。
+- $G=\operatorname{diag}(p)$ 在函数空间 $\iota\to K$ 上定义（逐维天然并行）；对抽象 $V$ 需先谱分解（§3.13.5 已注）。
 
 ---
 

@@ -287,4 +287,94 @@ theorem feedback_spares_slow (Ps Pf C : V →ₗ[K] V)
     gatedFeedback C Pf (Ps z) = 0 := by
   rw [gatedFeedback, LinearMap.comp_apply, h_kill, map_zero]
 
+/-! ## 8. 机制二的推广：全 Z 逐维软门控（对角门控，§3.14）
+
+把 §7 的二值门控（Π_f 快投影，权重 0/1）推广为**逐维软门控** G = diag(p)，p_i ∈ [0,1]：
+  每个维度 i 独立拥有自己的门控权重 p_i（= 0 放过 = 慢特征保护；= 1 全修正 = 快特征；
+  中间值连续调节）。即「所有 Z 维度各自分层」——机制二从「快/慢二分」推广到「全谱逐维」。
+
+GPU 友善的数学根基（本节全部机械化）：
+  - diagGate_pointwise：第 i 维输出只依赖第 i 维输入（逐点独立、embarrassingly parallel）。
+  - diagGate_comp：门控复合 = 逐维权重相乘（可合并为单次逐元素缩放，并入 PSCO 扫描幺半群元）。
+  - soft_gate_preserves_contraction：0≤a<1、0≤p≤1 ⟹ p·a∈[0,1)（全 Z 分层仍收缩）。
+  - diagGate_zero_dim / diagGate_mono：门控逐维放过 / 连续调节（推广 feedback_spares_slow）。
+-/
+
+section DiagonalGate
+
+variable {K : Type*} [Field K]
+variable {ι : Type*}
+
+/-- 对角门控：diag(p) 对向量 z 逐维缩放，(diag(p) z) i = p i * z i。
+    这是「机制二推广到所有域」的数学形式：每个维度 i 独立拥有门控权重 p i。 -/
+def diagGate (p : ι → K) : (ι → K) →ₗ[K] (ι → K) where
+  toFun := fun z i => p i * z i
+  map_add' := by
+    intro x y
+    funext i
+    simp [mul_add]
+  map_smul' := by
+    intro a x
+    funext i
+    simp [mul_assoc, mul_comm, mul_left_comm]
+
+@[simp] theorem diagGate_apply (p : ι → K) (z : ι → K) (i : ι) :
+    diagGate p z i = p i * z i := rfl
+
+/-- 对角门控逐点独立：第 i 维输出只依赖第 i 维输入（无跨维依赖）。
+    这是 GPU 友善的数学根基：各维度缩放相互独立，可完全并行（embarrassingly parallel），
+    无归约 / 跨元素数据依赖，逐元素 kernel 可被 torch.compile 融合。 -/
+theorem diagGate_pointwise (p : ι → K) (z w : ι → K) (i : ι)
+    (hz : z i = w i) :
+    (diagGate p z) i = (diagGate p w) i := by
+  simp [hz]
+
+/-- 对角门控的复合 = 逐维权重相乘：diag(p) ∘ diag(q) = diag(λi, p i * q i)。
+    多个门控可合并为单次逐元素缩放，故并入 §3.7.3 PSCO 关联扫描的幺半群元时不破坏
+    结合律（comp_assoc）、不新增扫描趟次——门控在 GPU 上零额外开销。 -/
+theorem diagGate_comp (p q : ι → K) :
+    (diagGate p).comp (diagGate q) = diagGate (fun i => p i * q i) := by
+  ext z
+  ext i
+  simp [LinearMap.comp_apply, mul_assoc]
+
+/-- 门控逐维放过（推广 §7 feedback_spares_slow 到软门控）：
+    p i = 0 ⟹ (diag(p) z) i = 0——维度 i 被完全保护、反馈零扰动。 -/
+theorem diagGate_zero_dim (p : ι → K) (z : ι → K) {i : ι} (hp : p i = 0) :
+    (diagGate p z) i = 0 := by
+  simp [hp]
+
+end DiagonalGate
+
+/-! ## 8（续）. 有序域下的逐维结论（ℝ） -/
+
+section DiagonalGateOrdered
+
+variable {ι : Type*}
+
+/-- 软门控的逐维单调性：门控权重越大，该维反馈影响越大（对非负分量）。
+    p ≤ q（逐点）且 0 ≤ z i ⟹ (diag(p) z) i ≤ (diag(q) z) i。
+    这给出「反馈影响随 p_i 连续调节」的定量形式（0=放过、1=全修正、中间连续）。 -/
+theorem diagGate_mono (p q : ι → ℝ) (z : ι → ℝ) {i : ι}
+    (hpq : p i ≤ q i) (hz0 : 0 ≤ z i) :
+    (diagGate p z) i ≤ (diagGate q z) i := by
+  simp
+  exact mul_le_mul_of_nonneg_right hpq hz0
+
+/-- 软门控不破坏收缩（逐维）：a ∈ [0,1) 且 p ∈ [0,1] ⟹ p·a ∈ [0,1)。
+    门控（缩放 p ≤ 1）不放大特征值，故「对所有 Z 维度分层（每维软门控）」仍满足
+    ρ < 1（谱夹层 δ < ã_i < 1-γ 保护后仍成立），不动点收敛与 PSCO 扫描全部继承。 -/
+theorem soft_gate_preserves_contraction (a p : ℝ) (ha0 : 0 ≤ a) (ha1 : a < 1)
+    (hp0 : 0 ≤ p) (hp1 : p ≤ 1) :
+    0 ≤ p * a ∧ p * a < 1 := by
+  constructor
+  · exact mul_nonneg hp0 ha0
+  · have hle : p * a ≤ a := by
+      calc
+        p * a ≤ 1 * a := mul_le_mul_of_nonneg_right hp1 ha0
+        _ = a := by simp
+    exact lt_of_le_of_lt hle ha1
+
+end DiagonalGateOrdered
+
 end TemporalHierarchy
