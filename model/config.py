@@ -119,7 +119,8 @@ class MJEPAConfig:
     curriculum_s3_start: float = 0.55      # S3 起始（归一化步数）：Ψ 改端 L_consist/L_gen 从 0 拉起
     curriculum_rho_start: float = 0.45     # 码率损失 warmup 结束点：t<该点时 rho_rate_weight 门控为 0
     flow_in_pretrain: bool = False         # 主预训是否计算 flow 损失；False ⇒ Flow 仅在冻结 E 的 train_flow_stage
-    curriculum_psi_read_scale: float = 0.3 # S1/S2 期间 Ψ 读端（readout/stop/var）权重缩放（薄接口先接入，低权重）
+    curriculum_psi_read_scale: float = 0.3 # S1/S2 期间 Ψ 读端「薄接口」（readout/stop）权重缩放（学拟合 Z 的头，先薄接入）
+    curriculum_psi_reg_scale: float = 1.0  # S1/S2 期间 Ψ 纯正则（var/h_var/h_cov）权重缩放：固定阈值、目标不漂移、无需薄接入，给全权重
     curriculum_psi_change_scale: float = 1.0  # S3 起 Ψ 改端（consist/gen）权重缩放（Z_tgt 已 ε-平稳后拉起）
     curriculum_eps: float = 0.02           # ε-平稳代理阈值（设计断言，见 README 问题 14）：未实装在线 EMA 漂移检测时仅文档化
     curriculum_stationary_window: int = 200  # 平稳性滑窗步数（设计断言）

@@ -145,12 +145,13 @@ def curriculum_gates(step, total_steps, cfg):
     + 定理 5（阶段适定性链 S1→S2→S3→S4）：在上游表征 ε-平稳前，把依赖它的下游目标门控为 0。
       - flow：flow_in_pretrain=False 时主预训不计 flow（Flow 仅在冻结 E 的 S4 训练）；
       - psi_change（L_consist/L_gen）：t<s3_start 时为 0（Z_tgt 未平稳，改端无稳定最优解）；
-      - psi_read（readout/stop/var）：S1/S2 低权重 curriculum_psi_read_scale（薄接口先接入）；
+      - psi_read（readout/stop）：S1/S2 低权重 curriculum_psi_read_scale（学拟合 Z 的头，薄接口先接入）；
+      - psi_reg（var/h_var/h_cov）：S1/S2 权重 curriculum_psi_reg_scale（纯正则、固定阈值、目标不漂移，无需薄接入）；
       - rate：t<rho_start 时码率损失权重 0（前端/主干未平稳时 ρ 记忆不适定，warmup）；
       - anchor/new：PAC p_anchor 缩放锚/新模态损失权重（损失权重门控近似单模态投喂，见 README 问题 14）。
     """
     if not cfg.curriculum_enabled:
-        return dict(flow=1.0, psi_read=1.0, psi_change=1.0, rate=1.0, anchor=1.0, new=1.0)
+        return dict(flow=1.0, psi_read=1.0, psi_reg=1.0, psi_change=1.0, rate=1.0, anchor=1.0, new=1.0)
     if step is None or total_steps is None:
         t = 1.0  # 评估/缺步数：按已收敛处理，不门控
     else:
@@ -158,6 +159,7 @@ def curriculum_gates(step, total_steps, cfg):
     flow_gate = 1.0 if cfg.flow_in_pretrain else 0.0
     before_s3 = t < cfg.curriculum_s3_start
     psi_read = cfg.curriculum_psi_read_scale if before_s3 else 1.0
+    psi_reg = cfg.curriculum_psi_reg_scale if before_s3 else 1.0
     psi_change = 0.0 if before_s3 else cfg.curriculum_psi_change_scale
     rate_gate = 0.0 if t < cfg.curriculum_rho_start else 1.0
     if cfg.pac_enabled:
@@ -169,7 +171,7 @@ def curriculum_gates(step, total_steps, cfg):
         anchor_gate, new_gate = p, 1.0 - p
     else:
         anchor_gate = new_gate = 1.0
-    return dict(flow=flow_gate, psi_read=psi_read, psi_change=psi_change,
+    return dict(flow=flow_gate, psi_read=psi_read, psi_reg=psi_reg, psi_change=psi_change,
                 rate=rate_gate, anchor=anchor_gate, new=new_gate)
 
 
@@ -185,7 +187,7 @@ def psi_losses(model, img_z, txt_z, img_ctx, txt_ctx, img_tgt, txt_tgt):
     - consist（§3.7 L_consist）：路径无关一致性，Ψ_h(Z_ctx)≈Z_tgt，改端把上下文变换到目标。
 
     返回按模态拆分的 dict；供 forward_losses 做 PAC 模态门控与课程阶段门控
-    （读端 readout/var/stop/h_var/h_cov 属 psi_read 门控，改端 consist/gen/nontriv 属 psi_change 门控）。
+    （读端薄接口 readout/stop 属 psi_read 门控，纯正则 var/h_var/h_cov 属 psi_reg 门控，改端 consist/gen/nontriv 属 psi_change 门控）。
     """
     out = {}
     img_star = model.psi_layer(img_z)
@@ -386,10 +388,10 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.rho_rate_weight * rate * gates["rate"]
         + cfg.cross_mask_weight * mscale(cross_pred_i, cross_pred_t)
         + cfg.psi_readout_weight * mscale(psi_readout_i, psi_readout_t) * gates["psi_read"]
-        + cfg.psi_var_weight * mscale(psi_var_i, psi_var_t) * gates["psi_read"]
-        + cfg.psi_h_var_weight * mscale(psi_h_var_i, psi_h_var_t) * gates["psi_read"]
-        + cfg.psi_h_cov_weight * mscale(psi_h_cov_i, psi_h_cov_t) * gates["psi_read"]
         + cfg.psi_stop_weight * mscale(psi_stop_i, psi_stop_t) * gates["psi_read"]
+        + cfg.psi_var_weight * mscale(psi_var_i, psi_var_t) * gates["psi_reg"]
+        + cfg.psi_h_var_weight * mscale(psi_h_var_i, psi_h_var_t) * gates["psi_reg"]
+        + cfg.psi_h_cov_weight * mscale(psi_h_cov_i, psi_h_cov_t) * gates["psi_reg"]
         + cfg.psi_consist_weight * mscale(psi_consist_i, psi_consist_t) * gates["psi_change"]
         + cfg.psi_nontriv_weight * mscale(psi_nontriv_i, psi_nontriv_t) * gates["psi_change"]
         + cfg.psi_gen_weight * mscale(psi_gen_i, psi_gen_t) * gates["psi_change"]
@@ -405,8 +407,8 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         "cross_pred": cross_pred_i + cross_pred_t,
         "psi_readout": psi_readout_i + psi_readout_t,
         "psi_var": psi_var_i + psi_var_t,
-        "psi_h_var": (psi_h_var_i + psi_h_var_t) * gates["psi_read"],
-        "psi_h_cov": (psi_h_cov_i + psi_h_cov_t) * gates["psi_read"],
+        "psi_h_var": (psi_h_var_i + psi_h_var_t) * gates["psi_reg"],
+        "psi_h_cov": (psi_h_cov_i + psi_h_cov_t) * gates["psi_reg"],
         "psi_stop": psi_stop_i + psi_stop_t,
         # 改端（consist/nontriv/gen）记入阶段门控后的值：S1/S2 为 0，S3 起非 0（课程可观测）
         "psi_consist": (psi_consist_i + psi_consist_t) * gates["psi_change"],

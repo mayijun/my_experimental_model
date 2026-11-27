@@ -597,15 +597,15 @@ class LLaDATokenizer:
 | 模态 | 跨模态 $\rho$ 反饥饿 | §8.6 式 (57) | `RhoCompressor.eps_keep_modal`（模态级下界）+ `eps_keep`（token 层 ε） | 0.0 / 0.02 | **本次实装**：`_enforce_modal_keep` 强制 $\mathbb E[\mathrm{keep}_{m,t}]\ge\varepsilon_m$；默认 0 关闭（随 `rho_compress` 启用） |
 | 算子 | 谱夹层 | §3.7.3 式 (39) | [psco.py](file:///home/simon-ma/JEPA/model/psco.py) `make_contractive_a` | $\delta=0.05,\gamma=0.10$ | 上界保收敛、下界封死 $\tilde A_h\to0$；**已由 psco 冒烟验证** |
 | 算子 | 不动点读出头锚定 | §3.7.3 防线 2 | `PsiLayer.readout`（`psi_readout_weight`） | 0.1 | 强制 $Z^*$ 携带输入信息 |
-| 算子 | 方差正则 | §3.7.3 防线 3 | `psi_var`（`psi_var_weight`） | 0.1 | 防算子不动点维度塌缩 |
-| 算子 | $h$ 信息量约束 | §3.7.3 防线 4 | `psi_h_var`/`psi_h_cov`（`psi_h_var_weight`/`psi_h_cov_weight`） | 0.8 / 0.3 | **本次实装**：对 $h$ 的 VICReg 方差+协方差，防 $h$ 塌缩为常数/低秩（h 塌缩最严重，var 提至 0.8） |
+| 算子 | 方差正则 | §3.7.3 防线 3 | `psi_var`（`psi_var_weight`，`psi_reg` 门控） | 0.1 | 防算子不动点维度塌缩 |
+| 算子 | $h$ 信息量约束 | §3.7.3 防线 4 | `psi_h_var`/`psi_h_cov`（`psi_h_var_weight`/`psi_h_cov_weight`，`psi_reg` 门控） | 0.8 / 0.3 | **本次实装**：对 $h$ 的 VICReg 方差+协方差，防 $h$ 塌缩为常数/低秩（h 塌缩最严重，var 提至 0.8；`psi_reg` 纯正则 S1/S2 全权重，不随 `psi_read` 薄接口打折） |
 | 算子 | 轨迹非平凡性 | §3.7.3 防线 5 | `PsiLayer.first_step_disp` + `psi_nontriv`（`psi_nontriv_weight`/`psi_nontriv_eps`） | 0.1 | **本次实装**：瞬态段首步位移下界 hinge，防算子首步跳不动点 |
 
 **改进方向的优先级排序（据「快速塌缩」的实际症状）。** 三条最高杠杆、最贴近现行契约的改进：
 
 1. **完整 VICReg 落地到 token 序列 $Z$（本次已做）。** 方差 (b) 只保证「每维有方差」，不保证「维度间不冗余」；缺失协方差时表征可整体滑向一个低秩子空间而方差检验不报警——这是中等规模下最常见、最隐蔽的塌缩形态。补上 `cov_weight` 后 token 序列与对齐空间都具备「方差 + 去相关」，与 JEPA 余弦（不变量项）合成完整 VICReg。
 
-2. **算子层 $h$ 的信息量约束 + 轨迹非平凡性（防线 4/5，本次已实装）。** §3.7.3 已把「塌缩本质 = 算子失去输入依赖性」说透；防线 4（对 $h$ 的 VICReg 方差+协方差）封死「$h$ 退化为常数 → $\Psi_h$ 变常值映射」，防线 5（瞬态段首步位移下界）封死「算子首步跳不动点 → 瞬态段/非线性残差失去梯度」。二者作为读端 / 改端门控接入 §3.4.2 课程。
+2. **算子层 $h$ 的信息量约束 + 轨迹非平凡性（防线 4/5，本次已实装）。** §3.7.3 已把「塌缩本质 = 算子失去输入依赖性」说透；防线 4（对 $h$ 的 VICReg 方差+协方差）封死「$h$ 退化为常数 → $\Psi_h$ 变常值映射」，防线 5（瞬态段首步位移下界）封死「算子首步跳不动点 → 瞬态段/非线性残差失去梯度」。防线 4 作为纯正则 `psi_reg` 门控（S1/S2 全权重、目标不漂移无需薄接入）、防线 5 作为改端 `psi_change` 门控接入 §3.4.2 课程。
 
 3. **BYOL 对齐头的 collapse-free 化。** 当前 `BYOLHead` 用 LayerNorm 替代原文 BatchNorm（小 batch 更稳），却失去了 BN 的隐式反塌缩（§2.2.4「作用对象修正」已指出），靠 `align_var/align_cov/cls_readout` 补。更稳的路线是默认切 DINO（教师 EMA + centering + 锐化，`DINOHead` 已存在），centering 天然抑制教师输出塌缩；或对 `[CLS]` 投影空间加 Barlow Twins 式在线/目标互相关去对角。
 
@@ -1658,7 +1658,7 @@ PSCO 不替代 reflow，而是给 reflow 提供一个**有据可依、能自适�
 1. **谱夹层（spectral sandwich）** 逐维 $\delta<\tilde a_{h,i}<1-\gamma$（等价于 $\rho(\tilde A_h)<1-\gamma$ 且 $\min_i\tilde a_{h,i}>\delta$）：上界保收敛（§3.7.1 收缩条件），下界 $\delta$ 封死「$\tilde A_h\to0$ 一步塌成一点」这条最阴的路径——只给上界时模型会学 $\tilde A_h\to0$，一步把所有 $Z$ 拉到共享 $b_h$，轨迹不再区分输入。参数化取 $\tilde A_h=\operatorname{diag}\big(\delta+(1-\gamma-\delta)\,\sigma(h)\big)$，逐维钳进 $(\delta,1-\gamma)$。
 2. **不动点读出头锚定**：$Z^*$ 必须能预测任务目标 $\mathcal L_{\text{readout}}=\|r(Z^*)-\tilde Z_y\|^2$（$r$ 为读出头）。塌成常数就预测不了，梯度把 $Z^*$ 重新推开。对应 §3.8 的预测目标与 §3.7 的 $\mathcal L_{\text{consist}}$。
 3. **方差正则**：对 $Z^*$ 每维标准差设下限 $\mathcal L_{\text{var}}=\mathrm{relu}(1-\sigma_j)$（同 §2.2.4(b) 式 (36)），防维度塌缩。
-4. **$h$ 的信息量约束**：$a_h,b_h,g$ 由 $h$ 自推断；若 $h$ 网络塌缩（所有输入同一 $h$），算子退化为常值映射。落地为对 $h\in\mathbb R^{B\times d}$ 的 VICReg「方差 + 协方差」正则（与 §2.2.4(b)(c) 同源，作用于隐含模式而非 token）：$$\mathcal L_{h\text{-var}}=\mathbb E_j\big[\mathrm{relu}(1-\sigma_j^h)\big],\qquad \mathcal L_{h\text{-cov}}=\tfrac1d\sum_{i\neq j}(C^h)_{ij}^2,$$ 其中 $\sigma_j^h$、$C^h$ 为 $h$ 在 batch 维的边际标准差与协方差。方差下界封死「$h$→常数」，协方差封死「$h$→低秩子空间」，二者合起来强制 $h$ 随输入变化。见 [`losses.py`](file:///home/simon-ma/JEPA/training/losses.py) `psi_h_var`/`psi_h_cov`（`psi_h_var_weight`/`psi_h_cov_weight`，读端 `psi_read` 门控）。
+4. **$h$ 的信息量约束**：$a_h,b_h,g$ 由 $h$ 自推断；若 $h$ 网络塌缩（所有输入同一 $h$），算子退化为常值映射。落地为对 $h\in\mathbb R^{B\times d}$ 的 VICReg「方差 + 协方差」正则（与 §2.2.4(b)(c) 同源，作用于隐含模式而非 token）：$$\mathcal L_{h\text{-var}}=\mathbb E_j\big[\mathrm{relu}(1-\sigma_j^h)\big],\qquad \mathcal L_{h\text{-cov}}=\tfrac1d\sum_{i\neq j}(C^h)_{ij}^2,$$ 其中 $\sigma_j^h$、$C^h$ 为 $h$ 在 batch 维的边际标准差与协方差。方差下界封死「$h$→常数」，协方差封死「$h$→低秩子空间」，二者合起来强制 $h$ 随输入变化。见 [`losses.py`](file:///home/simon-ma/JEPA/training/losses.py) `psi_h_var`/`psi_h_cov`（`psi_h_var_weight`/`psi_h_cov_weight`，纯正则 `psi_reg` 门控、S1/S2 全权重）。
 5. **轨迹非平凡性**：扫描物化整条轨迹，加「首步位移」下限惩罚，防算子第一步就跳到不动点（瞬态段 $m$ 步被跳过、非线性残差 $r_h$ 失去梯度）。落地为对瞬态段第 1 步位移的 hinge：$$\mathcal L_{\text{nontriv}}=\mathrm{relu}\big(\varepsilon-\|\text{gg}\odot(\tilde A_h Z+b_h)\|\big),$$ 其中 $\tilde A_h=\operatorname{diag}(a_h-1)$、位移为 $z_1-z_0$ 的 batch×位置均值。见 [`operator.py`](file:///home/simon-ma/JEPA/model/operator.py) `PsiLayer.first_step_disp` 与 [`losses.py`](file:///home/simon-ma/JEPA/training/losses.py) `psi_nontriv`（`psi_nontriv_weight`/`psi_nontriv_eps`，改端 `psi_change` 门控）。**〔设计断言〕** 阈值 $\varepsilon$ 依赖 $d$ 与初始化，须实测标定。
 
 一句话：**塌缩本质是「算子失去输入依赖性」——$\tilde A_h\to0$ 强收缩抹信息，或 $b_h$ 退成常数共享吸引子。谱夹层管 $\tilde A_h$ 的健康区间，读出头锚定强制 $Z^*$ 携带输入信息，方差正则管维度分布，三者合起来保证不动点不塌成一点。**
