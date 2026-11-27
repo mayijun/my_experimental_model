@@ -503,6 +503,7 @@ def main():
     parser.add_argument("--rho-eps", type=float, default=None)       # 绝对阈值（0 禁用，改相对阈值 --rho-eps-z）
     parser.add_argument("--rho-eps-z", type=float, default=None)     # 相对阈值 z-score：ε_ρ = 批内均值 + z·σ
     parser.add_argument("--rho-eps-keep", type=float, default=None)  # ε 强制采样比例（防自我强化退化）
+    parser.add_argument("--rho-eps-keep-modal", type=float, default=None)  # §8.6 式 57 模态层保留下界 ε_m（0=关闭，防整模态被裁）
     parser.add_argument("--rho-b-a", type=float, default=None)       # b_t surprisal 系数 a
     parser.add_argument("--rho-b-c", type=float, default=None)       # b_t 条件熵代理系数 c
     parser.add_argument("--rho-b-min", type=float, default=None)     # b_t clamp 下界
@@ -524,6 +525,10 @@ def main():
     parser.add_argument("--pac", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
                         help="覆盖 PAC 开关（默认开启；传 0 关闭）")
     parser.add_argument("--anchor-modality", choices=["image", "text"], default=None)
+    # 表征层 VICReg 反塌缩权重（§2.2.4）：作用于 token 序列 Z / 对齐投影空间
+    parser.add_argument("--cov-weight", type=float, default=None)          # token 序列协方差去相关（防低秩塌缩）
+    parser.add_argument("--align-var-weight", type=float, default=None)    # 对齐投影空间方差正则
+    parser.add_argument("--align-cov-weight", type=float, default=None)    # 对齐投影空间协方差去相关
     # PSCO 状态依赖收缩算子（§3.7.3）
     parser.add_argument("--psi", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--psi-transient-steps", type=int, default=None)
@@ -535,6 +540,10 @@ def main():
     parser.add_argument("--psi-var-weight", type=float, default=None)
     parser.add_argument("--psi-stop-weight", type=float, default=None)
     parser.add_argument("--psi-consist-weight", type=float, default=None)
+    parser.add_argument("--psi-h-var-weight", type=float, default=None)   # 防线 4：h 方差下界（防 h 塌缩为常数）
+    parser.add_argument("--psi-h-cov-weight", type=float, default=None)   # 防线 4：h 协方差去相关（防 h 低秩）
+    parser.add_argument("--psi-nontriv-weight", type=float, default=None) # 防线 5：轨迹非平凡性惩罚
+    parser.add_argument("--psi-nontriv-eps", type=float, default=None)    # 防线 5：首步位移下界阈值
     parser.add_argument("--flow", type=lambda s: s.lower() in ("1", "true", "yes"), default=None)
     parser.add_argument("--flow-depth", type=int, default=None)
     parser.add_argument("--flow-heads", type=int, default=None)
@@ -549,6 +558,8 @@ def main():
     # 平稳性门控多阶段课程（§3.4.2；默认开启，传 0 退回旧行为）
     parser.add_argument("--curriculum-enabled", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
                         help="平稳性门控多阶段课程（默认开启；传 0 关闭，退回旧行为）")
+    parser.add_argument("--curriculum-psi-reg-scale", type=float, default=None,
+                        help="S1/S2 期间 Ψ 纯正则（var/h_var/h_cov）权重缩放（默认 1.0 全权重，区别于读端薄接口 psi_read ×0.3）")
     parser.add_argument("--flow-in-pretrain", type=lambda s: s.lower() in ("1", "true", "yes"), default=None,
                         help="主预训是否计 flow 损失（默认 False：Flow 仅在 --flow-stage-steps 冻结 E 阶段）")
     parser.add_argument("--flow-stage-steps", type=int, default=0)  # >0 时主训练后进入 Flow 阶段（§4.2(e)）
@@ -621,6 +632,7 @@ def main():
         rho_eps=args.rho_eps,
         rho_eps_z=args.rho_eps_z,
         rho_eps_keep=args.rho_eps_keep,
+        rho_eps_keep_modal=args.rho_eps_keep_modal,
         rho_b_a=args.rho_b_a,
         rho_b_c=args.rho_b_c,
         rho_b_min=args.rho_b_min,
@@ -628,6 +640,9 @@ def main():
         rho_rate_weight=args.rho_rate_weight,
         alignment_method=args.alignment_method,
         cross_mask=args.cross_mask,
+        cov_weight=args.cov_weight,
+        align_var_weight=args.align_var_weight,
+        align_cov_weight=args.align_cov_weight,
         pac_enabled=args.pac,
         anchor_modality=args.anchor_modality,
         psi_enabled=args.psi,
@@ -640,6 +655,10 @@ def main():
         psi_var_weight=args.psi_var_weight,
         psi_stop_weight=args.psi_stop_weight,
         psi_consist_weight=args.psi_consist_weight,
+        psi_h_var_weight=args.psi_h_var_weight,
+        psi_h_cov_weight=args.psi_h_cov_weight,
+        psi_nontriv_weight=args.psi_nontriv_weight,
+        psi_nontriv_eps=args.psi_nontriv_eps,
         flow_enabled=args.flow,
         flow_depth=args.flow_depth,
         flow_heads=args.flow_heads,
@@ -652,6 +671,7 @@ def main():
         embed_factor=args.embed_factor,
         grad_checkpoint=args.grad_checkpoint,
         curriculum_enabled=args.curriculum_enabled,
+        curriculum_psi_reg_scale=args.curriculum_psi_reg_scale,
         flow_in_pretrain=args.flow_in_pretrain,
     )
     if resume_blob is not None:

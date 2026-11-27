@@ -676,6 +676,8 @@ def run_train(args, manifest_path, ckpt, logdir):
             argv += ["--rho-eps-z", str(args.rho_eps_z)]
         if args.rho_rate_weight is not None:
             argv += ["--rho-rate-weight", str(args.rho_rate_weight)]
+        if args.rho_eps_keep_modal is not None:
+            argv += ["--rho-eps-keep-modal", str(args.rho_eps_keep_modal)]
     if args.resume:
         argv += ["--resume", str(args.resume)]
     if args.save_every:
@@ -773,6 +775,8 @@ def parse_args():
     p.add_argument("--rho-eps-z", type=float, default=None,
                    help="相对阈值 z-score：ε_ρ=批内均值+z·σ（不指定则用 config 默认 0.5）")
     p.add_argument("--rho-eps-keep", type=float, default=0.02, help="ε 强制采样比例（防自我强化退化）")
+    p.add_argument("--rho-eps-keep-modal", type=float, default=None,
+                   help="§8.6 式 57 模态层保留下界 ε_m（不指定则用 config 默认 0 关闭；>0 防整模态被裁）")
     p.add_argument("--rho-b-a", type=float, default=1.0, help="b_t surprisal 系数 a")
     p.add_argument("--rho-b-c", type=float, default=0.5, help="b_t 条件熵代理系数 c")
     p.add_argument("--rho-b-min", type=float, default=0.0, help="b_t clamp 下界")
