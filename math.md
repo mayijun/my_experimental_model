@@ -89,6 +89,20 @@
 | §3.4.2 实例化：$\Psi$ 改端 / Flow / $\rho$ 记忆的回归目标追踪上游表征 | `Curriculum.lean` : `psi_change_side_tracks_target` / `flow_target_tracks_encoder` / `rho_memory_tracks_feature` + 各 `_not_cauchy` 推论 | ✅ 已证 |
 | §3.4.2 定理 5：阶段适定性链 S1→S2→S3→S4（上游非平稳 ⟹ 下游不适定） | `Curriculum.lean` : `stage_chain_well_posedness` / `four_stage_chain_nonstationary_breaks_downstream` | ✅ 已证 |
 | §3.4.2 $\varepsilon$ 阈值 / 滑窗 / 阶段比例 / 梯度方差 / 门控等价性 | — | ⚠️ 设计断言，非 Lean 可形式化，见 §3.4.2 与 README 问题 14 |
+| §3.11 慢/快谱分离：持久性 $a^k$ 随 $a$ 单调；快特征 $a\in[0,1)$ 衰减到 $0$；快慢比 $(a/b)^k\to0$ | `TemporalHierarchy.lean` : `persistence_mono` / `fast_decay` / `fast_slow_ratio` | ✅ 已证 |
+| §3.11 跨步 = 算子幂（加法性）：$M^{a+b}=M^a\circ M^b$（层次可组合） | `TemporalHierarchy.lean` : `powL_add` | ✅ 已证 |
+| §3.11 跨步保收缩：严格收缩 $f$ 的 $n$ 次迭代仍是严格收缩（常数 $K^n<1$） | `TemporalHierarchy.lean` : `lipschitz_iterate` / `iterate_still_contracting` | ✅ 已证 |
+| §3.11 几何级数伸缩恒等式：$(id-M)\circ(\Sigma_{i<s}M^i)=id-M^s$ | `TemporalHierarchy.lean` : `geom_series_telescope` | ✅ 已证 |
+| §3.11 不动点跨步不变性：基层不动点 $z$（$Mz+b=z$）也是任意 stride $s$ 粗算子的不动点 | `TemporalHierarchy.lean` : `fixedPoint_stride_invariant` | ✅ 已证 |
+| §3.11 速率-分辨率权衡：$K\in[0,1]$ 时 $K^s\le K$（$s\ge1$，越粗收敛越快） | `TemporalHierarchy.lean` : `rate_mono_stride` | ✅ 已证 |
+| §3.11 跨步幂乘法性：$(K^s)^n=K^{s\cdot n}$（残余只依赖总 horizon $s\cdot n$） | `TemporalHierarchy.lean` : `pow_mul_stride` | ✅ 已证 |
+| §3.11 残余随总 horizon 单调递减：$H\le H'\Rightarrow K^{H'}\le K^H$ | `TemporalHierarchy.lean` : `residual_horizon_mono` | ✅ 已证 |
+| §3.11 迭代次数随 stride 单调递减：$s\le s'\Rightarrow K^{s'\cdot n}\le K^{s\cdot n}$ | `TemporalHierarchy.lean` : `coarse_iterations_mono` | ✅ 已证 |
+| §3.12 序列输入递推闭式：$Z^{(t)}=M^t Z^{(0)}+\Sigma_{i<t}M^{t-1-i}x_i$（Z 隐式时间轴） | `TemporalHierarchy.lean` : `iterateSeq_eq_closedForm` | ✅ 已证 |
+| §3.13 保护保持严格收缩：门控 $P$（LipschitzWith 1）复合收缩 $M$ 后仍严格收缩（常数 $\le K$） | `TemporalHierarchy.lean` : `protect_still_contracting` | ✅ 已证 |
+| §3.13 保护强度单调：遗忘率 $\alpha$ 越小 $\Rightarrow$ 被保护谱值 $1-\alpha(1-a)$ 越大 | `TemporalHierarchy.lean` : `protection_spectral_mono` | ✅ 已证 |
+| §3.13 长程记忆下界抬升：谱抬升 $\gamma_{\mathrm{slow}}<\gamma\Rightarrow(1-\gamma_{\mathrm{slow}})^k>(1-\gamma)^k$ | `TemporalHierarchy.lean` : `memory_lower_bound_lifted` | ✅ 已证 |
+| §3.13 慢/快记忆比 $\to\infty$：$a_{\mathrm{fast}}<a_{\mathrm{slow}}\Rightarrow(a_{\mathrm{slow}}/a_{\mathrm{fast}})^k\to\mathrm{atTop}$ | `TemporalHierarchy.lean` : `slow_fast_memory_ratio_tendsto_atTop` | ✅ 已证 |
 
 **成熟要点（直接引用，不重证）**：
 
@@ -1898,6 +1912,193 @@ $$
 | DEQ 极限：$\|M\|<1$ 时从任意初值 $Z_{\text{in}}$ 迭代 $\to$ 不动点 $Z^*$（推广 §2.10 `mrLoop_tendsTo_fixedPoint`） | `reasoner_tendsTo_fixedPoint` | §3.10.2 |
 
 > **形式化边界（诚实）**：Lean 证明的是**表达力包含（函数代数）、参数计数不等式、不动点对偏移的单射性、算子范数幂次界、Neumann 级数极限、膨胀发散、串行深度递推对比、big-O 与不动点收敛**——代数结论对任意域 $K$ / 任意模 $V$ 成立；分析结论（极限、big-O）对 $T\to\infty$ / $k\to\infty$ 的 `Filter.atTop` 成立。**未形式化**：常数因子与真实墙钟 / 访存 / kernel 融合、非线性 $\Psi_h$ 表达力与「同参更深」泛化、DEQ 数值稳定性与求解精度、状态依赖段 $m$ 的最优取值、$\operatorname{im}\Psi$ 逼近全独立的程度——均为设计分析，依赖实测，见 [lean-math/README.md](file:///home/simon-ma/JEPA/lean-math/README.md)「问题 12」。线性化骨架（LZR-3）是数学分析对象，真实块的非线性行为需实验验证（同 §2.9 / §2.10 / §3.7.3 的边界声明）。
+
+### 3.11 时间分层与慢/快谱分离（借鉴 H-JEPA）
+
+> **问题来源**。H-JEPA（LeCun 团队 2026，`arXiv:2610.06805`）用「L 层动作条件 JEPA 堆叠、每层在**自己的潜空间**里预测更远期未来」实现时间分层，并报告「高层丢弃快变不可预测细节、保留慢变任务相关状态」。本节把它放进本框架的数学语言，回答两个问题：**(Q1)** 「可预测性 → 保留/丢弃」作为补充判据是否数学有利；**(Q2)** 本框架是否已隐含时间分层、若没有该如何修正才能满足全部既有公式。
+
+#### 3.11.1 Q1：可预测性判据的数学地位——收缩谱上的慢/快分离
+
+§2.6 的 $\rho=\|v-Mk\|^2$ 是**单步**冗余（给定记忆后还剩多少），不区分「可预测时域」。但 §2.1/§3.7 已确立：目标 $I(Z;Y)$ 是**慢变、稳定、可预测**的语义因子，而「可预测」本身带**时域轴**——短时域可预测（快）≠ 长时域可预测（慢）。H-JEPA 的「留慢丢快」正是把这条时域轴显式化。
+
+本框架**不需要引入新的时域参数**：收缩算子的谱本身就是时域轴。对角收缩 $M=\operatorname{diag}(\tilde a_h)$（§3.7.3 谱夹层 $\delta<\tilde a_{h,i}<1-\gamma$）的分量 $i$ 在 horizon $k$ 的持久性为 $\tilde a_{h,i}^k$，它随 $\tilde a_{h,i}$ 单调（`persistence_mono`）、快特征（小 $\tilde a$）以 $a^k\to0$ 衰减（`fast_decay`）、快分量相对慢分量以 $(a/b)^k\to0$ 趋于可忽略（`fast_slow_ratio`）。因此：
+
+- **慢特征 ⟺ 大特征值**（$\tilde a\to1-\gamma$，长时域可预测，高层保留）；
+- **快特征 ⟺ 小特征值**（$\tilde a\to\delta$，短时域可预测，低层/丢弃）。
+
+于是「可预测性 → 保留/丢弃」判据的**代数核心是可判定的**：它是谱夹层下界 $\delta$ 的 horizon 化，而非启发式。这与 §2.6「测差值、别估熵」一致——把「差值」从单步 $\rho$ 推广到 horizon 参数化的显著性 $s^{(\tau)}=I(x;Y\mid \tilde x,\text{历史}\tau)$；其**互信息版本是分析命题（未形式化）**（依赖率失真测度论，同 §8.4 命题 12），但代数核心（谱单调 + 快衰减）已由 [`lean-math/LeanMath/TemporalHierarchy.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/TemporalHierarchy.lean) 机械化。
+
+#### 3.11.2 Q2：框架是否已隐含时间分层——关联扫描的跨步前缀
+
+**结论：框架未以「独立潜空间堆叠」隐含时间分层，但同一收缩关联扫描的「跨步前缀」即是一层，无需新建任何算子。**
+
+H-JEPA 的做法是堆叠 $L$ 个独立 JEPA（各自 $E^{(\ell)},A^{(\ell)},F^{(\ell)}$、独立潜空间 $Z^{(\ell)}$）。这**违反**本框架两条契约：单一共享 $Z$（§2.6）与「有损只发生在 token 层、$Z$ 全程连续、不量化」（§2.6）。强行照搬会引入 $L$ 个量化瓶颈与对齐边界。
+
+但本框架已有更优的原语：§3.7.3 的关联扫描（Blelloch）**已经物化整条轨迹** $Z^{(0..N)}$。时间分层的第 $\ell$ 层（stride $s_\ell$）只需**读扫描在索引 $\{s_1\cdots s_\ell\cdot t\}$ 处的前缀**——这是 $O(1)$ 的索引选择、零额外前向。层次组合由仿射幺半群的结合性给出：$M^{a+b}=M^a\circ M^b$（`powL_add`），故「走 $a$ 步的层 + 走 $b$ 步的层 = 走 $a+b$ 步」，任意多层嵌套是其反复应用；跨步复合仍仿射、仍收缩（`iterate_still_contracting`：严格收缩 $f$ 的 $n$ 次迭代常数 $K^n<1$），因此**每一层的不动点收敛保证（Banach）由基层直接继承，无需为每层重证**。
+
+#### 3.11.3 更优方案：谱时间分层（Spectral Timescale Hierarchy, STH）
+
+把 3.11.1 与 3.11.2 合并，得到比 H-JEPA 更适合本框架的时间分层方案——**不新增潜空间，只用「收缩谱 + 跨步扫描」**：
+
+1. **谱即层级**：收缩算子 $M$ 的对角谱 $\tilde a_i\in(\delta,1-\gamma)$ 天然把 $Z$ 的维度按「快慢」分层——大特征值维度 = 高层抽象态、小特征值维度 = 低层细节。这与 §3.7.3 谱夹层**同一对象**，反塌缩（下界 $\delta$ 防慢模式坍缩、上界 $1-\gamma$ 保收敛）不新增约束。
+2. **跨步扫描即多分辨率**：关联扫描物化全轨迹，第 $\ell$ 层 = 读 stride $s_\ell$ 的前缀，$s_\ell$ 越大越「粗」；层次嵌套由 `powL_add` 保证，任意组合。
+3. **GPU 特性**：与 §3.7.3 关联扫描的 $O(\log N)$、§3.10.3 串行深度判据一致——扫描 $O(\log N)$、跨步索引 $O(1)$、无新增 kernel；谱分解是逐元素乘加、`torch.compile` 自动融合。串行深度 $O(\log N)$，优于 H-JEPA 逐层 rollout 的 $O(\sum_\ell H_\ell)$。
+4. **契约兼容**：$Z$ 单一、连续、不量化；有损仍只在 token 层（§2.6）；不新增模态边界。
+
+**一句话**：H-JEPA 给本框架的价值不是「独立潜空间堆叠」，而是「时间分层 = 收缩谱的慢/快分离 + 关联扫描的跨步前缀」这一**零新增算子**的设计；本框架已有的收缩幺半群（§2.9/§3.7.3）恰好是它的最优载体，无需照搬 H-JEPA 的多潜空间。
+
+**边界（诚实）**：「慢/快 = 大/小特征值」的对应依赖对角/低秩骨架（§3.7.3 的线性化假设）；真实非线性残差 $r_h(Z)$ 的时域分离是否同样干净需实验验证（同 §3.7.3/§2.9 的边界声明）。互信息版 horizon 显著性 $s^{(\tau)}$ 是分析命题、未形式化（§8.4 同款）。
+
+#### 3.11.4 更深入的推导：不动点的跨步不变性（已 Lean 机械化）
+
+3.11.2 断言「每层结论一致」——这需要一个更强的代数保证：**基层收缩映射的不动点（抽象结论）不随 stride 改变**。本小节给出机械化的证明链（[`TemporalHierarchy.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/TemporalHierarchy.lean) 第 4 节）。
+
+**几何级数伸缩恒等式**。对任意线性算子 $M$ 与 stride $s$，几何部分和 $\Sigma_{i<s}M^i$ 满足
+
+$$(id-M)\circ\Big(\textstyle\sum_{i<s}M^i\Big)\;=\;id-M^s \qquad\text{(`geom_series_telescope`)}$$
+
+这是「粗算子不动点方程 = 基层不动点方程」的代数根基：粗算子（stride $s$）是仿射对 $(M^s,\ \Sigma_{i<s}M^i b)$，其不动点方程是 $(id-M^s)z=\Sigma_{i<s}M^i b$；由伸缩恒等式 $(id-M^s)=(id-M)\circ(\Sigma M^i)$，二者在 $(id-M)$ 可逆时**等价**。
+
+**不动点的跨步不变性（正向）**。设 $z$ 是基层不动点：$Mz+b=z$。则对任意 $k$ 迭代稳定 $z=\text{iterate}(M,b,k,z)$（`fixed_point_iterate`），结合闭式（§3.7.3 `iterate_eq_closedForm`）得
+
+$$z \;=\; M^s z+\textstyle\sum_{i<s}M^i b \qquad\text{(`fixedPoint_stride_invariant`)}$$
+
+即 $z$ 同时是任意 stride $s$ 粗算子 $(M^s,\Sigma M^i b)$ 的不动点。**抽象结论（不动点）不依赖时间分辨率**——这是谱时间分层「每层同一 $Z$、同一结论、只差分辨率」的数学保证，也是它与 H-JEPA「每层独立潜空间」的根本区别：H-JEPA 每层收敛到**不同**潜空间的**不同**不动点，本框架每层收敛到**同一** $Z$ 的**同一**不动点。
+
+**速率-分辨率权衡**。对收缩常数 $K\in[0,1]$，$K^s\le K$（$s\ge1$，`rate_mono_stride`）。故 stride 越大（层越粗），Banach 迭代收敛**越快**（常数 $K^s$ 越小），但每步覆盖 horizon 越**长**、时间分辨率越**粗**——一个显式的速率/分辨率权衡，可为每层选最优 stride。
+
+**未形式化的边界**：反向（粗算子不动点 ⟹ 基层不动点）需要 $\Sigma_{i<s}M^i$ 可逆，等价于 $M$ 无 $s$ 次单位根特征值；对严格收缩（谱半径 $\rho(M)<1$）恒成立，但「$\rho(M)<1\Rightarrow\Sigma M^i$ 可逆」的谱论未在此机械化（依赖 §3.7.1 收缩 / Neumann 级数，同 Contractive.lean 的边界声明）。
+
+#### 3.11.5 最优 stride 的闭式与速率-分辨率权衡（已 Lean 机械化）
+
+**问题设置**。给定收缩常数 $K\in(0,1)$、目标残余 $\varepsilon\in(0,1)$，一个 stride $s$ 的层每做一次粗迭代把残余乘以 $K^s$（§3.11.4 `lipschitz_iterate`）。问：达到残余 $\le\varepsilon$ 需要多少次粗迭代 $n$？
+
+**闭式解（迭代次数）**。残余界是 $K^{s\cdot n}$（`pow_mul_stride`：$(K^s)^n=K^{s\cdot n}$，**只依赖总 horizon $s\cdot n$**）。要 $K^{s\cdot n}\le\varepsilon$，取对数（$K<1\Rightarrow\log K<0$）：
+
+$$s\cdot n \;\ge\; \frac{\log(1/\varepsilon)}{\log(1/K)} \;=:\;\Lambda \qquad\Longrightarrow\qquad n_{\min}(s)=\left\lceil\frac{\Lambda}{s}\right\rceil$$
+
+其中 $\Lambda=\log(1/\varepsilon)/\log(1/K)$ 是**总 horizon 预算**，与 stride $s$ 无关。
+
+**关键结构：平权权衡（flat tradeoff）**。由 `pow_mul_stride`，残余界 $K^{s\cdot n}$ 只由乘积 $s\cdot n$ 决定；由 `residual_horizon_mono`，$H\le H'\Rightarrow K^{H'}\le K^H$（残余随总 horizon 单调递减）。故：
+
+- **精度（残余）由总 horizon $\Lambda$ 决定，与 stride 分解无关**——这是 §3.11.4 不动点跨步不变性的定量形式：**无法靠「多分几层」买到精度**。
+- **stride 只在「迭代次数 vs 分辨率」间做平权交换**：$n_{\min}(s)=\lceil\Lambda/s\rceil$ 随 $s$ 单调递减（`coarse_iterations_mono`），但总工作量 $s\cdot n_{\min}(s)\approx\Lambda$ 恒定。
+
+**最优 stride 的判定**。既然精度与 stride 无关、总工作量也近似恒定，**最优 stride 不由精度决定，而由下游的时间分辨率需求与显存/带宽决定**：
+
+1. **分辨率下界**：若需分辨时域尺度 $\tau$（以 base step 计），则 $s\le\tau$。
+2. **慢特征保真上界**（连接 §3.11.1 谱夹层）：最慢特征 $\tilde a_{\max}=1-\gamma$ 在 stride $s$ 后的持久性为 $(1-\gamma)^s$；若要求它在读出头可见（$\ge$ 阈值 $\theta$），则 $(1-\gamma)^s\ge\theta\Rightarrow s\le\log\theta/\log(1-\gamma)$。
+3. **综合最优**（取可行区间最大 stride，最小化迭代/显存）：
+
+$$s^* \;=\; \min\Big(\tau,\ \big\lfloor \tfrac{\log\theta}{\log(1-\gamma)}\big\rfloor\Big)$$
+
+**对本框架的借鉴意义**（承接 §3.11.1 谱时间分层）：
+
+1. **精度与层级解耦**：不动点跨步不变 + 残余只依赖 $\Lambda$ ⟹ 「加层」不能提升抽象结论精度，层级设计只服务于**计算/带宽/分辨率**，不服务于精度。纠正「更深分层 = 更准世界模型」的误区。
+2. **最优 stride 由谱夹层给出**：$s^*$ 的上界 $\log\theta/\log(1-\gamma)$ 直接来自谱夹层上界 $1-\gamma$（§3.7.3）——快/慢分离（§3.11.1）与最优 stride（本节）是**同一组谱参数的两种用法**：慢维度（$\tilde a\to1-\gamma$）可粗 stride，快维度（$\tilde a\to\delta$）必须细 stride。
+3. **与 $\rho$ 压缩正交**：$\rho$ 压缩（§2.6）是 token 层「写后压」的**步内**冗余（单步内哪些 token 保留），stride 是**跨步**的时间分辨率（几步一读）——两者都是「慢/快」，但作用于不同粒度，不可混淆。
+4. **GPU 特性**：`pow_mul_stride` + `coarse_iterations_mono` 说明在 $O(\log N)$ 关联扫描（§3.7.3）下，stride 只影响**物化状态数**（$N/s$）而非并行深度——最优 stride 本质是「在满足分辨率约束下最小化显存/带宽」，与 §3.10.3 串行深度 $O(\log N)$ 相互独立。
+5. **落地方向（不在此落地）**：可把 $s^*=\min(\tau,\lfloor\log\theta/\log(1-\gamma)\rfloor)$ 写入 config 作为 `stride_schedule` 默认，由 $\gamma,\theta,\tau$ 三个超参决定，无需手工调 stride。
+
+**未形式化的边界**：$\Lambda$ 与 $s^*$ 的对数/取整闭式依赖 $\log$ 的实数分析（未在此机械化）；Lean 已证的代数核心是 `pow_mul_stride`（残余只依赖总 horizon）、`residual_horizon_mono`（单调递减）、`coarse_iterations_mono`（stride 越大越快），闭式是它们的直接对数推论。
+
+---
+
+## 3.12 Z 空间的隐式时间轴（序列输入注入，非时间分层方案）
+
+> **问题**：能否**不引入时间分层**（§3.11），直接在原方案的单一 $Z$ 中隐式承载视频时间轴，使（1）有时间的视频与（2）无时间的文字在 $Z$ 上对齐，（3）算子在隐式时间轴上运算？本节给出数学回答与机制。
+
+#### 3.12.1 负结果：自治收缩只给「深度」，不给「时间」
+
+原方案的核心算子是**自治仿射收缩** $Z^{(k+1)}=MZ^{(k)}+b$（§2.9/§3.7.3）。它的唯一不动点 $z^*=(I-M)^{-1}b$ 是**时间不变的**（§3.11.4 `fixedPoint_stride_invariant`），且轨道 $Z^{(k)}\to z^*$（`mrLoop_tendsTo_fixedPoint` / §3.7.1）。因此：**把视频「迭代到不动点」必然把时间序列坍缩成单个时间不变摘要**——自治收缩的 $Z$ 不保留时间。
+
+§2.10 的 MR-Loop（输入注入 $h\mapsto Mh+Me$）修复了「输入坍缩」（`mrLoop_no_input_collapse`：不同输入 $e$ ⟹ 不同不动点），但它注入的是**固定**输入 $e$，收敛到的仍是一个**输入依赖但时间不变**的不动点 $\mathrm{fp}(e)$。所以 MR-Loop 给的是**深度**（单输入 $\to$ 摘要），不是**时间**（输入序列 $\to$ 状态序列）。
+
+#### 3.12.2 机制：序列输入注入（把「固定输入」推广为「逐帧输入」）
+
+要让单一 $Z$ 隐式承载时间，唯一缺失的机制是**把 MR-Loop 的固定输入 $e$ 换成逐步变化的输入 $x_t$**：
+
+$$Z^{(t+1)} \;=\; M\,Z^{(t)} + x_t$$
+
+其闭式（`iterateSeq_eq_closedForm`，已 Lean 机械化）为**升幂卷积**：
+
+$$Z^{(t)} \;=\; M^t Z^{(0)} \;+\;\sum_{i<t} M^{\,t-1-i}\, x_i$$
+
+**这是「隐式时间」的数学核心**：$Z^{(t)}$ 携带**完整输入历史** $(x_0,\dots,x_{t-1})$，时间轴被折叠进算子 $M$ 的幂与卷积，而非 $Z$ 的显式维度。故 $Z^{(t)}$ 与文字模态的 $Z$（单向量）**同维、可对齐**——这正是「隐式」的含义：时间不进维度，进递归。
+
+**对齐**：文字（无时间）对齐到视频的**时间不变摘要** $z^*=(I-M)^{-1}\bar{x}$（$\bar{x}$ 为时间平均输入），即自治收缩的不动点；视频的**时间变分量** $\sum M^{t-1-i}(x_i-\bar{x})$ 承载运动/变化，不与文字对齐（文字无时间轴可表达之）。这与 §3.4 跨模态硬对齐一致：跨模态对齐发生在**时间不变内容**上，时间变内容只存在于有时轴的模态内部。
+
+**算子运算**：算子 $M$ 沿 $t$ 逐帧作用（同一 $M$），即 §3.7.3 的关联扫描（PSCO）——时间轴 = 扫描下标，算子 = 扫描的幺半群元。
+
+#### 3.12.3 机制性质（GPU 友善 + 反塌缩）
+
+1. **GPU 友善**：序列注入是 §3.7.3 关联扫描的输入注入形式，$O(\log T)$ 并行深度、无新增 kernel；$x_t$ 的注入是逐元素加，`torch.compile` 自动融合。
+2. **不引入量化/新维度**：$Z$ 仍单一、连续、不量化（§2.6），时间不进维度——与「有损只在 token 层」契约一致。
+3. **反塌缩**：时间变分量 $\sum M^{t-1-i}x_i$ 使 $Z^{(t)}$ 对输入序列**可区分**（不同帧序列 ⟹ 不同状态轨迹），避免 MR-Loop 单输入时的「时间不变塌缩」；同时 $\|M\|<1$ 保证历史按 $K^{t-i}$ 衰减（`fast_decay`），旧帧影响力有限（因果、有限记忆）。
+
+#### 3.12.4 对本框架的意义与边界
+
+**意义**：原方案**无需时间分层即可隐式承载时间**——只需把 MR-Loop 的固定输入 $e$ 换成逐帧输入 $x_t$（一个薄改动）。这回答了「文字↔视频能否在单一 $Z$ 对齐」：**能**，对齐发生在时间不变摘要 $z^*$ 上。算子沿隐式时间轴的运算就是已有 PSCO 扫描。
+
+**与 §3.11 时间分层的关系**：二者正交——§3.11 的跨步分层是**多时间尺度**（同一序列在不同 stride 下的摘要），本节是**单时间尺度的隐式时间承载**（把时间折进递归）。需要多尺度时叠加 §3.11，不需要时仅用本节机制。
+
+**边界（诚实）**：$z^*=(I-M)^{-1}\bar{x}$ 的「时间平均 $\bar{x}$」是分析/设计量，未机械化；$x_t=E(o_t)$ 逐帧注入假设视频帧可独立编码（帧间依赖由 $M$ 沿时间传递），真实视觉编码器的帧间混合需实验验证（同 §2.7 边界）。闭式 `iterateSeq_eq_closedForm` 已对任意域 $K$、任意模 $V$、任意输入序列 $x:\mathbb{N}\to V$ 机械化。
+
+---
+
+## 3.13 融合方案：单尺度隐式时间 + 慢特征保护（谱正则 / 记忆门控）
+
+> **动机**。§3.11（多时间尺度）与 §3.12（单尺度隐式时间 + ρ压缩）各有优缺点：§3.11 提供可判定的「留慢丢快」（`fast_slow_ratio`），但 `pow_mul_stride` 揭示其**平权权衡**——残余只依赖总 horizon $s\cdot n$，多尺度**不提升精度**，且独立层有参数陷阱、跨模态对齐需额外定义；§3.12 用最小代价让单一 $Z$ 隐式承载时间、天然跨模态对齐、GPU 最友好，但**长程记忆受均匀收缩谱限制、慢特征无保护**。本节给出融合方案：**以 §3.12 为骨架，把 §3.11 的谱分离降级为谱正则 / 记忆门控（保护慢特征），不引入显式多层**。
+
+### 3.13.1 取舍：保留什么、舍弃什么
+
+| 维度 | 保留 | 舍弃 |
+|---|---|---|
+| 骨架 | §3.12 单 $Z$ 隐式时间（序列输入注入闭式） | §3.11 显式多层 |
+| 有损位置 | ρ压缩在 token 层（§2.6），$Z$ 全程连续无损 | — |
+| 谱分离 | §3.11「留慢丢快」→ 降级为**谱正则** | §3.11 独立层参数、平权冗余 |
+| 对齐 | 文字→时间不变不动点 $z^*$（§3.12.2） | 无需定义文字对应哪一层 |
+
+关键决策：**不引入显式多层**。`pow_mul_stride` 已证多尺度不提升精度（残余只依赖 $s\cdot n$），多层价值仅剩「分辨率/记忆调度」，无精度收益；把「留慢丢快」直接做成**谱正则**即可避开这个平权冗余与独立层参数陷阱。
+
+### 3.13.2 慢特征保护的数学形式：静态线性门控
+
+§3.12 缺点的根因：均匀谱夹层 $\delta<\tilde a_i<1-\gamma$（§3.7.3）把**所有**维度（含慢特征）压到 $1-\gamma$ 以下，慢方向长程记忆被不必要削弱。
+
+**保护的形式**：引入**静态线性门控算子** $P:Z\to Z$（谱值 $\in[0,1]$，Lipschitz 常数 $\le1$），被保护算子
+
+$$\widetilde M \;=\; P\circ M$$
+
+- **$P$ 在慢方向接近恒等**（$P_j\approx1$，保留慢特征）；
+- **$P$ 在快方向接近 0**（$P_j\approx0$，丢弃 / 加速遗忘快特征）。
+
+**为什么必须静态线性**：$P$ 与输入 $x_t$、时间 $t$ 无关 ⟹ $\widetilde M$ 仍是**线性映射** ⟹ §3.7.3 的仿射幺半群、PSCO 并行扫描、以及 §3.12 的闭式卷积 `iterateSeq_eq_closedForm` 对 $\widetilde M$ **自动成立**（该定理对任意线性 $M$ 通用）。若 $P$ 输入依赖 / 非线性，$\widetilde M$ 非仿射，整个扫描结构被破坏。这是「融合不破坏框架」的硬约束。
+
+**等价形式（遗忘门）**：对角化后，慢方向被保护谱值 $\tilde{\tilde a}_j = 1-\alpha_j(1-\tilde a_j)$，其中 $\alpha_j\in[0,1]$ 是遗忘率。$\alpha_j=1$ 无保护（$\tilde{\tilde a}_j=\tilde a_j$），$\alpha_j\to0$ 完全保护（$\tilde{\tilde a}_j\to1$）。`protection_spectral_mono` 保证 $\alpha$ 越小（保护越强）⟹ 被保护谱值越大 ⟹ 长程记忆越强。这就是把 §3.11 的「留慢丢快」从「显式分层」降级为「逐维谱重加权」。
+
+### 3.13.3 长程记忆下界抬升（已 Lean 机械化）
+
+四个定理（[`TemporalHierarchy.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/TemporalHierarchy.lean) 第 7 节）：
+
+1. **保护不破坏收缩** `protect_still_contracting`：门控 $P$（LipschitzWith 1）复合收缩 $M$（LipschitzWith $K$，$K<1$）后仍严格收缩、常数 $\le K$。⟹ Banach 收敛契约不变，PSCO 扫描仍合法。
+2. **保护强度单调** `protection_spectral_mono`：$\alpha\le\beta\Rightarrow 1-\beta(1-a)\le1-\alpha(1-a)$（$a\le1$）。遗忘率连续调节谱值。
+3. **长程记忆下界抬升（核心）** `memory_lower_bound_lifted`：$\gamma_{\mathrm{slow}}<\gamma<1$ 且 $\gamma_{\mathrm{slow}}\ge0$ ⟹ $(1-\gamma)^k<(1-\gamma_{\mathrm{slow}})^k$（$k\ne0$）。把均匀谱上界 $1-\gamma$ 抬到慢方向 $1-\gamma_{\mathrm{slow}}$，慢方向长程记忆保持率**严格抬升**。
+4. **慢/快记忆比 → ∞** `slow_fast_memory_ratio_tendsto_atTop`：$a_{\mathrm{fast}}<a_{\mathrm{slow}}$ ⟹ $(a_{\mathrm{slow}}/a_{\mathrm{fast}})^k\to\mathrm{atTop}$。这是 `fast_slow_ratio`（快/慢 → 0）的**对偶**——保护后慢方向相对快方向**无限主导**，故「留慢丢快」在长时域下几乎无损。
+
+**结论**：融合方案在保留 §3.12 全部优点（单 $Z$、隐式时间、跨模态对齐、GPU 单路扫描、$Z$ 无损）的同时，补上 §3.12 缺失的「慢特征保护」——通过谱重加权把慢方向长程记忆下界从 $(1-\gamma)^k$ **抬升**到 $(1-\gamma_{\mathrm{slow}})^k$，且不引入多层、不破坏收缩与扫描结构。
+
+### 3.13.4 GPU 特性与契约兼容
+
+1. **GPU 友善**：$P$ 是静态对角 / 低秩线性算子，$P\circ M$ 的谱重加权是逐元素乘加，`torch.compile` 自动融合；闭式卷积仍走 §3.7.3 的 $O(\log T)$ 关联扫描，无新增 kernel。
+2. **契约兼容**：$Z$ 单一、连续、不量化；有损只在 token 层 ρ压缩；$P$ 静态线性不引入新模态边界。
+3. **可扩展性（三档规模）**：$P$ 与 $M$ 同维，参数量 $O(d)$（对角）或 $O(d^2)$（低秩）；只调谱值 $\alpha_j$ 与维度 $d$，不改变 §3.12 的调用约定，与三档规模规则同构。
+
+### 3.13.5 边界（诚实）
+
+1. **「$P$ 在慢/快方向取值」依赖对角 / 低秩骨架**（§3.7.3 线性化假设）：真实非线性残差 $r_h(Z)$ 的谱分离是否同样干净需实验验证（同 §3.11.1 / §3.7.3 边界声明）。
+2. **门控系数 $\alpha_j$ 的学习**：由「可预测性→保留/丢弃」判据驱动（§3.11.1 的 horizon 化显著性），其互信息版本仍是分析命题、未形式化（§8.4 同款）；代数核心（谱单调 + 保护保持收缩 + 记忆下界抬升）已机械化。
+3. **谱抬升与谱夹层上界 $1-\gamma$ 的张力**：抬升慢方向到 $1-\gamma_{\mathrm{slow}}$ 需满足 $\gamma_{\mathrm{slow}}>0$（仍严格收缩、保证收敛）；$\gamma_{\mathrm{slow}}$ 的下界由反塌缩要求决定（同 §3.7.3 谱夹层下界 $\delta$ 的角色），二者是同一超参的两种约束，其最优值未在此机械化。
+4. **ρ压缩与谱保护的交互**：ρ压缩是 token 层「写后压」（步内冗余），谱保护是 $Z$ 层「谱重加权」（跨步记忆），二者作用于不同粒度（同 §3.11.5 第 3 点）；其联合最优（何时压 token、何时保护谱）未形式化。
 
 ---
 
