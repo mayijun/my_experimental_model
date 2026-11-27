@@ -276,7 +276,7 @@ def _ema_l2(model):
 def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", rank=0,
           writer=None, optimizer=None, start_step=0,
           save_path=None, save_every=0, save_dtype="fp32", vocab_size=0, tokenizer_meta=None,
-          max_grad_norm=0.0):
+          max_grad_norm=0.0, grad_accum=1):
     """通用训练循环：从 batch_fn 拉 (img, txt)，跑「编码→对齐/推理→解码」。
 
     resume 时传入已恢复状态的 optimizer 与 start_step，从 start_step+1 继续；
@@ -303,12 +303,18 @@ def train(model, batch_fn, pad_id, mask_id, device, steps, lr, optim="adamw", ra
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     for step in range(start_step + 1, steps + 1):
         t0 = time.time()
-        img, txt = batch_fn()
-        with maybe_autocast(device):
-            # 走 model(...)（而非直接调 forward_losses），使 DDP 能同步梯度。
-            loss, parts, stats = model(img, txt, pad_id, mask_id, step=step, total_steps=steps)
         optimizer.zero_grad()
-        loss.backward()
+        agg_loss = torch.zeros((), device=device)
+        parts, stats = {}, {}
+        # 梯度累积：grad_accum 个 micro-batch 累加梯度后再 step，等效增大有效 batch。
+        for _ in range(grad_accum):
+            img, txt = batch_fn()
+            with maybe_autocast(device):
+                # 走 model(...)（而非直接调 forward_losses），使 DDP 能同步梯度。
+                micro_loss, parts, stats = model(img, txt, pad_id, mask_id, step=step, total_steps=steps)
+            (micro_loss / grad_accum).backward()
+            agg_loss = agg_loss + micro_loss.detach()
+        loss = agg_loss / grad_accum
         # 梯度范数 + 可选裁剪：max_grad_norm<=0 时不裁剪（inf 阈值），但仍记录范数，
         # 用于诊断 bf16 下梯度爆炸/消失或某分支梯度为 0（多分支加权损失下 loss 曲线看不出）。
         total_norm = torch.nn.utils.clip_grad_norm_(
@@ -509,6 +515,8 @@ def main():
     parser.add_argument("--optim", choices=["adamw", "adafactor", "adamw8bit"], default="adamw8bit")
     parser.add_argument("--max-grad-norm", type=float, default=0.0,
                         help="梯度裁剪阈值（0=不裁剪，仍记录 grad_norm 供诊断爆炸/消失；>0 时裁剪到该范数）")
+    parser.add_argument("--grad-accum", type=int, default=1,
+                        help="梯度累积步数（>1 等效增大有效 batch：micro-batch=batch-size，每 grad-accum 个 micro-batch 累加梯度后 step）")
     # 对齐方法（§3.4）：infonce / byol（默认）/ dino
     parser.add_argument("--alignment-method", choices=["infonce", "byol", "dino"], default=None)
     # 交叉掩码（§3.2 式 18）与 PAC（§3.4 式 21）
@@ -758,7 +766,7 @@ def main():
           rank=rank, writer=writer, optimizer=optimizer, start_step=start_step,
           save_path=args.save or None, save_every=args.save_every, save_dtype=args.save_dtype,
           vocab_size=vocab_size, tokenizer_meta=tokenizer_meta,
-          max_grad_norm=args.max_grad_norm)
+          max_grad_norm=args.max_grad_norm, grad_accum=args.grad_accum)
 
     if args.flow_stage_steps > 0:
         if rank == 0:

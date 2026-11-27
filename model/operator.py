@@ -62,6 +62,9 @@ class PsiLayer(nn.Module):
             )
         # 读出头（防线 2）：锚定 Z* 保留输入信息（塌成常数则无法重建）
         self.readout = nn.Linear(dim, dim)
+        # h 信息量约束读出头（防线 4）：h=H(Z) 必须能重建池化输入 Z，
+        # 强制 h 随输入变化（h 塌成常数则读不出不同输入，算子退化为常值映射）。
+        self.h_readout = nn.Linear(dim, dim)
 
     def infer_h(self, z):
         """z: [B, L, d] → h: [B, d]（沿序列池化）。"""

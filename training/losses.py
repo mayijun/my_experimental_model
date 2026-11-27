@@ -242,6 +242,8 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     with torch.no_grad():
         _, img_tgt = model.image_target(img, rho_active=rho_active)
         _, txt_tgt = model.text_target(txt, rho_active=rho_active)
+        pool_img_tgt = img_tgt.mean(dim=1)
+        pool_txt_tgt = txt_tgt.mean(dim=1)
 
     def mscale(img_term, txt_term):
         """按 PAC p_anchor 缩放锚/新模态损失（损失权重门控近似单模态投喂，README 问题 14）。"""
@@ -284,6 +286,9 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         align_rep_t = model.embed(txt_cls)
         align_var = 0.5 * (variance_loss(align_rep_i) + variance_loss(align_rep_t))
         align_cov = 0.5 * (covariance_loss(align_rep_i) + covariance_loss(align_rep_t))
+    # —— CLS 读出头锚定（§3.7.3 防线 2）：CLS 预测池化目标 token（重建锚定、输入特定），防 CLS 退化塌缩 ——
+    cls_readout_i = F.mse_loss(model.cls_readout(img_cls), pool_img_tgt)
+    cls_readout_t = F.mse_loss(model.cls_readout(txt_cls), pool_txt_tgt)
     rate = torch.zeros((), device=device)
     if cfg.rho_compress and img_b is not None and txt_b is not None:
         rate = 0.5 * (img_b.mean() + txt_b.mean())
@@ -344,6 +349,7 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.var_weight * mscale(var_i, var_t)
         + cfg.align_var_weight * align_var
         + cfg.align_cov_weight * align_cov
+        + cfg.cls_readout_weight * mscale(cls_readout_i, cls_readout_t)
         + cfg.rho_rate_weight * rate * gates["rate"]
         + cfg.cross_mask_weight * mscale(cross_pred_i, cross_pred_t)
         + cfg.psi_readout_weight * mscale(psi_readout_i, psi_readout_t) * gates["psi_read"]
@@ -359,6 +365,7 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
         "align": align, "var": var_i + var_t, "rate": rate,
         "align_var": align_var, "align_cov": align_cov,
+        "cls_readout": cls_readout_i + cls_readout_t,
         "cross_pred": cross_pred_i + cross_pred_t,
         "psi_readout": psi_readout_i + psi_readout_t,
         "psi_var": psi_var_i + psi_var_t,

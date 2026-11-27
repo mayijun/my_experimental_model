@@ -680,6 +680,8 @@ def run_train(args, manifest_path, ckpt, logdir):
         argv += ["--resume", str(args.resume)]
     if args.save_every:
         argv += ["--save-every", str(args.save_every)]
+    if args.grad_accum > 1:
+        argv += ["--grad-accum", str(args.grad_accum)]
     print(f"[train] optim={optim} batch={args.batch_size} steps={args.steps}+{args.flow_steps}"
           + (f" | resume={args.resume}" if args.resume else "")
           + (f" | save_every={args.save_every}" if args.save_every else ""))
@@ -748,6 +750,8 @@ def parse_args():
                    help="resume 时若 --steps 不大于 ckpt 步数，自动追加的训练步数（默认 10000）")
     p.add_argument("--save-every", type=int, default=0,
                    help="每 N 步原子落盘（0=仅结束时）；长跑防中断丢进度")
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="梯度累积步数（>1 等效增大有效 batch，稳定 VICReg 方差/协方差等 batch 统计量）")
     # —— Flickr30k（真实图文对，跨模态对齐信号）——
     p.add_argument("--flickr-root", type=str, default="",
                    help="显式指定 Flickr30k 目录（含 flickr30k_train.parquet）；默认按 公开数据→数据盘 自动发现")

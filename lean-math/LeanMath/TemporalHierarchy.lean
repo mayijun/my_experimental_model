@@ -287,18 +287,23 @@ theorem feedback_spares_slow (Ps Pf C : V →ₗ[K] V)
     gatedFeedback C Pf (Ps z) = 0 := by
   rw [gatedFeedback, LinearMap.comp_apply, h_kill, map_zero]
 
-/-! ## 8. 机制二的推广：全 Z 逐维软门控（对角门控，§3.14）
+end TemporalHierarchy
 
-把 §7 的二值门控（Π_f 快投影，权重 0/1）推广为**逐维软门控** G = diag(p)，p_i ∈ [0,1]：
-  每个维度 i 独立拥有自己的门控权重 p_i（= 0 放过 = 慢特征保护；= 1 全修正 = 快特征；
-  中间值连续调节）。即「所有 Z 维度各自分层」——机制二从「快/慢二分」推广到「全谱逐维」。
+/-! # ZHierarchy：全 Z 逐维软门控（机制二的推广，§3.14）
 
-GPU 友善的数学根基（本节全部机械化）：
+把 §3.13 融合方案「机制二」的二值门控（Π_f 快投影，权重 0/1）推广为**逐维软门控**
+G = diag(p)，p_i ∈ [0,1]：每个维度 i 独立拥有自己的门控权重 p_i（= 0 放过 = 慢特征保护；
+= 1 全修正 = 快特征；中间值连续调节）。即「所有 Z 维度各自分层」——机制二从「快/慢二分」
+推广到「全谱逐维」。
+
+GPU 友善与契约相容的数学根基（本节全部机械化）：
   - diagGate_pointwise：第 i 维输出只依赖第 i 维输入（逐点独立、embarrassingly parallel）。
   - diagGate_comp：门控复合 = 逐维权重相乘（可合并为单次逐元素缩放，并入 PSCO 扫描幺半群元）。
-  - soft_gate_preserves_contraction：0≤a<1、0≤p≤1 ⟹ p·a∈[0,1)（全 Z 分层仍收缩）。
+  - soft_gate_preserves_contraction：0≤a<1、0≤p≤1 ⟹ p·a∈[0,1)（全 Z 分层仍收缩 ρ<1）。
+  - gate_preserves_upper_bound / gate_preserves_lower_bound：谱夹层相容性（见 §SpectralSandwich）。
   - diagGate_zero_dim / diagGate_mono：门控逐维放过 / 连续调节（推广 feedback_spares_slow）。
--/
+
+namespace ZHierarchy
 
 section DiagonalGate
 
@@ -377,4 +382,31 @@ theorem soft_gate_preserves_contraction (a p : ℝ) (ha0 : 0 ≤ a) (ha1 : a < 1
 
 end DiagonalGateOrdered
 
-end TemporalHierarchy
+/-! ## 谱夹层相容性（ZHierarchy 与 §3.7.3 谱夹层 δ < ã_i < 1-γ 的冲突检查） -/
+
+section SpectralSandwich
+
+/-- 门控保持谱夹层**上界**：0≤a<u、p≤1 ⟹ p·a < u。
+    若门控作用于转移 M（把特征值 a 缩为 p·a），上界 1-γ 仍被保持（p·a ≤ a < u）。
+    即 ZHierarchy 不破坏 §3.7.3 的收缩上界，不动点收敛仍成立。 -/
+theorem gate_preserves_upper_bound (a p u : ℝ) (ha0 : 0 ≤ a) (hau : a < u) (hp1 : p ≤ 1) :
+    p * a < u := by
+  have hle : p * a ≤ a := by
+    calc
+      p * a ≤ 1 * a := mul_le_mul_of_nonneg_right hp1 ha0
+      _ = a := by simp
+  exact lt_of_le_of_lt hle hau
+
+/-- 门控保持谱夹层**下界**的充要条件：0<δ≤a 时 δ < p·a ⟷ δ/a < p。
+    这是 ZHierarchy 与谱夹层下界 δ 的冲突点：若门控作用于转移 M（把特征值 a 缩为 p·a），
+    要保持下界 δ < p·a，必须 p > δ/a（因 a≥δ 故 δ/a ≤ 1，是真实约束）。
+    **结论**：ZHierarchy 的门控应只作用于**反馈**（不缩放 M 的特征值），从而不触碰下界；
+    若把门控也作用到 M 上，则每个受门控维度须满足 p_i > δ/a_i。 -/
+theorem gate_preserves_lower_bound (δ a p : ℝ) (hδ0 : 0 < δ) (hδa : δ ≤ a) :
+    δ < p * a ↔ δ / a < p := by
+  have ha0 : 0 < a := lt_of_lt_of_le hδ0 hδa
+  exact (div_lt_iff₀ ha0).symm
+
+end SpectralSandwich
+
+end ZHierarchy

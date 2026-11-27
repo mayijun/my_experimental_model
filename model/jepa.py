@@ -116,6 +116,14 @@ class MultimodalJEPA(nn.Module):
         self.proj = nn.Sequential(nn.LayerNorm(cfg.dim), nn.Linear(cfg.dim, cfg.dim))
         self.align = build_alignment_head(cfg)
 
+        # —— CLS 读出头锚定（§3.7.3 防线 2）：CLS 预测池化目标 token，给 CLS 非退化锚点 ——
+        self.cls_readout = nn.Sequential(
+            nn.LayerNorm(cfg.dim),
+            nn.Linear(cfg.dim, 4 * cfg.dim),
+            nn.GELU(),
+            nn.Linear(4 * cfg.dim, cfg.dim),
+        )
+
         # —— 交叉掩码预测器（§3.2 式 18）——
         self.cross_mask_predictor = (
             CrossMaskPredictor(cfg.dim, _decoder_heads(cfg.dim)) if cfg.cross_mask else None

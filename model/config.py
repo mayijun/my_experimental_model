@@ -51,6 +51,7 @@ class MJEPAConfig:
     var_weight: float = 0.1     # VICReg 方差正则（防塌缩，作用在 token 序列上）。
     align_var_weight: float = 0.1  # VICReg 方差正则（作用在对齐投影空间 g_θ(CLS)，防 CLS 投影塌缩；§2.2.4(b) 式 36 的补足）。
     align_cov_weight: float = 0.1  # VICReg 协方差正则（惩罚对齐投影维度间协方差，防维度冗余塌缩）。
+    cls_readout_weight: float = 0.3  # CLS 读出头锚定（§3.7.3 防线 2）：CLS 预测池化目标 token，给 CLS 非退化锚点。
 
     # —— 对齐方法（§3.4）：跨模态软对齐信号源，默认 BYOL（无负样本、无 batch 依赖）——
     alignment_method: str = "byol"   # infonce（软对齐兜底）/ byol（默认）/ dino

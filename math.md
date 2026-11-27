@@ -104,11 +104,13 @@
 | §3.13 保护拉大慢快留存差距：$a_s^k-a_f^k\le a_s'^k-a_f^k$（分离强化） | `TemporalHierarchy.lean` : `slow_fast_gap_widened` | ✅ 已证 |
 | §3.13 自反馈修正随 horizon 衰减：$a_f\in[0,1)$ 时 $a_f^k\to0$（短期局部化） | `TemporalHierarchy.lean` : `feedback_correction_decays` | ✅ 已证 |
 | §3.13 门控自反馈不扰动慢特征：$\Pi_f(\Pi_s z)=0\Rightarrow (C\circ\Pi_f)(\Pi_s z)=0$ | `TemporalHierarchy.lean` : `feedback_spares_slow` | ✅ 已证 |
-| §3.14 对角门控逐点独立：第 $i$ 维输出只依赖第 $i$ 维输入（GPU 并行，无跨维依赖） | `TemporalHierarchy.lean` : `diagGate_pointwise` | ✅ 已证 |
-| §3.14 门控复合 = 逐维权重相乘：$\operatorname{diag}(p)\circ\operatorname{diag}(q)=\operatorname{diag}(p\cdot q)$（可合并） | `TemporalHierarchy.lean` : `diagGate_comp` | ✅ 已证 |
-| §3.14 门控逐维放过：$p_i=0\Rightarrow(\operatorname{diag}(p)z)_i=0$（推广 feedback_spares_slow） | `TemporalHierarchy.lean` : `diagGate_zero_dim` | ✅ 已证 |
-| §3.14 软门控逐维单调：$p_i\le q_i$、$0\le z_i$ ⟹ $(\operatorname{diag}(p)z)_i\le(\operatorname{diag}(q)z)_i$ | `TemporalHierarchy.lean` : `diagGate_mono` | ✅ 已证 |
-| §3.14 软门控不破坏收缩：$a\in[0,1)$、$p\in[0,1]$ ⟹ $pa\in[0,1)$ | `TemporalHierarchy.lean` : `soft_gate_preserves_contraction` | ✅ 已证 |
+| §3.14 ZHierarchy 对角门控逐点独立：第 $i$ 维输出只依赖第 $i$ 维输入（GPU 并行，无跨维依赖） | `TemporalHierarchy.lean` : `diagGate_pointwise` | ✅ 已证 |
+| §3.14 ZHierarchy 门控复合 = 逐维权重相乘：$\operatorname{diag}(p)\circ\operatorname{diag}(q)=\operatorname{diag}(p\cdot q)$（可合并） | `TemporalHierarchy.lean` : `diagGate_comp` | ✅ 已证 |
+| §3.14 ZHierarchy 门控逐维放过：$p_i=0\Rightarrow(\operatorname{diag}(p)z)_i=0$（推广 feedback_spares_slow） | `TemporalHierarchy.lean` : `diagGate_zero_dim` | ✅ 已证 |
+| §3.14 ZHierarchy 软门控逐维单调：$p_i\le q_i$、$0\le z_i$ ⟹ $(\operatorname{diag}(p)z)_i\le(\operatorname{diag}(q)z)_i$ | `TemporalHierarchy.lean` : `diagGate_mono` | ✅ 已证 |
+| §3.14 ZHierarchy 软门控不破坏收缩：$a\in[0,1)$、$p\in[0,1]$ ⟹ $pa\in[0,1)$ | `TemporalHierarchy.lean` : `soft_gate_preserves_contraction` | ✅ 已证 |
+| §3.14 ZHierarchy 门控保持谱夹层上界：$0\le a<u$、$p\le1$ ⟹ $pa<u$（$u=1-\gamma$） | `TemporalHierarchy.lean` : `gate_preserves_upper_bound` | ✅ 已证 |
+| §3.14 ZHierarchy 门控保持谱夹层下界充要条件：$0<\delta\le a$ 时 $\delta<pa\iff\delta/a<p$ | `TemporalHierarchy.lean` : `gate_preserves_lower_bound` | ✅ 已证 |
 
 **成熟要点（直接引用，不重证）**：
 
@@ -440,11 +442,17 @@ $$\mathcal{L}_{\text{cov}} = \frac1d\sum_{i\neq j} C_{ij}^2,\qquad C = \frac{Z_c
 
 防止不同潜维度退化为彼此冗余（维度塌缩的另一形态）；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `covariance_loss`（`align_cov_weight`）。与 (b) 合起来构成 VICReg 的完整「方差 + 去相关」正则（VICReg 三项中的两项；不变量项即 $\mathcal L_{\text{align}}$）。
 
+**(d) CLS 读出头锚定（非退化锚点）**：`[CLS]` 聚合 token 原仅受软对齐损失监督（欠监督 → 退化塌缩），现加读出头 $r(\cdot)$，令 CLS 预测**池化目标 token**（目标编码器 token 序列的均值池化，重建锚定、输入特定）：
+
+$$\mathcal{L}_{\text{cls-readout}} = \|r(\texttt{img\_cls}) - \mathrm{pool}(Z_{y,\text{img}})\|^2 + \|r(\texttt{txt\_cls}) - \mathrm{pool}(Z_{y,\text{txt}})\|^2,$$
+
+给 `[CLS]` 一个与对齐无关的梯度来源（§3.7.3 防线 2「不动点读出头锚定」的具体落地）：目标 token 序列受重建损失约束而输入特定，故其池化非退化，CLS 必须编码输入内容才能预测它，常数塌缩解被排除。见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `cls_readout`（`cls_readout_weight`）。
+
 阶段一总目标（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`，图文双模态各取一组）：
 
-$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}} + 0.1\,\mathcal{L}_{\text{align-var}} + 0.1\,\mathcal{L}_{\text{align-cov}},$$
+$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}} + 0.1\,\mathcal{L}_{\text{align-var}} + 0.1\,\mathcal{L}_{\text{align-cov}} + 0.3\,\mathcal{L}_{\text{cls-readout}},$$
 
-其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的软对齐（§3.4，默认 BYOL）；$\mathcal{L}_{\text{align-var}}$、$\mathcal{L}_{\text{align-cov}}$ 是对齐投影空间的方差/协方差正则（见 (b)(c)）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`、`align_var_weight=0.1`、`align_cov_weight=0.1`。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
+其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的软对齐（§3.4，默认 BYOL）；$\mathcal{L}_{\text{align-var}}$、$\mathcal{L}_{\text{align-cov}}$ 是对齐投影空间的方差/协方差正则（见 (b)(c)）；$\mathcal{L}_{\text{cls-readout}}$ 是 CLS 读出头锚定（见 (d)）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`、`align_var_weight=0.1`、`align_cov_weight=0.1`、`cls_readout_weight=0.3`。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
 
 #### 2.2.5 编码器主干的候选选型（测试不理想时的备选路径）
 
@@ -2106,9 +2114,9 @@ $$Z^{(t)} \;=\; M^t Z^{(0)} \;+\;\sum_{i<t} M^{\,t-1-i}\, x_i$$
 
 ---
 
-## 3.14 机制二的推广：全 Z 逐维软门控（对角门控）
+## 3.14 ZHierarchy：全 Z 逐维软门控（机制二的推广）
 
-> **问题**：§3.13 的机制二用**二值**投影 $\Pi_f$ 门控（快维权重 1、慢维权重 0）。能否推广到**所有 Z 维度**——每一维独立拥有自己的门控权重 $p_i\in[0,1]$（软门控），即「全 Z 逐维分层」？其优缺点、GPU 友善性如何？本节给出数学形式并已 Lean 机械化。
+> **问题**：§3.13 的机制二用**二值**投影 $\Pi_f$ 门控（快维权重 1、慢维权重 0）。能否推广到**所有 Z 维度**——每一维独立拥有自己的门控权重 $p_i\in[0,1]$（软门控），即「全 Z 逐维分层」？其优缺点、GPU 友善性、以及与现行架构其它数学原理是否有冲突？本节给出数学形式，命名 **ZHierarchy**，并已 Lean 机械化（含谱夹层相容性检查，§3.14.6）。
 
 ### 3.14.1 数学形式：对角门控 diag(p)
 
@@ -2151,6 +2159,26 @@ $$(G z)_i \;=\; p_i\, z_i,\qquad p_i\in[0,1]$$
 
 - Lean 已证的是对角门控的**代数与有序核心**（逐点独立、可合并、逐维放过 / 单调、保收缩）；$p_i$ 的取值、阈值、学习方式为超参（未机械化）。
 - $G=\operatorname{diag}(p)$ 在函数空间 $\iota\to K$ 上定义（逐维天然并行）；对抽象 $V$ 需先谱分解（§3.13.5 已注）。
+
+### 3.14.6 与现行架构其它数学原理的冲突检查（已 Lean 机械化）
+
+ZHierarchy 与 math.md 现行各契约逐条核对：
+
+**无冲突**：
+
+1. **$Z$ 连续、单一、不量化**（§2.6）：$G=\operatorname{diag}(p)$ 是线性缩放，连续、不量化——不违反「有损只在 token 层」契约。
+2. **收缩 $\rho<1$**（§3.7.1）：`soft_gate_preserves_contraction` 证 $pa\in[0,1)$——全 Z 分层仍收缩，不动点收敛（Banach）继承。
+3. **仿射幺半群结合律 / PSCO 并行扫描**（§3.7.3）：`diagGate_comp` 证门控可合并为单次逐元素缩放，`comp_assoc` 保持——扫描正确性不受影响。
+4. **反塌缩**（§2.9/§2.10/§3.10）：快维 $p_i=1$ 保留反馈修正、慢维 $p_i=0$ 由 $M$ 驱动留存——门控只控制反馈、不删减 $M$ 的作用，故不塌缩任何维度的状态演化。
+5. **隐式时间**（§3.12）：$p_i$ 时间无关（静态），$G$ 不干扰升幂卷积闭式 $M^t Z^{(0)}+\sum_{i<t}M^{t-1-i}x_i$。
+
+**一个必须满足的条件（冲突点，已证充要条件）**：
+
+- **谱夹层下界 $\delta<\tilde a_i$**（§3.7.3）：`gate_preserves_lower_bound` 证 $0<\delta\le a$ 时 $\delta<pa\iff\delta/a<p$。即**若把门控作用到转移 $M$ 上**（把特征值 $a$ 缩为 $pa$），要保持下界必须 $p>\delta/a$（因 $a\ge\delta$ 故 $\delta/a\le1$，是真实约束）。**ZHierarchy 的设计是门控只作用于反馈**（不缩放 $M$ 的特征值），故下界不受触碰；上界 `gate_preserves_upper_bound` 证 $0\le a<u$、$p\le1$ ⟹ $pa<u$（$u=1-\gamma$），始终成立。
+
+**一个范围假设（非定理，诚实标注）**：
+
+- **对角线假设**：$G=\operatorname{diag}(p)$ 的「逐维」只在 $M$ 可对角化时良定义。核心框架的 PSCO（§3.7.3）对抽象 $V$ 成立（不要求对角化）；ZHierarchy 引入「可对角化」这一更强假设，是唯一超出核心框架的前提，需在实现时先谱分解或子空间投影（§3.13.5 已注）。
 
 ---
 
