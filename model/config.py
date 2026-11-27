@@ -93,7 +93,7 @@ class MJEPAConfig:
     psi_consist_weight: float = 0.1  # §3.7 L_consist 路径无关一致性：Ψ_h(Z_ctx)≈Z_tgt（改端变换到目标）
     psi_gen_weight: float = 0.1      # §3.9 生成 = D(Ψ(Z))：解码算子不动点 Z*=Ψ(Z_ctx) 重建目标（接通「算子→不动点→解码→生成」）
     # —— §3.7.3 防线 4：h 信息量约束（VICReg 方差 + 协方差，防 h 塌缩为常数 → 算子退化为常值映射）——
-    psi_h_var_weight: float = 0.5    # h 的方差下界 relu(1−σ_j)：σ=0（常数塌缩）处取严格正值 1（Lean 已证 AntiCollapse.lean）。实测 h 塌缩最严重，0.1→0.5。
+    psi_h_var_weight: float = 0.8    # h 的方差下界 relu(1−σ_j)：σ=0（常数塌缩）处取严格正值 1（Lean 已证 AntiCollapse.lean）。实测 h 塌缩最严重，0.1→0.5→0.8。
     psi_h_cov_weight: float = 0.3    # h 的协方差去相关：防 h 各维度冗余、退化为低秩子空间
     # —— §3.7.3 防线 5：轨迹非平凡性（瞬态段首步位移下界，防算子首步跳不动点/瞬态段被跳过）——
     psi_nontriv_weight: float = 0.1  # 首步位移下界惩罚权重

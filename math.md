@@ -598,7 +598,7 @@ class LLaDATokenizer:
 | 算子 | 谱夹层 | §3.7.3 式 (39) | [psco.py](file:///home/simon-ma/JEPA/model/psco.py) `make_contractive_a` | $\delta=0.05,\gamma=0.10$ | 上界保收敛、下界封死 $\tilde A_h\to0$；**已由 psco 冒烟验证** |
 | 算子 | 不动点读出头锚定 | §3.7.3 防线 2 | `PsiLayer.readout`（`psi_readout_weight`） | 0.1 | 强制 $Z^*$ 携带输入信息 |
 | 算子 | 方差正则 | §3.7.3 防线 3 | `psi_var`（`psi_var_weight`） | 0.1 | 防算子不动点维度塌缩 |
-| 算子 | $h$ 信息量约束 | §3.7.3 防线 4 | `psi_h_var`/`psi_h_cov`（`psi_h_var_weight`/`psi_h_cov_weight`） | 0.5 / 0.3 | **本次实装**：对 $h$ 的 VICReg 方差+协方差，防 $h$ 塌缩为常数/低秩（h 塌缩最严重，var 提至 0.5） |
+| 算子 | $h$ 信息量约束 | §3.7.3 防线 4 | `psi_h_var`/`psi_h_cov`（`psi_h_var_weight`/`psi_h_cov_weight`） | 0.8 / 0.3 | **本次实装**：对 $h$ 的 VICReg 方差+协方差，防 $h$ 塌缩为常数/低秩（h 塌缩最严重，var 提至 0.8） |
 | 算子 | 轨迹非平凡性 | §3.7.3 防线 5 | `PsiLayer.first_step_disp` + `psi_nontriv`（`psi_nontriv_weight`/`psi_nontriv_eps`） | 0.1 | **本次实装**：瞬态段首步位移下界 hinge，防算子首步跳不动点 |
 
 **改进方向的优先级排序（据「快速塌缩」的实际症状）。** 三条最高杠杆、最贴近现行契约的改进：
