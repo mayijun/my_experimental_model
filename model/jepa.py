@@ -1,5 +1,7 @@
 """模型组装：双在线/目标编码器 + 表征层（预测器） + 共享双解码器。"""
 
+import copy
+
 import torch
 import torch.nn as nn
 
@@ -95,6 +97,22 @@ class MultimodalJEPA(nn.Module):
         for module in target_modules:
             for p in module.parameters():
                 p.requires_grad_(False)
+
+        # —— 冻结初始化锚点 f₀（Human-JEPA / SALT，§2.2.4(d) + DINOv3 Gram teacher）——
+        # 在线编码器的冻结副本：永不 EMA 更新，为 cls_readout（pool 目标）与 Gram-anchoring
+        # （Gram teacher）提供不漂移的锚定目标，切断「在线塌缩 → EMA 目标跟塌缩 → 锚点失守」。
+        if cfg.anchor_frozen:
+            self.anchor_image = copy.deepcopy(self.image_online)
+            self.anchor_text = copy.deepcopy(self.text_online)
+            if cfg.share_trunk:
+                # deepcopy 会各自复制一份 trunk；文本锚点复用图像锚点的主干，避免重复两份。
+                self.anchor_text.encoder = self.anchor_image.encoder
+            for m in (self.anchor_image, self.anchor_text):
+                for p in m.parameters():
+                    p.requires_grad_(False)
+        else:
+            self.anchor_image = None
+            self.anchor_text = None
 
         # —— 推理：JEPA 潜预测器（模态各一）——
         self.image_predictor = LatentPredictor(cfg.dim, cfg.mlp_ratio)
@@ -192,7 +210,7 @@ class MultimodalJEPA(nn.Module):
         目标编码器 resume 时由 init_target_from_online() 从在线重新初始化。
         """
         full = self.state_dict()
-        skip = ("shared_target.", "image_target.", "text_target.")
+        skip = ("shared_target.", "image_target.", "text_target.", "anchor_image.", "anchor_text.")
         if self.cfg.share_trunk:
             skip += ("image_online.encoder.", "text_online.encoder.")
         return {k: v for k, v in full.items() if not k.startswith(skip)}
@@ -205,3 +223,7 @@ class MultimodalJEPA(nn.Module):
         """
         self.image_target.load_state_dict(self.image_online.state_dict())
         self.text_target.load_state_dict(self.text_online.state_dict())
+        # 冻结锚点 f₀ 也从在线编码器重新初始化（resume 时锚点不在 checkpoint 中）。
+        if getattr(self, "anchor_image", None) is not None:
+            self.anchor_image.load_state_dict(self.image_online.state_dict())
+            self.anchor_text.load_state_dict(self.text_online.state_dict())

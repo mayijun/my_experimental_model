@@ -55,8 +55,20 @@ class MJEPAConfig:
     align_cov_weight: float = 0.3  # VICReg 协方差正则（惩罚对齐投影维度间协方差，防维度冗余塌缩）。
     cls_readout_weight: float = 0.3  # CLS 读出头锚定（§3.7.3 防线 2）：CLS 预测池化目标 token，给 CLS 非退化锚点。
 
+    # —— 冻结初始化锚点（Human-JEPA / SALT，§2.2.4(d) + DINOv3 Gram teacher）——
+    # f₀ = 在线编码器的冻结副本，永不 EMA 更新；cls_readout 与 Gram-anchoring 都锚到它，
+    # 切断「在线塌缩 → EMA 目标跟塌缩 → 锚点失守」的连锁（Lean: Anchor.frozen_anchor_stationary）。
+    anchor_frozen: bool = True
+    # —— 图像 block masking（I-JEPA，§2.2.1）：连续多块掩码阻断「抄相邻可见 patch」捷径 ——
+    block_mask: bool = True          # 图像侧用块掩码替代逐位置 Bernoulli（文本侧仍逐位置/span）
+    block_mask_num: int = 4          # I-JEPA 式多块掩码的块数
+    # —— 分布正则（LeWorldModel/LeJEPA/UniJEPA，§2.2.4(b) 补强）：对齐空间高斯 χ² 正则 ——
+    align_gauss_weight: float = 0.3  # (σ²-1)² 双端正则，严格强于 relu(1-σ)（Lean: DistributionReg.gauss_strictly_stronger）
+    # —— DINOv3 Gram-anchoring（§3.4）：冻结 Gram teacher 锚定 dense 特征 Gram 矩阵 ——
+    gram_anchor_weight: float = 0.1  # ‖X_S·X_Sᵀ − X_G·X_Gᵀ‖²_F，X_G 来自冻结锚点
+
     # —— 对齐方法（§3.4）：跨模态软对齐信号源，默认 BYOL（无负样本、无 batch 依赖）——
-    alignment_method: str = "byol"   # infonce（软对齐兜底）/ byol（默认）/ dino
+    alignment_method: str = "dinov3" # infonce（软对齐兜底）/ byol / dino / dinov3（DINO centering + Gram-anchoring，默认）
     byol_proj_dim: int = 0           # BYOL/DINO 投影输出维；0 表示 = dim
     byol_hidden_dim: int = 0         # 投影/预测头隐层维；0 表示 = 4*dim
     byol_ema_decay: float = 0.99     # BYOL 目标投影头 EMA

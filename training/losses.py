@@ -13,6 +13,28 @@ def mask_patches(batch, n_patches, ratio, device):
     return torch.rand(batch, n_patches, device=device) < ratio
 
 
+def block_mask_patches(batch, n_patches, ratio, device, num_blocks=4):
+    """I-JEPA 式多块掩码（§2.2.1）：在 2D patch 网格上采样 num_blocks 个随机矩形块，
+    每块面积约 ratio/num_blocks 的 n_patches；返回 [B,N] bool（True=掩）。
+
+    逐位置 Bernoulli 掩码会给「被掩 patch」留下相邻可见 patch（可抄捷径、学不到全局结构），
+    连续块掩码的块内部两侧皆掩、无抄捷径（Lean: BlockMask.block_interior_no_shortcut）。
+    """
+    side = int(round(n_patches ** 0.5))
+    mask = torch.zeros(batch, n_patches, dtype=torch.bool, device=device)
+    block_area = max(1, int(ratio * n_patches / max(1, num_blocks)))
+    for b in range(batch):
+        m2d = mask[b].view(side, side)
+        for _ in range(num_blocks):
+            ar = float(0.5 + 1.5 * torch.rand(1, device=device).item())  # 宽高比 0.5~2.0
+            bh = max(1, min(side, int(round((block_area * ar) ** 0.5))))
+            bw = max(1, min(side, int(round(block_area / bh))))
+            r = torch.randint(0, side - bh + 1, (1,), device=device).item()
+            c = torch.randint(0, side - bw + 1, (1,), device=device).item()
+            m2d[r:r + bh, c:c + bw] = True
+    return mask
+
+
 def mask_text(ids, mask_id, ratio, device):
     """随机把一部分字符替换为 mask_id。"""
     out = ids.clone()
@@ -42,6 +64,31 @@ def covariance_loss(z):
     d = cov.size(0)
     off = cov - torch.diag(cov.diag())
     return (off ** 2).sum() / d
+
+
+def gauss_penalty(z):
+    """分布正则（UniJEPA/LeWorldModel 高斯正则的逐维投影，§2.2.4(b) 补强）：mean_j (σ_j²-1)²。
+
+    双端正则：σ<1（塌缩）与 σ>1（发散）都被惩罚，零集（σ≥0）恰为 {σ=1}；严格强于
+    relu(1-σ) 的单边 hinge——后者在 σ≥1 处饱和为 0、梯度消失，无法把已塌缩的 σ 拉回
+    （Lean: DistributionReg.gauss_strictly_stronger / varPenalty_saturated）。
+    """
+    std = z.reshape(-1, z.size(-1)).std(dim=0, unbiased=False)
+    return ((std ** 2 - 1.0) ** 2).mean()
+
+
+def gram_anchor_loss(z_student, z_teacher):
+    """DINOv3 Gram-anchoring（§3.4）：锚定 dense 特征 Gram 矩阵到冻结 Gram teacher。
+
+    L_Gram = ‖X_S·X_Sᵀ − X_G·X_Gᵀ‖²_F，X 为 L2 归一化的 dense 特征（[B,N,d] → [B,N,N] Gram）。
+    z_teacher 来自冻结锚点（no_grad）；塌缩时学生 Gram 退化为全 1（秩 1），与非塌缩 teacher
+    的 Gram 差异 > 0，故把学生从塌缩推开。
+    """
+    xs = F.normalize(z_student, dim=-1)
+    xg = F.normalize(z_teacher, dim=-1)
+    gs = torch.bmm(xs, xs.transpose(1, 2))
+    gg = torch.bmm(xg, xg.transpose(1, 2))
+    return F.mse_loss(gs, gg)
 
 
 def rate_loss(b):
@@ -92,7 +139,7 @@ def alignment_loss(model, img_cls, txt_cls):
             model.align(img_cls), model.align(txt_cls),
             model.align.target(img_cls), model.align.target(txt_cls),
         )
-    if cfg.alignment_method == "dino":
+    if cfg.alignment_method in ("dino", "dinov3"):
         return dino_loss(
             model.align(img_cls), model.align(txt_cls),
             model.align.teacher_forward(img_cls), model.align.teacher_forward(txt_cls),
@@ -255,7 +302,10 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     img_b = model.image_online.last_b
     txt_b = model.text_online.last_b
 
-    img_mask = mask_patches(batch, cfg.n_patches, cfg.mask_ratio, device)
+    img_mask = (
+        block_mask_patches(batch, cfg.n_patches, cfg.mask_ratio, device, cfg.block_mask_num)
+        if cfg.block_mask else mask_patches(batch, cfg.n_patches, cfg.mask_ratio, device)
+    )
     txt_masked = mask_text(txt, mask_id, cfg.mask_ratio, device)
     _, img_ctx = model.image_online(img, mask=img_mask, rho_active=rho_active)
     _, txt_ctx = model.text_online(txt_masked, rho_active=rho_active)
@@ -266,6 +316,14 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         _, txt_tgt = model.text_target(txt, rho_active=rho_active)
         pool_img_tgt = img_tgt.mean(dim=1)
         pool_txt_tgt = txt_tgt.mean(dim=1)
+        # 冻结锚点 f₀（§2.2.4(d)）：cls_readout 与 Gram-anchoring 的不漂移目标
+        if getattr(model, "anchor_image", None) is not None:
+            _, img_anchor = model.anchor_image(img, rho_active=False)
+            _, txt_anchor = model.anchor_text(txt, rho_active=False)
+        else:
+            img_anchor, txt_anchor = img_tgt, txt_tgt
+        pool_img_anchor = img_anchor.mean(dim=1)
+        pool_txt_anchor = txt_anchor.mean(dim=1)
 
     def mscale(img_term, txt_term):
         """按 PAC p_anchor 缩放锚/新模态损失（损失权重门控近似单模态投喂，README 问题 14）。"""
@@ -308,14 +366,21 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     #    math.md §2.2.4 ⚠️ 已指出「余弦 + EMA 不能排除塌缩」；CLS 只受对齐损失监督，故需在此显式正则。
     align_var = torch.zeros((), device=device)
     align_cov = torch.zeros((), device=device)
+    align_gauss = torch.zeros((), device=device)
     if model.align is not None or cfg.alignment_method == "infonce":
         align_rep_i = model.embed(img_cls)
         align_rep_t = model.embed(txt_cls)
         align_var = 0.5 * (variance_loss(align_rep_i) + variance_loss(align_rep_t))
         align_cov = 0.5 * (covariance_loss(align_rep_i) + covariance_loss(align_rep_t))
-    # —— CLS 读出头锚定（§3.7.3 防线 2）：CLS 预测池化目标 token（重建锚定、输入特定），防 CLS 退化塌缩 ——
-    cls_readout_i = F.mse_loss(model.cls_readout(img_cls), pool_img_tgt)
-    cls_readout_t = F.mse_loss(model.cls_readout(txt_cls), pool_txt_tgt)
+        align_gauss = 0.5 * (gauss_penalty(align_rep_i) + gauss_penalty(align_rep_t))
+    # —— CLS 读出头锚定（§3.7.3 防线 2）：CLS 预测冻结锚点 f₀ 的池化 token（不漂移），防 CLS 退化塌缩 ——
+    cls_readout_i = F.mse_loss(model.cls_readout(img_cls), pool_img_anchor)
+    cls_readout_t = F.mse_loss(model.cls_readout(txt_cls), pool_txt_anchor)
+    # —— DINOv3 Gram-anchoring（§3.4）：dense 特征 Gram 锚到冻结 Gram teacher（anchor f₀）——
+    gram_i = gram_t = torch.zeros((), device=device)
+    if cfg.alignment_method == "dinov3" and getattr(model, "anchor_image", None) is not None:
+        gram_i = gram_anchor_loss(img_tokens, img_anchor)
+        gram_t = gram_anchor_loss(txt_tokens, txt_anchor)
     rate = torch.zeros((), device=device)
     if cfg.rho_compress and img_b is not None and txt_b is not None:
         rate = 0.5 * (img_b.mean() + txt_b.mean())
@@ -384,6 +449,8 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.cov_weight * mscale(cov_i, cov_t)
         + cfg.align_var_weight * align_var
         + cfg.align_cov_weight * align_cov
+        + cfg.align_gauss_weight * align_gauss
+        + cfg.gram_anchor_weight * mscale(gram_i, gram_t)
         + cfg.cls_readout_weight * mscale(cls_readout_i, cls_readout_t)
         + cfg.rho_rate_weight * rate * gates["rate"]
         + cfg.cross_mask_weight * mscale(cross_pred_i, cross_pred_t)
@@ -403,6 +470,8 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
         "align": align, "var": var_i + var_t, "cov": cov_i + cov_t, "rate": rate,
         "align_var": align_var, "align_cov": align_cov,
+        "align_gauss": align_gauss,
+        "gram_anchor": gram_i + gram_t,
         "cls_readout": cls_readout_i + cls_readout_t,
         "cross_pred": cross_pred_i + cross_pred_t,
         "psi_readout": psi_readout_i + psi_readout_t,
@@ -437,9 +506,13 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     stats["z_mean_txt"] = txt_tokens.detach().abs().mean()
     # 3) 跨模态对齐强度（非 loss）：proj 空间配对余弦均值，直观判断软对齐是否收敛。
     with torch.no_grad():
-        zi = F.normalize(model.embed(img_cls.detach()), dim=-1)
-        zt = F.normalize(model.embed(txt_cls.detach()), dim=-1)
+        ai = model.embed(img_cls.detach())
+        at = model.embed(txt_cls.detach())
+        zi = F.normalize(ai, dim=-1)
+        zt = F.normalize(at, dim=-1)
         stats["cross_cos_sim"] = (zi * zt).sum(-1).mean()
+        # 对齐投影空间实际标准差：直接观测 CLS 投影是否塌缩（align_var≈0.98 ⟹ std≈0.02）。
+        stats["align_std"] = 0.5 * (ai.std(dim=0).mean() + at.std(dim=0).mean())
     # 4) 交叉掩码实际比例：递进调度 ρ_mask(t)，诊断 cross_pred 曲线变化时需对照。
     if cm_ratio is not None:
         stats["cross_mask_ratio"] = torch.tensor(cm_ratio, device=device)

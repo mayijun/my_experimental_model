@@ -13,3 +13,4 @@ import LeanMath.LoopedZReasoner
 import LeanMath.RhoCompress
 import LeanMath.Curriculum
 import LeanMath.AntiCollapse
+import LeanMath.JEPAAntiCollapse

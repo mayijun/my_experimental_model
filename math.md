@@ -111,6 +111,11 @@
 | §3.14 ZHierarchy 软门控不破坏收缩：$a\in[0,1)$、$p\in[0,1]$ ⟹ $pa\in[0,1)$ | `TemporalHierarchy.lean` : `soft_gate_preserves_contraction` | ✅ 已证 |
 | §3.14 ZHierarchy 门控保持谱夹层上界：$0\le a<u$、$p\le1$ ⟹ $pa<u$（$u=1-\gamma$） | `TemporalHierarchy.lean` : `gate_preserves_upper_bound` | ✅ 已证 |
 | §3.14 ZHierarchy 门控保持谱夹层下界充要条件：$0<\delta\le a$ 时 $\delta<pa\iff\delta/a<p$ | `TemporalHierarchy.lean` : `gate_preserves_lower_bound` | ✅ 已证 |
+| §2.2.4(d) 冻结初始化锚点：EMA 唯一不动点=目标值（目标塌缩⟹教师必跟塌缩）；μ=1 时锚点静止不漂移 | `JEPAAntiCollapse.lean` : `ema_fixedPoint_unique` / `frozen_anchor_stationary` / `ema_iterate_closedForm` | ✅ 已证 |
+| §2.2.4(b) 分布正则：VICReg hinge 在 σ≥1 饱和为 0；高斯 $(σ²-1)²$ 零集（σ≥0）={σ=1}、严格更强、连续（不引入量化） | `JEPAAntiCollapse.lean` : `gaussPenalty_eq_zero_iff` / `gauss_strictly_stronger` / `varPenalty_saturated` / `gaussPenalty_continuous` | ✅ 已证 |
+| §2.2.1 块掩码：块内部位置无抄捷径；孤立掩码有抄捷径（逐位置 Bernoulli 正概率产生） | `JEPAAntiCollapse.lean` : `block_interior_no_shortcut` / `singleton_has_shortcut` | ✅ 已证 |
+| §3.4 DINO centering：居中平移等变（保留相对差异）、把常数塌缩方向精确映到 0 | `JEPAAntiCollapse.lean` : `centered_preserves_differences` / `centered_constant_is_zero` | ✅ 已证 |
+| §3.4 DINOv3 Gram-anchoring：塌缩学生 Gram=全 1（秩 1）；非塌缩 teacher 差异>0，损失>0 推开塌缩 | `JEPAAntiCollapse.lean` : `collapsed_gram_is_ones` / `gram_anchor_excludes_collapse` | ✅ 已证 |
 
 **成熟要点（直接引用，不重证）**：
 
@@ -359,7 +364,7 @@ $$\ddot\gamma + \Gamma(\dot\gamma,\dot\gamma)=0,$$
 
 初始化时 $\xi \leftarrow \theta$（[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `update_target`），并对 $E_\xi$ 关闭梯度（[representation.py](file:///home/simon-ma/JEPA/model/representation.py) 的 `update_target`）。
 
-对每个样本 $x$，构造掩码上下文 $x_c = M(x)$，掩码比例为固定值 $m$（[config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `mask_ratio=0.5`）。被遮位置替换为掩码 token（图像换 `mask_token`、文本换 `mask_id`），干净目标 $x_y = x$ 保持不变（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `mask_patches`/`mask_text`，均为逐位置独立 Bernoulli：`torch.rand(...) < ratio`）。
+对每个样本 $x$，构造掩码上下文 $x_c = M(x)$，掩码比例为固定值 $m$（[config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `mask_ratio=0.5`）。被遮位置替换为掩码 token（图像换 `mask_token`、文本换 `mask_id`），干净目标 $x_y = x$ 保持不变（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `block_mask_patches`/`mask_text`：图像为 I-JEPA 式多块掩码（`block_mask=True`），文本为逐位置独立 Bernoulli：`torch.rand(...) < ratio`）。
 
 **mask 预测的角色与必要性。** mask 不是架构的组成部分，而是**训练阶段的关系建模自监督信号**——表征、预测器、解码器都不「是」mask；推理/生成阶段的 Flow Matching（§4）完全不依赖它（§4 用噪声→潜变量，mask 只在训练时出现）。
 
@@ -386,11 +391,11 @@ mask 不是数学必然，但去掉它需要给出同样「迫使全对全关系
 
 | mask 分布 | 适用 | 理由 |
 |---|---|---|
-| 逐位置随机（当前） | 字符级短文本 | 字符间局部相关弱，作弊空间小 |
-| block mask（I-JEPA） | 图像 patch | 阻断「抄相邻 patch」捷径，强迫全局理解 |
+| 逐位置随机（文本侧，当前） | 字符级短文本 | 字符间局部相关弱，作弊空间小 |
+| block mask（I-JEPA，图像侧已实装） | 图像 patch | 阻断「抄相邻 patch」捷径，强迫全局理解 |
 | span mask（T5/ERNIE 式） | 未来 BPE 长文本 | 相邻子词相关，掩连续 span 强迫长程依赖 |
 
-建议：图像改 block mask、文本未来切 BPE 后改 span mask，并按序列长度 $L$ 收紧 `mask_ratio` 上限（如 $r\le 0.6$）。
+现状：图像已改 block mask（`block_mask=True`、`block_mask_num=4`，[losses.py](file:///home/simon-ma/JEPA/training/losses.py) `block_mask_patches`；Lean 已验证块内部无抄捷径 `block_interior_no_shortcut`）；文本未来切 BPE 后改 span mask，并按序列长度 $L$ 收紧 `mask_ratio` 上限（如 $r\le 0.6$）。
 
 **离散 token ↔ 连续 $Z$ 区域的映射。** 一个离散 token 并不对应 $Z$ 空间中的单个点，而对应一片连续区域。编码方向：$E_\theta$ 把含同一 token 的不同上下文编码成 $Z$ 里散布的一组点，构成该 token 的「编码纤维」$\mathcal F_v$——token 内的连续语义变异（如「红」的深浅、明暗）体现为纤维内的连续自由度。解码方向：§4.2(a) 的线性读出头用超平面划分把 $Z$ 切成 $|V|$ 个凸区域 $\mathcal R_v$，$g(z)=\arg\max_v(w_v^\top z+b_v)$ 把连续 $Z$ 判回离散 token。两者合起来给出「离散符号 ↔ 连续概念区间」的完整结构：$\mathcal R_v$ 是 token 的连续概念区间，$\mathcal F_v$ 是它对应的连续 $Z$ 原像，logits 差距度量边界处的「模糊区」。
 
@@ -436,23 +441,25 @@ $$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1-\sigma_j)\bigr],\
 
 > **作用对象修正（表征塌缩修复）**：上式 $\sigma_j$ 原仅作用于 token 序列 $Z\in\mathbb R^{L\times d}$（`var_weight`）。但 `[CLS]` 聚合 token 只受软对齐损失 $\mathcal L_{\text{align}}$ 监督，而 BYOL 余弦目标存在平凡退化解（所有 `[CLS]` 投影坍为同一常数、`cos=1`、损失为 0），且 BYOL 投影器以 LayerNorm 替代 BatchNorm（小 batch 更稳）后失去了 BN 的隐式反塌缩——实测 `[CLS]` 投影方差坍到 $\sim10^{-4}$ 而 token 序列 `var` 仍守住（序列受重建损失约束、`[CLS]` 不受）。故把方差正则**同时施加到对齐投影空间 $g_\theta(\texttt{CLS})$**（`align_var_weight`），直接约束塌缩发生的空间。Lean 已验证：`varPenalty(σ)=relu(1-σ)` 在 `σ=0`（常数塌缩）处取严格正值 `1`，故常数解不可能是零损失极小点（见 `lean-math/LeanMath/AntiCollapse.lean`）。
 
+**(b′) 分布正则（高斯 χ²，替换/增强方差下界）**：`relu(1-σ)` 是单边 hinge，在 σ≥1 处饱和为 0、梯度消失——实测对齐投影 std 卡在 ~0.02（`align_var`≈0.98）拉不回来。故补强为双端高斯正则 $\mathcal{L}_{\text{gauss}}=\mathbb{E}_j\bigl[(\sigma_j^2-1)^2\bigr]$（`align_gauss_weight=0.3`，作用于对齐投影空间 $g_\theta(\texttt{CLS})$），零集（σ≥0）恰为 {σ=1}、**严格强于** relu(1-σ)，且是 σ 的多项式、连续（不引入量化，$Z$ 全程连续契约不变）。Lean 已验证：`gaussPenalty_eq_zero_iff` / `gauss_strictly_stronger` / `varPenalty_saturated`（`lean-math/LeanMath/JEPAAntiCollapse.lean`）。
+
 **(c) VICReg 风格协方差约束（维度去冗余）**：对居中后的表征算 $d\times d$ 协方差矩阵，惩罚非对角元素的平方和
 
 $$\mathcal{L}_{\text{cov}} = \frac1d\sum_{i\neq j} C_{ij}^2,\qquad C = \frac{Z^\top Z}{N-1},$$
 
 防止不同潜维度退化为彼此冗余（维度塌缩的另一形态）；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `covariance_loss`。**作用对象（本文档本次修订补足）**：该项此前仅作用于对齐投影表征 $Z_c\in\mathbb R^{B\times d}$（`align_cov_weight`，每样本一行）；但 token 序列 $Z\in\mathbb R^{L\times d}$——重建与 JEPA 的核心潜变量——只受方差约束 (b)、**无去相关**，仍可低秩塌缩（各维度高度相关、信息挤进低秩子空间而方差检验不报警）。故把协方差约束同时施加到摊平后的 token 序列 $\mathrm{reshape}(Z,[-1,d])$（`cov_weight`，每 token 一行），使 (b)(c) 合起来对 token 序列构成完整 VICReg「方差 + 去相关」（VICReg 三项中的两项；不变量项即 $\mathcal L_{\text{align}}$）。
 
-**(d) CLS 读出头锚定（非退化锚点）**：`[CLS]` 聚合 token 原仅受软对齐损失监督（欠监督 → 退化塌缩），现加读出头 $r(\cdot)$，令 CLS 预测**池化目标 token**（目标编码器 token 序列的均值池化，重建锚定、输入特定）：
+**(d) CLS 读出头锚定（冻结初始化锚点 f₀，非退化锚点）**：`[CLS]` 聚合 token 原仅受软对齐损失监督（欠监督 → 退化塌缩），现加读出头 $r(\cdot)$，令 CLS 预测**冻结初始化锚点 $f_0$ 的池化 token**（在线编码器在训练开始时的冻结副本，永不 EMA 更新，输入特定）：
 
-$$\mathcal{L}_{\text{cls-readout}} = \|r(\texttt{img\_cls}) - \mathrm{pool}(Z_{y,\text{img}})\|^2 + \|r(\texttt{txt\_cls}) - \mathrm{pool}(Z_{y,\text{txt}})\|^2,$$
+$$\mathcal{L}_{\text{cls-readout}} = \|r(\texttt{img\_cls}) - \mathrm{pool}(Z_{f_0,\text{img}})\|^2 + \|r(\texttt{txt\_cls}) - \mathrm{pool}(Z_{f_0,\text{txt}})\|^2,$$
 
-给 `[CLS]` 一个与对齐无关的梯度来源（§3.7.3 防线 2「不动点读出头锚定」的具体落地）：目标 token 序列受重建损失约束而输入特定，故其池化非退化，CLS 必须编码输入内容才能预测它，常数塌缩解被排除。见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `cls_readout`（`cls_readout_weight`）。
+给 `[CLS]` 一个与对齐无关的梯度来源（§3.7.3 防线 2「不动点读出头锚定」的具体落地）：锚点 $f_0$ 冻结在随机初始化、**不随在线编码器塌缩漂移**，故其池化非退化且稳定，CLS 必须编码输入内容才能预测它，常数塌缩解被排除。**原实现锚定在 EMA 目标 $Z_{y}$（`pool(img_tgt)`）上，会「在线塌缩 → 目标跟塌缩 → 锚点失守」连锁（Lean: `ema_fixedPoint_unique` / `frozen_anchor_stationary`）；现改为冻结锚点 $f_0$（Human-JEPA / SALT），切断该连锁。** 见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `cls_readout`（`cls_readout_weight`）、[jepa.py](file:///home/simon-ma/JEPA/model/jepa.py) 的 `anchor_image/anchor_text`（`anchor_frozen`）。
 
 阶段一总目标（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`，图文双模态各取一组）：
 
-$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}} + 0.1\,\mathcal{L}_{\text{cov}} + 0.3\,\mathcal{L}_{\text{align-var}} + 0.3\,\mathcal{L}_{\text{align-cov}} + 0.3\,\mathcal{L}_{\text{cls-readout}},$$
+$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}} + 0.1\,\mathcal{L}_{\text{cov}} + 0.3\,\mathcal{L}_{\text{align-var}} + 0.3\,\mathcal{L}_{\text{align-cov}} + 0.3\,\mathcal{L}_{\text{align-gauss}} + 0.1\,\mathcal{L}_{\text{gram-anchor}} + 0.3\,\mathcal{L}_{\text{cls-readout}},$$
 
-其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的软对齐（§3.4，默认 BYOL）；$\mathcal{L}_{\text{var}}$、$\mathcal{L}_{\text{cov}}$ 是 token 序列 $Z$ 的方差/协方差正则（见 (b)(c)，后者为本次补足）；$\mathcal{L}_{\text{align-var}}$、$\mathcal{L}_{\text{align-cov}}$ 是对齐投影空间的方差/协方差正则（见 (b)(c)）；$\mathcal{L}_{\text{cls-readout}}$ 是 CLS 读出头锚定（见 (d)）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`、`cov_weight=0.1`、`align_var_weight=0.3`、`align_cov_weight=0.3`、`cls_readout_weight=0.3`（`align_var/align_cov` 因实测 CLS 投影方差偏弱、由 0.1 提至 0.3）。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
+其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的软对齐（§3.4，默认 dinov3 = DINO centering + 锐化）；$\mathcal{L}_{\text{var}}$、$\mathcal{L}_{\text{cov}}$ 是 token 序列 $Z$ 的方差/协方差正则（见 (b)(c)，后者为本次补足）；$\mathcal{L}_{\text{align-var}}$、$\mathcal{L}_{\text{align-cov}}$、$\mathcal{L}_{\text{align-gauss}}$ 是对齐投影空间的方差/协方差/高斯分布正则（见 (b)(b′)(c)，(b′) 替换 relu 单边下界）；$\mathcal{L}_{\text{gram-anchor}}$ 是 DINOv3 Gram-anchoring（锚定 dense 特征 Gram 到冻结锚点 f₀）；$\mathcal{L}_{\text{cls-readout}}$ 是 CLS 读出头锚定（见 (d)，锚定到冻结锚点 f₀）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`、`cov_weight=0.1`、`align_var_weight=0.3`、`align_cov_weight=0.3`、`align_gauss_weight=0.3`、`gram_anchor_weight=0.1`、`cls_readout_weight=0.3`（`align_var/align_cov` 因实测 CLS 投影方差偏弱、由 0.1 提至 0.3）。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
 
 #### 2.2.5 编码器主干的候选选型（测试不理想时的备选路径）
 
@@ -589,10 +596,12 @@ class LLaDATokenizer:
 |---|---|---|---|---|---|
 | 表征 | (a) 重建损失 | §2.2.4(a) 式 (34) | [losses.py](file:///home/simon-ma/JEPA/training/losses.py) `recon_img_self/recon_txt_self` | `recon_weight=1.0` | 主力；图像为像素 MSE、文本为 CE。**改进**：可用 §2.2.6 拉回度量 / 解码器分布对齐替换欧氏 MSE（同纤维零惩罚） |
 | 表征 | (b) 方差正则 | §2.2.4(b) 式 (36) | `variance_loss`（`var_weight`） | 0.1 | 只防「维度方差→0」，不防「低秩」。**改进**：方差下界可从固定 $\sigma=1$ 改为自适应/归一化方差 |
+| 表征 | (b′) 高斯分布正则 | §2.2.4(b′) | `gauss_penalty`（`align_gauss_weight`，对齐空间） | 0.3 | **本次实装**：双端 $(σ²-1)²$ 替换 relu 单边下界（relu 在 σ≥1 饱和为 0、拉不回已塌缩的 std），零集={σ=1}、严格更强、连续不引入量化 |
 | 表征 | (c) 协方差去相关 | §2.2.4(c) 式 (37) | `covariance_loss`（`cov_weight` token 序列 + `align_cov_weight` 对齐空间） | 0.1 / 0.3 | **本次补足**：原仅作用于对齐投影空间，token 序列 $Z$ 无去相关、可低秩塌缩；现已同时施加到摊平 token 序列 |
-| 表征 | (d) CLS 读出头锚定 | §2.2.4(d) 式 (38) | `cls_readout`（`cls_readout_weight`） | 0.3 | 给仅受软对齐监督的 `[CLS]` 一个非退化锚点。**改进**：可推广为「读出头预测重建 token」而非仅池化目标 |
+| 表征 | (d) CLS 读出头锚定 | §2.2.4(d) 式 (38) | `cls_readout`（`cls_readout_weight`）+ `anchor_image/anchor_text`（`anchor_frozen`） | 0.3 | **本次修复**：锚点由漂移的 EMA 目标 $Z_y$ 改为冻结初始化锚点 f₀，切断「在线塌缩→目标跟塌缩→锚点失守」连锁（Lean: `frozen_anchor_stationary`） |
+| 表征 | DINOv3 Gram-anchoring | §3.4 | `gram_anchor_loss`（`gram_anchor_weight`） | 0.1 | **本次实装**：dense 特征 Gram 锚到冻结 f₀（Gram teacher）；塌缩时学生 Gram=全 1、与非塌缩 f₀ 差异>0 推开塌缩（Lean: `gram_anchor_excludes_collapse`） |
 | 表征 | EMA + stop-gradient | §2.2.3 式 (31) | [representation.py](file:///home/simon-ma/JEPA/model/representation.py) `update_target` | $\mu=0.99$ | 必要但非充分（§2.2.4 ⚠️）；**改进**：可加入 target 更新动量调度（早期小 $\mu$ 更快追随、后期趋冻结） |
-| 模态 | 交叉掩码 | §3.2 命题 6 / 式 (18) | `CrossMaskPredictor`（`cross_mask_weight`） | 1.0 | 防单模态坍缩。**改进**：图像改 block mask、文本切 BPE 后改 span mask（§2.2.1 表） |
+| 模态 | 交叉掩码 | §3.2 命题 6 / 式 (18) | `CrossMaskPredictor`（`cross_mask_weight`） | 1.0 | 防单模态坍缩。**本次实装**：图像已改 block mask（`block_mask`/`block_mask_patches`，Lean: `block_interior_no_shortcut`），文本切 BPE 后改 span mask（§2.2.1 表） |
 | 模态 | PAC 锚定课程 | §3.4 式 (21) | `build_param_groups`/`apply_pac_schedule` | 分层 lr | 锚定 ≠ 冻结；当前 `pac_anchor_prob` 仅缩放损失权重（近似单模态投喂，§3.4.1 偏离 1） |
 | 模态 | 跨模态 $\rho$ 反饥饿 | §8.6 式 (57) | `RhoCompressor.eps_keep_modal`（模态级下界）+ `eps_keep`（token 层 ε） | 0.0 / 0.02 | **本次实装**：`_enforce_modal_keep` 强制 $\mathbb E[\mathrm{keep}_{m,t}]\ge\varepsilon_m$；默认 0 关闭（随 `rho_compress` 启用） |
 | 算子 | 谱夹层 | §3.7.3 式 (39) | [psco.py](file:///home/simon-ma/JEPA/model/psco.py) `make_contractive_a` | $\delta=0.05,\gamma=0.10$ | 上界保收敛、下界封死 $\tilde A_h\to0$；**已由 psco 冒烟验证** |
@@ -607,7 +616,7 @@ class LLaDATokenizer:
 
 2. **算子层 $h$ 的信息量约束 + 轨迹非平凡性（防线 4/5，本次已实装）。** §3.7.3 已把「塌缩本质 = 算子失去输入依赖性」说透；防线 4（对 $h$ 的 VICReg 方差+协方差）封死「$h$ 退化为常数 → $\Psi_h$ 变常值映射」，防线 5（瞬态段首步位移下界）封死「算子首步跳不动点 → 瞬态段/非线性残差失去梯度」。防线 4 作为纯正则 `psi_reg` 门控（S1/S2 全权重、目标不漂移无需薄接入）、防线 5 作为改端 `psi_change` 门控接入 §3.4.2 课程。
 
-3. **BYOL 对齐头的 collapse-free 化。** 当前 `BYOLHead` 用 LayerNorm 替代原文 BatchNorm（小 batch 更稳），却失去了 BN 的隐式反塌缩（§2.2.4「作用对象修正」已指出），靠 `align_var/align_cov/cls_readout` 补。更稳的路线是默认切 DINO（教师 EMA + centering + 锐化，`DINOHead` 已存在），centering 天然抑制教师输出塌缩；或对 `[CLS]` 投影空间加 Barlow Twins 式在线/目标互相关去对角。
+3. **BYOL 对齐头的 collapse-free 化（本次已做）。** 原 `BYOLHead` 用 LayerNorm 替代原文 BatchNorm（小 batch 更稳），却失去了 BN 的隐式反塌缩，靠 `align_var/align_cov/cls_readout` 补。现已**默认切 dinov3**（`DINOHead`：教师 EMA + centering + 锐化，centering 天然抑制教师输出塌缩，Lean: `centered_constant_is_zero`），并叠加 Gram-anchoring（锚定 dense 特征 Gram 到冻结 f₀）与高斯分布正则（(b′)，替换 relu 单边下界）。
 
 **监控判据（早发现塌缩）。** 训练中应持续观测以下诊断量（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `stats` 已输出部分）：`z_std_img/txt`（每维跨样本标准差，趋 0 = 维度塌缩）、`cross_cos_sim`（配对余弦趋 1 且方差趋 0 = 全体表征坍为一点）、`align_var/align_cov`（对齐空间健康度）、`keep_ratio_img/txt`（ρ 是否空转）、以及 [train.py](file:///home/simon-ma/JEPA/training/train.py) 的 `grad_norm`（某分支梯度为 0 是塌缩前兆）。**〔设计断言〕** 塌缩的「预警阈值」（如 `z_std < 10^{-2}` 持续 $w$ 步）尚未形式化，依赖实测。
 
@@ -1248,6 +1257,8 @@ $$D(V\mid I,T) < \min\big(D(V\mid I),\, D(V\mid T)\big). \tag{20}$$
 - **锚点硬度不同**：冻结 $Z$ 是 EMA 在 $\mu=1$ 的硬极限；JEPA 用 $\mu=0.99$ 因其目标编码器训练早期未收敛，而已收敛的 $Z$ 可放心硬冻结。
 
 最优是两阶段：先硬冻结对齐（保旧），若新模态信息"挤不进" $Z$，再放开用 EMA 式软化微调（纳新）。
+
+**对齐头的 DINOv3 Gram-anchoring 与冻结锚点。** 软对齐头默认 `dinov3`（DINO centering + 锐化，`DINOHead`，centering 居中平移等变、把常数塌缩方向映到 0，Lean: `centered_constant_is_zero`），并加 Gram-anchoring 正则：锚定 dense 特征 $Z\in\mathbb R^{L\times d}$ 的 pairwise Gram 矩阵到**冻结锚点 f₀** 的 Gram（$\mathcal{L}_{\text{Gram}}=\|X_S X_S^\top-X_G X_G^\top\|_F^2$，$X$ 为 L2 归一化 dense 特征，$X_G$ 来自 f₀）。f₀ 与 §2.2.4(d) 的 cls_readout 锚点共用同一份冻结副本——既是本段「冻结 Z = EMA 在 μ=1 的硬极限」的落地，也是 DINOv3 的「Gram teacher」。塌缩时学生 Gram 退化为全 1（秩 1），与非塌缩 f₀ 的 Gram 差异 >0，故推开塌缩（Lean: `collapsed_gram_is_ones` / `gram_anchor_excludes_collapse`）。
 
 **软对齐对照：模态间投影的五个高效机制。** 若改为模态间投影（软对齐，各模态自留潜空间），高效学习投影的五个机制：
 

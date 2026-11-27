@@ -102,10 +102,14 @@ class DINOHead(nn.Module):
 
 
 def build_alignment_head(cfg):
-    """按 cfg.alignment_method 返回对齐头；infonce 返回 None（沿用 model.proj）。"""
+    """按 cfg.alignment_method 返回对齐头；infonce 返回 None（沿用 model.proj）。
+
+    dinov3 复用 DINOHead（centering + 锐化，DINOv3 的头与 DINO 同构）；其 Gram-anchoring
+    是独立的 dense 正则（见 losses.gram_anchor_loss），不在此头内实现。
+    """
     if cfg.alignment_method == "byol":
         return BYOLHead(cfg.dim, cfg.byol_proj_dim, cfg.byol_hidden_dim, cfg.byol_ema_decay)
-    if cfg.alignment_method == "dino":
+    if cfg.alignment_method in ("dino", "dinov3"):
         return DINOHead(cfg.dim, cfg.byol_proj_dim, cfg.byol_hidden_dim,
                         cfg.byol_ema_decay, cfg.dino_center_momentum)
     return None
