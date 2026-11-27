@@ -229,64 +229,62 @@ theorem iterateSeq_eq_closedForm (M : V →ₗ[K] V) (x : Nat → V) (t : Nat) (
       rw [← Finset.sum_range_succ]
       rfl
 
-/-! ## 7. 融合方案：单尺度隐式时间 + 慢特征保护（谱正则 / 记忆门控）
+/-! ## 7. 融合方案：慢特征保护 + 快特征自反馈（§3.13）
 
-对应 math.md §3.13「多时间尺度 vs 单尺度隐式时间 + ρ压缩」的融合方案。
+以单 Z 隐式时间（§3.12 / 本文件 §6）为骨架，把多时间尺度（§3.11）的谱分离降级为
+「谱正则（慢特征保护）+ 反馈门控（快特征自反馈）」两个轻量机制，融合二者优缺：
 
-融合的取舍：
-  - 保留 §3.12 的骨架：单 Z 隐式时间（序列输入注入闭式）+ ρ压缩在 token 层；
-  - 引入 §3.11 的「留慢丢快」思想，但降级为**谱正则 / 记忆门控**（保护慢特征），
-    **不引入显式多层**（避开独立层参数陷阱与平权冗余 `pow_mul_stride`）；
-  - 舍弃 §3.11 的显式时间分层（多尺度不提升精度，只调度分辨率/记忆）。
+  - 慢特征（时间无关 / 弱相关，特征值 a_s 接近 1）：**保护** = 把特征值抬升到
+    a_s' ∈ [a_s, 1)，仍收缩（protected_slow_still_contracting），但留存被抬升
+    （slow_retention_lifted）、慢快留存差距被拉大（slow_fast_gap_widened）——
+    即「长程记忆下界抬升」。
+  - 快特征（时间相关 / 短期状态，特征值 a_f 接近 0）：**自反馈** = 门控在快子空间的修正
+    F = C ∘ Π_f；其修正随 horizon 以 a_f^k → 0 衰减（feedback_correction_decays，短期局部化），
+    且对慢子空间零扰动（feedback_spares_slow）——即「对长程无关特征影响变小（此处为 0）」。
+-/
 
-慢特征保护的数学形式：引入**静态线性门控算子** P（谱值 ∈ [0,1]，LipschitzWith 1），
-被保护算子 M̃ = P ∘ M。P 静态线性 ⟹ M̃ 仍线性 ⟹ PSCO 仿射幺半群 + 并行扫描 + 闭式卷积
-全部保留（`iterateSeq_eq_closedForm` 对任意线性 M 通用）；P 在慢方向接近恒等（保留）、
-快方向接近 0（丢弃）⟹ 谱抬升 ⟹ 长程记忆下界抬升。
+/-- 慢特征保护抬升留存（长程记忆下界逐点抬升）：把慢特征值从 a_s 抬升到 a_s'
+    （a_s ≤ a_s'）后，任意 horizon k 的留存 a_s'^k ≥ a_s^k。
+    保护 = 减缓慢维收缩、留存更多历史（对比 §3.11 的 `persistence_mono` 快/慢单调性）。 -/
+theorem slow_retention_lifted (a_s a_s' : ℝ) (has0 : 0 ≤ a_s) (hss' : a_s ≤ a_s') (k : ℕ) :
+    a_s ^ k ≤ a_s' ^ k := by
+  exact pow_le_pow_left₀ has0 hss' k
 
-本文件机械化（无 sorry / 无新增公理）：
+/-- 保护后仍收缩：受保护慢特征值 a_s' ∈ [0,1) 时其 k 次幂（k>0）仍 < 1，
+    即保护（抬升慢维特征值）不破坏框架的收缩契约（谱夹层 δ < ã_i < 1-γ，保护后仍 ρ<1）。 -/
+theorem protected_slow_still_contracting (a_s' : ℝ) (ha0 : 0 ≤ a_s') (ha1 : a_s' < 1)
+    (k : ℕ) (hk : k ≠ 0) :
+    a_s' ^ k < 1 := by
+  exact pow_lt_one₀ ha0 ha1 hk
 
-7.1 保护保持严格收缩：M̃ = P ∘ M 的 Lipschitz 常数 ≤ K（不放大）。
-7.2 保护强度单调：遗忘率 α 越小（保护越强）⟹ 被保护谱值 1-α(1-a) 越大。
-7.3 长程记忆下界抬升：谱抬升 γ_slow < γ ⟹ (1-γ_slow)^k > (1-γ)^k（严格）。
-7.4 慢/快记忆比 → ∞：a_fast < a_slow ⟹ (a_slow/a_fast)^k → atTop（长程慢方向主导）。 -/
-
-/-- **保护保持严格收缩**：门控 P（LipschitzWith 1，如软投影/遗忘门，谱值 ∈ [0,1]）
-    与收缩 M（LipschitzWith K，K<1）复合后仍是严格收缩，且常数仍 ≤ K。
-    即「保护」不放大收缩常数 ⟹ 融合不破坏 §3.7.1 的 Banach 收敛契约，
-    也不破坏 §3.7.3 的 PSCO 并行扫描（M̃ 仍可组合、可扫描）。 -/
-theorem protect_still_contracting {α : Type u} [PseudoEMetricSpace α]
-    {K : ℝ≥0} {M P : α → α}
-    (hM : LipschitzWith K M) (hP : LipschitzWith 1 P) (hK : K < 1) :
-    LipschitzWith K (P ∘ M) := by
-  simpa using (hP.comp hM)
-
-/-- **保护强度单调**：遗忘率 α 越小（保护越强）⟹ 被保护谱值 ã̃ = 1 - α(1-ã) 越大。
-    即门控系数 α ∈ [0,1] 连续调节「遗忘多少」：α=1 无保护（ã̃=ã）、α→0 完全保护（ã̃→1）。 -/
-theorem protection_spectral_mono (a : ℝ) (ha1 : a ≤ 1) {α β : ℝ} (hαβ : α ≤ β) :
-    1 - β * (1 - a) ≤ 1 - α * (1 - a) := by
-  have h1a : 0 ≤ 1 - a := by linarith
-  have hαβ' : α * (1 - a) ≤ β * (1 - a) := mul_le_mul_of_nonneg_right hαβ h1a
+/-- 保护拉大慢快留存差距：保护（a_s' ≥ a_s）后，慢留存与快留存之差被放大，
+    即「慢（保留）vs 快（衰减）」的分离被强化——快相对慢更快可忽略
+    （这是 §3.11 `fast_slow_ratio` 的「保护强化」版本，用差值而非比值，避开除法）。 -/
+theorem slow_fast_gap_widened (a_f a_s a_s' : ℝ)
+    (haf0 : 0 ≤ a_f) (hfs : a_f ≤ a_s) (hss' : a_s ≤ a_s') (k : ℕ) :
+    a_s ^ k - a_f ^ k ≤ a_s' ^ k - a_f ^ k := by
+  have hret : a_s ^ k ≤ a_s' ^ k := slow_retention_lifted a_s a_s' (le_trans haf0 hfs) hss' k
   linarith
 
-/-- **长程记忆下界抬升**：把均匀谱夹层上界 1-γ 抬到慢方向 1-γ_slow（γ_slow < γ）后，
-    慢方向单位向量的记忆保持率从 (1-γ)^k 抬升到 (1-γ_slow)^k（严格大于）。
-    即「保护慢特征」把长程记忆下界从均匀上界抬升——这是融合方案补上 §3.12 缺点的核心。 -/
-theorem memory_lower_bound_lifted (γ_slow γ : ℝ)
-    (hγs : 0 ≤ γ_slow) (hγslt : γ_slow < γ) (hγ1 : γ < 1) (k : ℕ) (hk : k ≠ 0) :
-    (1 - γ) ^ k < (1 - γ_slow) ^ k := by
-  have h_base_lt : 1 - γ < 1 - γ_slow := by linarith
-  have h_base_nonneg : 0 ≤ 1 - γ := by linarith
-  exact pow_lt_pow_left₀ h_base_lt h_base_nonneg hk
+/-- 自反馈修正随 horizon 衰减（短期局部化）：快特征值 a_f ∈ [0,1) 的反馈修正
+    a_f^k → 0，即自反馈只修正近期（短期）误差，对远期影响趋于 0
+    （与 §3.11 `fast_decay` 同构，语义上归属「快特征自反馈」）。 -/
+theorem feedback_correction_decays (a_f : ℝ) (haf0 : 0 ≤ a_f) (haf1 : a_f < 1) :
+    Filter.Tendsto (fun k : ℕ => a_f ^ k) Filter.atTop (nhds (0 : ℝ)) := by
+  exact tendsto_pow_atTop_nhds_zero_of_lt_one haf0 haf1
 
-/-- **慢/快记忆比 → ∞**：慢方向特征值 a_slow > 快方向 a_fast ⟹ (a_slow/a_fast)^k → atTop。
-    这是 `fast_slow_ratio`（快/慢比 → 0）的对偶：保护慢特征后，慢方向相对快方向的
-    长程记忆**无限主导**（比值趋于无穷），故「留慢丢快」在长时域下几乎无损。 -/
-theorem slow_fast_memory_ratio_tendsto_atTop (a_slow a_fast : ℝ)
-    (h0 : 0 ≤ a_fast) (hlt : a_fast < a_slow) :
-    Filter.Tendsto (fun k : ℕ => (a_slow / a_fast) ^ k) Filter.atTop Filter.atTop := by
-  have hpos : 0 < a_fast := lt_of_le_of_lt h0 hlt
-  have hgt1 : 1 < a_slow / a_fast := (one_lt_div hpos).mpr hlt
-  exact tendsto_pow_atTop_atTop_of_one_lt hgt1
+/-- 门控自反馈（F = C ∘ Π_f，只在快子空间作用）：修正算子 C 先经快投影 Π_f 门控，
+    故反馈只作用于快（时间相关）子空间，慢（时间无关）子空间不受影响。 -/
+def gatedFeedback (C Pf : V →ₗ[K] V) : V →ₗ[K] V :=
+  C.comp Pf
+
+/-- 门控自反馈不扰动慢特征：若 Π_f 杀死慢子空间（∀z, Pf (Ps z) = 0），
+    则门控反馈 F = C ∘ Pf 在慢子空间上恒为 0——
+    自反馈对「长程无关（时间不变）特征」零扰动（即「影响变小」，此处为 0）。
+    这是「自反馈修正短期、放过长期」的代数保证：慢特征被保护，快特征被修正。 -/
+theorem feedback_spares_slow (Ps Pf C : V →ₗ[K] V)
+    (h_kill : ∀ z : V, Pf (Ps z) = 0) (z : V) :
+    gatedFeedback C Pf (Ps z) = 0 := by
+  rw [gatedFeedback, LinearMap.comp_apply, h_kill, map_zero]
 
 end TemporalHierarchy

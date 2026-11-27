@@ -14,8 +14,8 @@ def evaluate(model, images, caption_ids, captions, tokenizer, device, num=16):
     # —— 检索：图像 [CLS] ↔ 文本 [CLS] 余弦最近邻 ——
     img_cls, img_tokens = model.image_online(img)
     txt_cls, txt_tokens = model.text_online(txt)
-    zi = F.normalize(model.proj(img_cls), dim=-1)
-    zt = F.normalize(model.proj(txt_cls), dim=-1)
+    zi = F.normalize(model.embed(img_cls), dim=-1)
+    zt = F.normalize(model.embed(txt_cls), dim=-1)
     sim = zi @ zt.t()  # [num,num]
     i2t = (sim.argmax(dim=1) == torch.arange(num, device=device)).float().mean().item()
     t2i = (sim.argmax(dim=0) == torch.arange(num, device=device)).float().mean().item()
@@ -63,8 +63,8 @@ def evaluate_real(model, gen, tokenizer, pad_id, device, num=16):
 
     img_cls, img_tokens = model.image_online(img)
     txt_cls, _ = model.text_online(txt)
-    zi = F.normalize(model.proj(img_cls), dim=-1)
-    zt = F.normalize(model.proj(txt_cls), dim=-1)
+    zi = F.normalize(model.embed(img_cls), dim=-1)
+    zt = F.normalize(model.embed(txt_cls), dim=-1)
     sim = zi @ zt.t()
     labels = torch.arange(len(imgs), device=device)
     i2t = (sim.argmax(dim=1) == labels).float().mean().item()

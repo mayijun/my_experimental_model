@@ -46,6 +46,10 @@ class BYOLHead(nn.Module):
     def forward(self, z):
         return self.predictor(self.projector(z))
 
+    def representation(self, z):
+        """在线投影器输出 g_θ(z)：检索 / 反塌缩正则共用的稳定表征（不含 predictor）。"""
+        return self.projector(z)
+
     @torch.no_grad()
     def target(self, z):
         return self.target_projector(z)
@@ -78,6 +82,10 @@ class DINOHead(nn.Module):
         self.register_buffer("center", torch.zeros(proj_dim))
 
     def forward(self, z):
+        return self.student(z)
+
+    def representation(self, z):
+        """学生投影器输出 s_θ(z)：检索 / 反塌缩正则共用的稳定表征。"""
         return self.student(z)
 
     @torch.no_grad()

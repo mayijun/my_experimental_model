@@ -99,10 +99,11 @@
 | §3.11 残余随总 horizon 单调递减：$H\le H'\Rightarrow K^{H'}\le K^H$ | `TemporalHierarchy.lean` : `residual_horizon_mono` | ✅ 已证 |
 | §3.11 迭代次数随 stride 单调递减：$s\le s'\Rightarrow K^{s'\cdot n}\le K^{s\cdot n}$ | `TemporalHierarchy.lean` : `coarse_iterations_mono` | ✅ 已证 |
 | §3.12 序列输入递推闭式：$Z^{(t)}=M^t Z^{(0)}+\Sigma_{i<t}M^{t-1-i}x_i$（Z 隐式时间轴） | `TemporalHierarchy.lean` : `iterateSeq_eq_closedForm` | ✅ 已证 |
-| §3.13 保护保持严格收缩：门控 $P$（LipschitzWith 1）复合收缩 $M$ 后仍严格收缩（常数 $\le K$） | `TemporalHierarchy.lean` : `protect_still_contracting` | ✅ 已证 |
-| §3.13 保护强度单调：遗忘率 $\alpha$ 越小 $\Rightarrow$ 被保护谱值 $1-\alpha(1-a)$ 越大 | `TemporalHierarchy.lean` : `protection_spectral_mono` | ✅ 已证 |
-| §3.13 长程记忆下界抬升：谱抬升 $\gamma_{\mathrm{slow}}<\gamma\Rightarrow(1-\gamma_{\mathrm{slow}})^k>(1-\gamma)^k$ | `TemporalHierarchy.lean` : `memory_lower_bound_lifted` | ✅ 已证 |
-| §3.13 慢/快记忆比 $\to\infty$：$a_{\mathrm{fast}}<a_{\mathrm{slow}}\Rightarrow(a_{\mathrm{slow}}/a_{\mathrm{fast}})^k\to\mathrm{atTop}$ | `TemporalHierarchy.lean` : `slow_fast_memory_ratio_tendsto_atTop` | ✅ 已证 |
+| §3.13 慢特征保护抬升留存：$0\le a_s\le a_s'\Rightarrow a_s^k\le a_s'^k$（长程记忆下界逐点抬升） | `TemporalHierarchy.lean` : `slow_retention_lifted` | ✅ 已证 |
+| §3.13 保护后仍收缩：$a_s'\in[0,1)$ 时 $a_s'^k<1$（$k>0$，不破坏 ρ<1 契约） | `TemporalHierarchy.lean` : `protected_slow_still_contracting` | ✅ 已证 |
+| §3.13 保护拉大慢快留存差距：$a_s^k-a_f^k\le a_s'^k-a_f^k$（分离强化） | `TemporalHierarchy.lean` : `slow_fast_gap_widened` | ✅ 已证 |
+| §3.13 自反馈修正随 horizon 衰减：$a_f\in[0,1)$ 时 $a_f^k\to0$（短期局部化） | `TemporalHierarchy.lean` : `feedback_correction_decays` | ✅ 已证 |
+| §3.13 门控自反馈不扰动慢特征：$\Pi_f(\Pi_s z)=0\Rightarrow (C\circ\Pi_f)(\Pi_s z)=0$ | `TemporalHierarchy.lean` : `feedback_spares_slow` | ✅ 已证 |
 
 **成熟要点（直接引用，不重证）**：
 
@@ -426,11 +427,19 @@ $$\mathcal{L}_{\text{var}} = \mathbb{E}_j\bigl[\mathrm{relu}(1-\sigma_j)\bigr],\
 
 惩罚方差过小的潜空间维度、防止维度塌缩；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `variance_loss`。其「方向与率惩罚相反」的辨析见 §4.2(d)（编号式 (36) 亦在 §4.2(d)）。
 
+> **作用对象修正（表征塌缩修复）**：上式 $\sigma_j$ 原仅作用于 token 序列 $Z\in\mathbb R^{L\times d}$（`var_weight`）。但 `[CLS]` 聚合 token 只受软对齐损失 $\mathcal L_{\text{align}}$ 监督，而 BYOL 余弦目标存在平凡退化解（所有 `[CLS]` 投影坍为同一常数、`cos=1`、损失为 0），且 BYOL 投影器以 LayerNorm 替代 BatchNorm（小 batch 更稳）后失去了 BN 的隐式反塌缩——实测 `[CLS]` 投影方差坍到 $\sim10^{-4}$ 而 token 序列 `var` 仍守住（序列受重建损失约束、`[CLS]` 不受）。故把方差正则**同时施加到对齐投影空间 $g_\theta(\texttt{CLS})$**（`align_var_weight`），直接约束塌缩发生的空间。Lean 已验证：`varPenalty(σ)=relu(1-σ)` 在 `σ=0`（常数塌缩）处取严格正值 `1`，故常数解不可能是零损失极小点（见 `lean-math/LeanMath/AntiCollapse.lean`）。
+
+**(c) VICReg 风格协方差约束（维度去冗余）**：对对齐投影表征 $Z_c\in\mathbb R^{B\times d}$（居中后）算 $d\times d$ 协方差矩阵，惩罚非对角元素的平方和
+
+$$\mathcal{L}_{\text{cov}} = \frac1d\sum_{i\neq j} C_{ij}^2,\qquad C = \frac{Z_c^\top Z_c}{B-1},$$
+
+防止不同潜维度退化为彼此冗余（维度塌缩的另一形态）；见 [losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `covariance_loss`（`align_cov_weight`）。与 (b) 合起来构成 VICReg 的完整「方差 + 去相关」正则（VICReg 三项中的两项；不变量项即 $\mathcal L_{\text{align}}$）。
+
 阶段一总目标（[losses.py](file:///home/simon-ma/JEPA/training/losses.py) 的 `forward_losses`，图文双模态各取一组）：
 
-$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}},$$
+$$\mathcal{L}_1 = \mathcal{L}_{\text{JEPA}} + \mathcal{L}_{\text{recon}} + 0.5\,\mathcal{L}_{\text{cross}} + 0.1\,\mathcal{L}_{\text{align}} + 0.1\,\mathcal{L}_{\text{var}} + 0.1\,\mathcal{L}_{\text{align-var}} + 0.1\,\mathcal{L}_{\text{align-cov}},$$
 
-其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的 InfoNCE 软对齐（§3.4）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
+其中图像/文本各自有 JEPA 余弦损失与自重建（图像 MSE、文本交叉熵）；$\mathcal{L}_{\text{cross}}$ 是跨模态硬对齐双向重建（文本 token 重建图像、图像 token 重建文本，穿过同一 $Z$）；$\mathcal{L}_{\text{align}}$ 是图像/文本 `[CLS]` 的软对齐（§3.4，默认 BYOL）；$\mathcal{L}_{\text{align-var}}$、$\mathcal{L}_{\text{align-cov}}$ 是对齐投影空间的方差/协方差正则（见 (b)(c)）。权重对应 [config.py](file:///home/simon-ma/JEPA/model/config.py) 的 `cross_weight=0.5`、`align_weight=0.1`、`var_weight=0.1`、`align_var_weight=0.1`、`align_cov_weight=0.1`。注意：这里**没有**量化器项——量化只发生在 token 读出层（§4.2(f)），$Z$ 全程连续（§2.6）。
 
 #### 2.2.5 编码器主干的候选选型（测试不理想时的备选路径）
 
@@ -1244,6 +1253,7 @@ p_m(t)=\tfrac{1-p_{\text{anchor}}(t)}{K-1}. \tag{21}$$
 3. **Flow 在主预训与独立阶段双重训练。** `flow_enabled` 时主预训 `forward_losses` 计算并累加 `flow`/`flow_cond` 损失（此时目标编码器 EMA 每步更新、仍在漂移），而 [`train.py:train_flow_stage`](file:///home/simon-ma/JEPA/training/train.py) 又在冻结 $E$ 后单独训 $v_\psi$——同一回归目标被训练两次，且主预训段目标非平稳（适定性问题，见下）。
 4. **`rho_compress` 是静态开关，「先写后压」非调度跃迁。** [`model/config.py`](file:///home/simon-ma/JEPA/model/config.py) 中 `rho_compress` 默认 `False`，是一次性布尔配置，无法在训练中按「特征空间成型后开启」自动切换；本节描述的 warmup 需手工改配置重启。
 5. **共享主干与 PAC 非对称假设冲突。** 中型档默认 `share_trunk=True`（`model/config.py` PRESETS），图文共享同一条产生 $Z$ 的主干；PAC「冻结已有 $Z$ / 锚编码器低 lr 新编码器高 lr」假设锚与新模态各有独立 $Z$ 生产者，共享主干下 $Z$ 的生产者是同一个，只有薄前端接口私有——「冻结 $Z$」在共享主干下退化为「已有薄接口低 lr、新薄接口高 lr」。
+6. **检索/评测嵌入头与训练头曾不一致（已修复）。** 检索评测原用 `model.proj`（仅 InfoNCE 路径训练），默认 `byol` 下该头不被训练 → 检索恒随机；现已统一为 `model.embed`（[jepa.py](file:///home/simon-ma/JEPA/model/jepa.py)），byol/dino 用对齐投影器输出 $g_\theta(\texttt{CLS})$，与训练侧反塌缩正则（§2.2.4(c)）共用同一表征，训练与评测口径一致。
 
 #### 3.4.2 平稳性门控的多阶段课程（Stationarity-Gated Curriculum）
 
@@ -2046,59 +2056,48 @@ $$Z^{(t)} \;=\; M^t Z^{(0)} \;+\;\sum_{i<t} M^{\,t-1-i}\, x_i$$
 
 ---
 
-## 3.13 融合方案：单尺度隐式时间 + 慢特征保护（谱正则 / 记忆门控）
+## 3.13 融合方案：单 Z 骨架上的「慢特征保护 + 快特征自反馈」（§3.11 × §3.12 取舍）
 
-> **动机**。§3.11（多时间尺度）与 §3.12（单尺度隐式时间 + ρ压缩）各有优缺点：§3.11 提供可判定的「留慢丢快」（`fast_slow_ratio`），但 `pow_mul_stride` 揭示其**平权权衡**——残余只依赖总 horizon $s\cdot n$，多尺度**不提升精度**，且独立层有参数陷阱、跨模态对齐需额外定义；§3.12 用最小代价让单一 $Z$ 隐式承载时间、天然跨模态对齐、GPU 最友好，但**长程记忆受均匀收缩谱限制、慢特征无保护**。本节给出融合方案：**以 §3.12 为骨架，把 §3.11 的谱分离降级为谱正则 / 记忆门控（保护慢特征），不引入显式多层**。
+> **问题**：§3.11（多时间尺度）提供谱定向「留慢丢快」，但有 `pow_mul_stride` 的平权权衡（不提升精度）+ 独立层参数陷阱；§3.12（单尺度隐式时间 + ρ压缩）简洁、跨模态对齐、GPU 友善，但记忆受收缩谱 $K^t$ 限制、无谱定向丢弃。能否**取二者之长**——在单 Z 隐式时间骨架上，用「慢特征保护」抬升长程记忆下界，用「快特征门控自反馈」修正短期误差且不扰动长期不变特征？本节给出数学形式，核心已在 Lean 机械化。
 
-### 3.13.1 取舍：保留什么、舍弃什么
+### 3.13.1 语义约定：慢 = 时间不变，快 = 时间相关
 
-| 维度 | 保留 | 舍弃 |
-|---|---|---|
-| 骨架 | §3.12 单 $Z$ 隐式时间（序列输入注入闭式） | §3.11 显式多层 |
-| 有损位置 | ρ压缩在 token 层（§2.6），$Z$ 全程连续无损 | — |
-| 谱分离 | §3.11「留慢丢快」→ 降级为**谱正则** | §3.11 独立层参数、平权冗余 |
-| 对齐 | 文字→时间不变不动点 $z^*$（§3.12.2） | 无需定义文字对应哪一层 |
+本框架把 §3.11 的「慢/快谱分离」按**语义**重标注（这是融合的关键取舍，不再是单纯的大/小特征值）：
 
-关键决策：**不引入显式多层**。`pow_mul_stride` 已证多尺度不提升精度（残余只依赖 $s\cdot n$），多层价值仅剩「分辨率/记忆调度」，无精度收益；把「留慢丢快」直接做成**谱正则**即可避开这个平权冗余与独立层参数陷阱。
+- **慢特征**（时间无关 / 弱相关）：特征值 $a_s$ 接近 $1$，$M$ 作用近似保持 → 对应时间不变摘要 $z^*=(I-M)^{-1}\bar x$（§3.12.2 的文字对齐目标）。
+- **快特征**（时间相关 / 短期状态）：特征值 $a_f$ 接近谱夹层下界 $\delta$，$M$ 作用快速衰减 → 对应瞬态运动 / 变化（§3.12.2 的时间变分量 $\sum M^{t-1-i}(x_i-\bar x)$）。
 
-### 3.13.2 慢特征保护的数学形式：静态线性门控
+### 3.13.2 机制一：慢特征保护（谱正则，抬升长程记忆下界）
 
-§3.12 缺点的根因：均匀谱夹层 $\delta<\tilde a_i<1-\gamma$（§3.7.3）把**所有**维度（含慢特征）压到 $1-\gamma$ 以下，慢方向长程记忆被不必要削弱。
+**数学形式**：把慢维特征值从 $a_s$ 抬升到 $a_s'\in[a_s,1)$，快维不变。即受保护转移 $\tilde M$ 的慢维特征值为 $a_s'$（仍 $<1$，保收缩）。这是**对角缩放**（保护算子 $P$ 在慢维 $\times(a_s'/a_s)\ge1$，快维 $\times1$），不引入新维度、不改算子结构。
 
-**保护的形式**：引入**静态线性门控算子** $P:Z\to Z$（谱值 $\in[0,1]$，Lipschitz 常数 $\le1$），被保护算子
+- **`slow_retention_lifted`**：$0\le a_s\le a_s'\Rightarrow a_s^k\le a_s'^k$。逐 horizon $k$ 的留存下界由 $a_s^k$ **抬升**到 $a_s'^k$——这正是「长程记忆下界抬升」的逐点形式：慢特征不再被收缩以 $a_s^k\to0$ 湮灭，而是以更慢的 $a_s'^k$ 留存。
+- **`protected_slow_still_contracting`**：$a_s'\in[0,1)$ 时 $a_s'^k<1$（$k>0$）——保护**不破坏**框架收缩契约（谱夹层 $\delta<\tilde a_i<1-\gamma$ 仍成立，§3.7.1 的 ρ<1 不动点收敛继续成立）。
+- **`slow_fast_gap_widened`**：$a_s^k-a_f^k\le a_s'^k-a_f^k$——慢（保留）与快（衰减）的留存**差距被拉大**，分离被强化（§3.11 `fast_slow_ratio` 的「保护强化」版本，用差值避开除法）。
 
-$$\widetilde M \;=\; P\circ M$$
+**取舍**：$a_s'\to1^-$ 换取更长留存，但减慢收敛（§3.11 `rate_mono_stride` 的对偶）。$a_s'$ 是「留存 vs 收敛」的旋钮——这是把 §3.11 的「分层」降级为「单旋钮谱正则」的关键：不引入独立层，只调一个超参。
 
-- **$P$ 在慢方向接近恒等**（$P_j\approx1$，保留慢特征）；
-- **$P$ 在快方向接近 0**（$P_j\approx0$，丢弃 / 加速遗忘快特征）。
+### 3.13.3 机制二：快特征门控自反馈（修正短期、放过长期）
 
-**为什么必须静态线性**：$P$ 与输入 $x_t$、时间 $t$ 无关 ⟹ $\widetilde M$ 仍是**线性映射** ⟹ §3.7.3 的仿射幺半群、PSCO 并行扫描、以及 §3.12 的闭式卷积 `iterateSeq_eq_closedForm` 对 $\widetilde M$ **自动成立**（该定理对任意线性 $M$ 通用）。若 $P$ 输入依赖 / 非线性，$\widetilde M$ 非仿射，整个扫描结构被破坏。这是「融合不破坏框架」的硬约束。
+**数学形式**：自反馈修正 $F=C\circ\Pi_f$（`gatedFeedback`）——修正算子 $C$ 先经快投影 $\Pi_f$ **门控**，只作用于快（时间相关）子空间。
 
-**等价形式（遗忘门）**：对角化后，慢方向被保护谱值 $\tilde{\tilde a}_j = 1-\alpha_j(1-\tilde a_j)$，其中 $\alpha_j\in[0,1]$ 是遗忘率。$\alpha_j=1$ 无保护（$\tilde{\tilde a}_j=\tilde a_j$），$\alpha_j\to0$ 完全保护（$\tilde{\tilde a}_j\to1$）。`protection_spectral_mono` 保证 $\alpha$ 越小（保护越强）⟹ 被保护谱值越大 ⟹ 长程记忆越强。这就是把 §3.11 的「留慢丢快」从「显式分层」降级为「逐维谱重加权」。
+- **`feedback_spares_slow`**：$\forall z,\ \Pi_f(\Pi_s z)=0\Rightarrow F(\Pi_s z)=0$——自反馈对慢（时间无关）特征**零扰动**，长程不变内容被保护。
+- **`feedback_correction_decays`**：快特征值 $a_f\in[0,1)$ 的修正 $a_f^k\to0$——自反馈的修正**随 horizon 衰减**，只修正近期（短期）误差。
 
-### 3.13.3 长程记忆下界抬升（已 Lean 机械化）
+**自反馈模式（§5）下的行为**：短期误差（快子空间）被 $F$ 及时修正；长期不变特征（慢子空间）不受 $F$ 扰动——即「自反馈修正短期、对长程无关特征影响变小（此处为 0）」。这满足用户对自反馈的期望：短期闭环校正有效，长期不变内容不被误改。
 
-四个定理（[`TemporalHierarchy.lean`](file:///home/simon-ma/JEPA/lean-math/LeanMath/TemporalHierarchy.lean) 第 7 节）：
+### 3.13.4 融合的正确性（对照框架契约）
 
-1. **保护不破坏收缩** `protect_still_contracting`：门控 $P$（LipschitzWith 1）复合收缩 $M$（LipschitzWith $K$，$K<1$）后仍严格收缩、常数 $\le K$。⟹ Banach 收敛契约不变，PSCO 扫描仍合法。
-2. **保护强度单调** `protection_spectral_mono`：$\alpha\le\beta\Rightarrow 1-\beta(1-a)\le1-\alpha(1-a)$（$a\le1$）。遗忘率连续调节谱值。
-3. **长程记忆下界抬升（核心）** `memory_lower_bound_lifted`：$\gamma_{\mathrm{slow}}<\gamma<1$ 且 $\gamma_{\mathrm{slow}}\ge0$ ⟹ $(1-\gamma)^k<(1-\gamma_{\mathrm{slow}})^k$（$k\ne0$）。把均匀谱上界 $1-\gamma$ 抬到慢方向 $1-\gamma_{\mathrm{slow}}$，慢方向长程记忆保持率**严格抬升**。
-4. **慢/快记忆比 → ∞** `slow_fast_memory_ratio_tendsto_atTop`：$a_{\mathrm{fast}}<a_{\mathrm{slow}}$ ⟹ $(a_{\mathrm{slow}}/a_{\mathrm{fast}})^k\to\mathrm{atTop}$。这是 `fast_slow_ratio`（快/慢 → 0）的**对偶**——保护后慢方向相对快方向**无限主导**，故「留慢丢快」在长时域下几乎无损。
-
-**结论**：融合方案在保留 §3.12 全部优点（单 $Z$、隐式时间、跨模态对齐、GPU 单路扫描、$Z$ 无损）的同时，补上 §3.12 缺失的「慢特征保护」——通过谱重加权把慢方向长程记忆下界从 $(1-\gamma)^k$ **抬升**到 $(1-\gamma_{\mathrm{slow}})^k$，且不引入多层、不破坏收缩与扫描结构。
-
-### 3.13.4 GPU 特性与契约兼容
-
-1. **GPU 友善**：$P$ 是静态对角 / 低秩线性算子，$P\circ M$ 的谱重加权是逐元素乘加，`torch.compile` 自动融合；闭式卷积仍走 §3.7.3 的 $O(\log T)$ 关联扫描，无新增 kernel。
-2. **契约兼容**：$Z$ 单一、连续、不量化；有损只在 token 层 ρ压缩；$P$ 静态线性不引入新模态边界。
-3. **可扩展性（三档规模）**：$P$ 与 $M$ 同维，参数量 $O(d)$（对角）或 $O(d^2)$（低秩）；只调谱值 $\alpha_j$ 与维度 $d$，不改变 §3.12 的调用约定，与三档规模规则同构。
+1. **Z 连续、单空间**：保护与门控都是线性算子，不引入量化 / 新维度，时间仍折进递归（§3.12），有损只在 token 层 ρ压缩——符合 §2.6「有损只在 token 层」契约。
+2. **收缩契约**：保护后仍 $\rho<1$（`protected_slow_still_contracting`），不动点收敛（§3.7.1）与 PSCO 关联扫描（§3.7.3）全部继承。
+3. **反塌缩**：快维自反馈修正衰减但不恒零（`feedback_correction_decays`），慢维保护防时间不变摘要被收缩湮灭（`slow_retention_lifted`）——双向反塌缩。
+4. **GPU 友善**：保护 = 逐元素对角缩放，门控 = 投影复合，均为逐元素 / 线性算子，可并入 PSCO 扫描的幺半群元（§3.7.3），无新增 kernel，`torch.compile` 自动融合。
 
 ### 3.13.5 边界（诚实）
 
-1. **「$P$ 在慢/快方向取值」依赖对角 / 低秩骨架**（§3.7.3 线性化假设）：真实非线性残差 $r_h(Z)$ 的谱分离是否同样干净需实验验证（同 §3.11.1 / §3.7.3 边界声明）。
-2. **门控系数 $\alpha_j$ 的学习**：由「可预测性→保留/丢弃」判据驱动（§3.11.1 的 horizon 化显著性），其互信息版本仍是分析命题、未形式化（§8.4 同款）；代数核心（谱单调 + 保护保持收缩 + 记忆下界抬升）已机械化。
-3. **谱抬升与谱夹层上界 $1-\gamma$ 的张力**：抬升慢方向到 $1-\gamma_{\mathrm{slow}}$ 需满足 $\gamma_{\mathrm{slow}}>0$（仍严格收缩、保证收敛）；$\gamma_{\mathrm{slow}}$ 的下界由反塌缩要求决定（同 §3.7.3 谱夹层下界 $\delta$ 的角色），二者是同一超参的两种约束，其最优值未在此机械化。
-4. **ρ压缩与谱保护的交互**：ρ压缩是 token 层「写后压」（步内冗余），谱保护是 $Z$ 层「谱重加权」（跨步记忆），二者作用于不同粒度（同 §3.11.5 第 3 点）；其联合最优（何时压 token、何时保护谱）未形式化。
+- 慢/快谱分裂阈值 $\theta$、保护强度 $a_s'$ 是超参（分析 / 设计量，未机械化）；Lean 已证的是其**代数核心**：留存抬升（`slow_retention_lifted`）、差距拉大（`slow_fast_gap_widened`）、修正衰减（`feedback_correction_decays`）、慢子空间零扰动（`feedback_spares_slow`）。
+- 投影 $\Pi_s/\Pi_f$ 的「正交分解」只用假设 $\forall z,\ \Pi_f(\Pi_s z)=0$ 表达（`feedback_spares_slow`），未要求具体正交基——保持抽象、与任意实现解耦。
+- 融合是**单 Z 骨架上的谱正则 + 门控**，**不是**引入显式多层（避开 §3.11 独立层参数陷阱），也**不是**丢弃快特征（快维仍存在并承载短期状态，只由自反馈修正、由 ρ压缩在 token 层有损）。
 
 ---
 

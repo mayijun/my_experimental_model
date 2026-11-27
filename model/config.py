@@ -48,7 +48,9 @@ class MJEPAConfig:
     recon_weight: float = 1.0
     cross_weight: float = 0.5   # 硬对齐（双向重建）权重。
     align_weight: float = 0.1   # InfoNCE 软对齐权重。
-    var_weight: float = 0.1     # VICReg 方差正则（防塌缩）。
+    var_weight: float = 0.1     # VICReg 方差正则（防塌缩，作用在 token 序列上）。
+    align_var_weight: float = 0.1  # VICReg 方差正则（作用在对齐投影空间 g_θ(CLS)，防 CLS 投影塌缩；§2.2.4(b) 式 36 的补足）。
+    align_cov_weight: float = 0.1  # VICReg 协方差正则（惩罚对齐投影维度间协方差，防维度冗余塌缩）。
 
     # —— 对齐方法（§3.4）：跨模态软对齐信号源，默认 BYOL（无负样本、无 batch 依赖）——
     alignment_method: str = "byol"   # infonce（软对齐兜底）/ byol（默认）/ dino

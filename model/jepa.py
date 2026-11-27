@@ -149,6 +149,13 @@ class MultimodalJEPA(nn.Module):
 
         return forward_losses(self, img, txt, pad_id, mask_id, step=step, total_steps=total_steps)
 
+    def embed(self, cls):
+        """检索 / 评测用的对齐嵌入：byol/dino 用在线投影器输出 g_θ(CLS)（训练过的头），
+        infonce 用 proj。与训练侧反塌缩正则（losses.py）共用同一表征，统一训练与评测口径。"""
+        if self.align is not None:
+            return self.align.representation(cls)
+        return self.proj(cls)
+
     def _forward_flow(self, img, txt):
         """Flow 阶段前向（§4.1.2/§4.2(e)）：冻结目标编码器采样 z_1，回归 v_ψ。"""
         if self.velocity is None:

@@ -31,6 +31,15 @@ def variance_loss(z):
     return F.relu(1.0 - std).mean()
 
 
+def covariance_loss(z):
+    """VICReg 协方差约束（§2.2.4 补）：惩罚维度间协方差，防维度冗余塌缩。z: [B,d]。"""
+    z = z - z.mean(dim=0, keepdim=True)
+    cov = (z.t() @ z) / max(z.size(0) - 1, 1)
+    d = cov.size(0)
+    off = cov - torch.diag(cov.diag())
+    return (off ** 2).sum() / d
+
+
 def rate_loss(b):
     """码率正则（§2.6 式 665）：b_t 的均值 = 每 token 平均码率预算 R。
 
@@ -266,6 +275,15 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     align = alignment_loss(model, img_cls, txt_cls)
     var_i = variance_loss(img_tokens)
     var_t = variance_loss(txt_tokens)
+    # —— 对齐投影空间反塌缩（VICReg 方差 + 协方差）：补足 BYOL 余弦 + LayerNorm 无防塌缩的缺口。
+    #    math.md §2.2.4 ⚠️ 已指出「余弦 + EMA 不能排除塌缩」；CLS 只受对齐损失监督，故需在此显式正则。
+    align_var = torch.zeros((), device=device)
+    align_cov = torch.zeros((), device=device)
+    if model.align is not None or cfg.alignment_method == "infonce":
+        align_rep_i = model.embed(img_cls)
+        align_rep_t = model.embed(txt_cls)
+        align_var = 0.5 * (variance_loss(align_rep_i) + variance_loss(align_rep_t))
+        align_cov = 0.5 * (covariance_loss(align_rep_i) + covariance_loss(align_rep_t))
     rate = torch.zeros((), device=device)
     if cfg.rho_compress and img_b is not None and txt_b is not None:
         rate = 0.5 * (img_b.mean() + txt_b.mean())
@@ -324,6 +342,8 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         + cfg.cross_weight * mscale(recon_img_cross, recon_txt_cross)
         + cfg.align_weight * align
         + cfg.var_weight * mscale(var_i, var_t)
+        + cfg.align_var_weight * align_var
+        + cfg.align_cov_weight * align_cov
         + cfg.rho_rate_weight * rate * gates["rate"]
         + cfg.cross_mask_weight * mscale(cross_pred_i, cross_pred_t)
         + cfg.psi_readout_weight * mscale(psi_readout_i, psi_readout_t) * gates["psi_read"]
@@ -338,6 +358,7 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
         "jepa": jepa_i + jepa_t, "recon_img": recon_img_self, "recon_txt": recon_txt_self,
         "cross_img": recon_img_cross, "cross_txt": recon_txt_cross,
         "align": align, "var": var_i + var_t, "rate": rate,
+        "align_var": align_var, "align_cov": align_cov,
         "cross_pred": cross_pred_i + cross_pred_t,
         "psi_readout": psi_readout_i + psi_readout_t,
         "psi_var": psi_var_i + psi_var_t,
@@ -368,8 +389,8 @@ def forward_losses(model, img, txt, pad_id, mask_id, step=None, total_steps=None
     stats["z_mean_txt"] = txt_tokens.detach().abs().mean()
     # 3) 跨模态对齐强度（非 loss）：proj 空间配对余弦均值，直观判断软对齐是否收敛。
     with torch.no_grad():
-        zi = F.normalize(model.proj(img_cls.detach()), dim=-1)
-        zt = F.normalize(model.proj(txt_cls.detach()), dim=-1)
+        zi = F.normalize(model.embed(img_cls.detach()), dim=-1)
+        zt = F.normalize(model.embed(txt_cls.detach()), dim=-1)
         stats["cross_cos_sim"] = (zi * zt).sum(-1).mean()
     # 4) 交叉掩码实际比例：递进调度 ρ_mask(t)，诊断 cross_pred 曲线变化时需对照。
     if cm_ratio is not None:
